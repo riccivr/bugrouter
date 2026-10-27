@@ -41,6 +41,30 @@ func TestClientUserAgent(t *testing.T) {
 	}
 }
 
+func TestClientGetBytesPlainText(t *testing.T) {
+	const content = "Contact: https://example.com/security\n"
+	var capturedAccept string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedAccept = r.Header.Get("Accept")
+		w.Header().Set("Content-Type", "text/plain")
+		fmt.Fprint(w, content)
+	}))
+	defer srv.Close()
+
+	client := NewClient(time.Second)
+	data, err := client.GetBytes(context.Background(), srv.URL, "text/plain")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if capturedAccept != "text/plain" {
+		t.Errorf("Accept = %q, want text/plain", capturedAccept)
+	}
+	if string(data) != content {
+		t.Errorf("body = %q, want %q", string(data), content)
+	}
+}
+
 func TestClientTimeoutCancellation(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(150 * time.Millisecond)

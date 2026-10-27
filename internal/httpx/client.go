@@ -51,18 +51,20 @@ func NewClient(timeout time.Duration) *Client {
 	}
 }
 
-// GetJSON executes a GET request against the target URL and decodes the JSON payload.
-func (c *Client) GetJSON(ctx context.Context, url string, dst any) error {
+// GetBytes executes a GET request against the target URL and returns the response body bytes.
+func (c *Client) GetBytes(ctx context.Context, url string, accept string) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return fmt.Errorf("create request for %s: %w", url, err)
+		return nil, fmt.Errorf("create request for %s: %w", url, err)
 	}
 	req.Header.Set("User-Agent", version.UserAgent())
-	req.Header.Set("Accept", "application/json")
+	if accept != "" {
+		req.Header.Set("Accept", accept)
+	}
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("execute request to %s: %w", url, err)
+		return nil, fmt.Errorf("execute request to %s: %w", url, err)
 	}
 	defer resp.Body.Close()
 
@@ -74,7 +76,7 @@ func (c *Client) GetJSON(ctx context.Context, url string, dst any) error {
 		} else if t, parseErr := http.ParseTime(retryAfter); parseErr == nil {
 			dur = time.Until(t)
 		}
-		return &RateLimitError{
+		return nil, &RateLimitError{
 			StatusCode: resp.StatusCode,
 			RetryAfter: retryAfter,
 			Duration:   dur,
@@ -82,18 +84,27 @@ func (c *Client) GetJSON(ctx context.Context, url string, dst any) error {
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		return fmt.Errorf("unexpected status %d from %s", resp.StatusCode, url)
+		return nil, fmt.Errorf("unexpected status %d from %s", resp.StatusCode, url)
 	}
 
 	reader := io.LimitReader(resp.Body, c.maxBodyBytes+1)
 	data, err := io.ReadAll(reader)
 	if err != nil {
-		return fmt.Errorf("read response from %s: %w", url, err)
+		return nil, fmt.Errorf("read response from %s: %w", url, err)
 	}
 	if int64(len(data)) > c.maxBodyBytes {
-		return fmt.Errorf("response from %s exceeds max body limit (%d bytes)", url, c.maxBodyBytes)
+		return nil, fmt.Errorf("response from %s exceeds max body limit (%d bytes)", url, c.maxBodyBytes)
 	}
 
+	return data, nil
+}
+
+// GetJSON executes a GET request against the target URL and decodes the JSON payload.
+func (c *Client) GetJSON(ctx context.Context, url string, dst any) error {
+	data, err := c.GetBytes(ctx, url, "application/json")
+	if err != nil {
+		return err
+	}
 	if err := json.Unmarshal(data, dst); err != nil {
 		return fmt.Errorf("decode response from %s: %w", url, err)
 	}

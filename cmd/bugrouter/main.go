@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/riccivr/bugrouter/internal/cache"
+	"github.com/riccivr/bugrouter/internal/httpx"
 	"github.com/riccivr/bugrouter/internal/resolver"
 	"github.com/riccivr/bugrouter/internal/version"
 )
@@ -29,6 +31,7 @@ func main() {
 	case "resolve":
 		fs := flag.NewFlagSet("resolve", flag.ContinueOnError)
 		jsonOut := fs.Bool("json", false, "output structured JSON")
+		noCache := fs.Bool("no-cache", false, "disable disk cache")
 		if err := fs.Parse(os.Args[2:]); err != nil {
 			os.Exit(1)
 		}
@@ -38,17 +41,43 @@ func main() {
 			fmt.Fprintln(os.Stderr, "error: resolve requires a target query")
 			os.Exit(1)
 		}
+		query := args[0]
 
-		wf := resolver.NewWaterfall(
-			0,
-			resolver.NewDirectProbe(),
-			resolver.NewWorkspaceProbe("."),
-			resolver.NewOSPackageProbe(),
-		)
-		target, err := wf.Resolve(context.Background(), args[0])
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "error: %v\n", err)
-			os.Exit(1)
+		var target *resolver.Target
+		var store *cache.Store
+		if !*noCache {
+			store = cache.NewStore("", 0)
+			var cached resolver.Target
+			hit, err := store.Get(query, &cached)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "warning: cache read failed: %v\n", err)
+			} else if hit {
+				target = &cached
+			}
+		}
+
+		if target == nil {
+			httpClient := httpx.NewClient(0)
+			wf := resolver.NewWaterfall(
+				0,
+				resolver.NewDirectProbe(),
+				resolver.NewWorkspaceProbe("."),
+				resolver.NewOSPackageProbe(),
+				resolver.NewRegistryProbe(httpClient, resolver.DefaultRegistryEndpoints()),
+				resolver.NewWebDomainProbe(httpClient),
+			)
+			resolved, err := wf.Resolve(context.Background(), query)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "error: %v\n", err)
+				os.Exit(1)
+			}
+			target = resolved
+
+			if !*noCache && store != nil {
+				if err := store.Put(query, target); err != nil {
+					fmt.Fprintf(os.Stderr, "warning: cache write failed: %v\n", err)
+				}
+			}
 		}
 
 		if *jsonOut {
@@ -84,7 +113,7 @@ func main() {
 func printUsage() {
 	fmt.Fprintln(os.Stderr, "Usage: bugrouter <command> [arguments]")
 	fmt.Fprintln(os.Stderr, "Commands:")
-	fmt.Fprintln(os.Stderr, "  version              Print version information")
-	fmt.Fprintln(os.Stderr, "  resolve [--json] <q> Resolve software target to bug tracker")
-	fmt.Fprintln(os.Stderr, "  mcp                  Start MCP server")
+	fmt.Fprintln(os.Stderr, "  version                     Print version information")
+	fmt.Fprintln(os.Stderr, "  resolve [--json] [--no-cache] <q> Resolve software target to bug tracker")
+	fmt.Fprintln(os.Stderr, "  mcp                         Start MCP server")
 }
