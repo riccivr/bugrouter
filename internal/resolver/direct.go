@@ -44,6 +44,27 @@ func (p *DirectProbe) Resolve(ctx context.Context, query string) (*Target, error
 
 	tracker, normRepo := ClassifyTracker("", "", queryURL)
 
+	// Generic web URLs (e.g. https://stripe.com) must fall through to WebDomainProbe unless
+	// they match a known forge tracker or explicitly target an issues/bugs endpoint.
+	if strings.HasPrefix(trimmed, "http://") || strings.HasPrefix(trimmed, "https://") {
+		isKnownTracker := tracker.Protocol == ProtocolGitHub ||
+			tracker.Protocol == ProtocolGitLab ||
+			tracker.Protocol == ProtocolCodeberg ||
+			tracker.Protocol == ProtocolSourceHut ||
+			tracker.Protocol == ProtocolBugzilla ||
+			tracker.Protocol == ProtocolDebbugs
+
+		hasIssuePath := strings.Contains(queryURL, "/issues") || strings.Contains(queryURL, "/bugs")
+
+		if !isKnownTracker && !hasIssuePath {
+			return nil, ErrNotFound
+		}
+	}
+
+	if tracker.URL == "" && tracker.Email == "" {
+		return nil, ErrNotFound
+	}
+
 	canonicalName := trimmed
 	if normRepo != "" {
 		parts := strings.Split(strings.TrimRight(normRepo, "/"), "/")

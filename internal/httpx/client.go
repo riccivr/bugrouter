@@ -3,8 +3,10 @@ package httpx
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strconv"
 	"time"
@@ -34,21 +36,126 @@ func (e *RateLimitError) Error() string {
 	return fmt.Sprintf("rate limited (status %d)", e.StatusCode)
 }
 
-// Client wraps an http.Client with enforced bounds on timeouts and payload sizes.
+// Client wraps an http.Client with enforced bounds on timeouts, payload sizes, and network targets.
 type Client struct {
-	httpClient   *http.Client
-	maxBodyBytes int64
+	httpClient        *http.Client
+	maxBodyBytes      int64
+	allowPrivateHosts bool
 }
 
-// NewClient returns a bounded Client with the specified request timeout.
+func isBlockedIP(ip net.IP) bool {
+	return ip.IsLoopback() ||
+		ip.IsLinkLocalUnicast() ||
+		ip.IsLinkLocalMulticast() ||
+		ip.IsPrivate() ||
+		ip.IsUnspecified()
+}
+
+// NewClient returns a bounded Client blocking private and loopback networks by default.
 func NewClient(timeout time.Duration) *Client {
 	if timeout <= 0 {
 		timeout = defaultTimeout
 	}
-	return &Client{
-		httpClient:   &http.Client{Timeout: timeout},
-		maxBodyBytes: defaultMaxBodyBytes,
+
+	c := &Client{
+		maxBodyBytes:      defaultMaxBodyBytes,
+		allowPrivateHosts: false,
 	}
+
+	dialer := &net.Dialer{
+		Timeout: timeout,
+	}
+
+	transport := &http.Transport{
+		Proxy:                 http.ProxyFromEnvironment,
+		ForceAttemptHTTP2:     true,
+		MaxIdleConns:          100,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+	}
+
+	// Guard against SSRF and DNS rebinding by inspecting resolved IP addresses before dialing.
+	transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		host, port, err := net.SplitHostPort(addr)
+		if err != nil {
+			return nil, fmt.Errorf("parse address %s: %w", addr, err)
+		}
+
+		if !c.allowPrivateHosts {
+			parsedIP := net.ParseIP(host)
+			if parsedIP != nil {
+				if isBlockedIP(parsedIP) {
+					return nil, fmt.Errorf("blocked connection to private or loopback address %s", parsedIP)
+				}
+				return dialer.DialContext(ctx, network, addr)
+			}
+
+			ips, lookupErr := net.DefaultResolver.LookupIP(ctx, "ip", host)
+			if lookupErr != nil {
+				return nil, fmt.Errorf("resolve host %s: %w", host, lookupErr)
+			}
+			if len(ips) == 0 {
+				return nil, fmt.Errorf("no IP addresses found for host %s", host)
+			}
+
+			for _, ip := range ips {
+				if isBlockedIP(ip) {
+					return nil, fmt.Errorf("blocked connection to private or loopback address %s", ip)
+				}
+			}
+
+			targetAddr := net.JoinHostPort(ips[0].String(), port)
+			return dialer.DialContext(ctx, network, targetAddr)
+		}
+
+		return dialer.DialContext(ctx, network, addr)
+	}
+
+	c.httpClient = &http.Client{
+		Timeout:   timeout,
+		Transport: transport,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 5 {
+				return errors.New("stopped after 5 redirects")
+			}
+
+			if !c.allowPrivateHosts {
+				host := req.URL.Hostname()
+				parsedIP := net.ParseIP(host)
+				if parsedIP != nil {
+					if isBlockedIP(parsedIP) {
+						return fmt.Errorf("blocked connection to private or loopback address %s", parsedIP)
+					}
+				} else {
+					ips, lookupErr := net.DefaultResolver.LookupIP(req.Context(), "ip", host)
+					if lookupErr == nil {
+						for _, ip := range ips {
+							if isBlockedIP(ip) {
+								return fmt.Errorf("blocked connection to private or loopback address %s", ip)
+							}
+						}
+					}
+				}
+			}
+
+			return nil
+		},
+	}
+
+	return c
+}
+
+// NewTestClient returns a bounded Client permitting loopback hosts for unit testing.
+func NewTestClient(timeout time.Duration) *Client {
+	c := NewClient(timeout)
+	c.allowPrivateHosts = true
+	return c
+}
+
+// AllowPrivateHosts toggles whether connection to private, loopback, or link-local hosts is permitted.
+func (c *Client) AllowPrivateHosts(allow bool) {
+	c.allowPrivateHosts = allow
 }
 
 // GetBytes executes a GET request against the target URL and returns the response body bytes.

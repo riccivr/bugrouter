@@ -75,34 +75,57 @@ func parseRepository(raw json.RawMessage) string {
 	return ""
 }
 
+func isValidNPMPackageName(q string) bool {
+	if q == "" || q == "." || q == ".." || strings.Contains(q, "\\") {
+		return false
+	}
+
+	if strings.HasPrefix(q, "@") {
+		parts := strings.Split(q, "/")
+		if len(parts) != 2 {
+			return false
+		}
+		scope := strings.TrimPrefix(parts[0], "@")
+		pkg := parts[1]
+		if scope == "" || pkg == "" || strings.HasPrefix(scope, ".") || strings.HasPrefix(pkg, ".") {
+			return false
+		}
+		return true
+	}
+
+	return !strings.Contains(q, "/") && !strings.HasPrefix(q, ".")
+}
+
 // Resolve inspects local node_modules and go.mod files for dependency resolution.
 func (w *WorkspaceProbe) Resolve(ctx context.Context, query string) (*Target, error) {
 	if strings.Contains(query, "..") || strings.HasPrefix(query, "/") || strings.HasPrefix(query, "\\") {
 		return nil, ErrNotFound
 	}
 
-	// 1. Node.js check: node_modules/<query>/package.json
-	pkgPath := filepath.Join(w.rootDir, "node_modules", query, "package.json")
-	if data, err := os.ReadFile(pkgPath); err == nil {
-		var pkg nodePackage
-		if err := json.Unmarshal(data, &pkg); err == nil {
-			bugsURL, bugsEmail := parseBugs(pkg.Bugs)
-			repoURL := parseRepository(pkg.Repository)
-			tracker, normRepo := ClassifyTracker(bugsURL, bugsEmail, repoURL)
+	// 1. Node.js check: node_modules/<query>/package.json (only for valid package names to prevent directory traversal)
+	if isValidNPMPackageName(query) {
+		pkgPath := filepath.Join(w.rootDir, "node_modules", query, "package.json")
+		if data, err := os.ReadFile(pkgPath); err == nil {
+			var pkg nodePackage
+			if err := json.Unmarshal(data, &pkg); err == nil {
+				bugsURL, bugsEmail := parseBugs(pkg.Bugs)
+				repoURL := parseRepository(pkg.Repository)
+				tracker, normRepo := ClassifyTracker(bugsURL, bugsEmail, repoURL)
 
-			canonicalName := pkg.Name
-			if canonicalName == "" {
-				canonicalName = query
+				canonicalName := pkg.Name
+				if canonicalName == "" {
+					canonicalName = query
+				}
+
+				return &Target{
+					Query:         query,
+					CanonicalName: canonicalName,
+					LocalVersion:  pkg.Version,
+					Layer:         LayerWorkspace,
+					RepositoryURL: normRepo,
+					Tracker:       tracker,
+				}, nil
 			}
-
-			return &Target{
-				Query:         query,
-				CanonicalName: canonicalName,
-				LocalVersion:  pkg.Version,
-				Layer:         LayerWorkspace,
-				RepositoryURL: normRepo,
-				Tracker:       tracker,
-			}, nil
 		}
 	}
 
@@ -111,6 +134,9 @@ func (w *WorkspaceProbe) Resolve(ctx context.Context, query string) (*Target, er
 	if file, err := os.Open(goModPath); err == nil {
 		defer file.Close()
 
+		var inRequireBlock bool
+		var inIgnoredBlock bool
+
 		scanner := bufio.NewScanner(file)
 		for scanner.Scan() {
 			line := scanner.Text()
@@ -118,33 +144,87 @@ func (w *WorkspaceProbe) Resolve(ctx context.Context, query string) (*Target, er
 				line = line[:idx]
 			}
 			line = strings.TrimSpace(line)
-			if line == "" || strings.HasPrefix(line, "module ") || strings.HasPrefix(line, "go ") {
+			if line == "" {
 				continue
 			}
 
-			fields := strings.Fields(line)
-			var modPath, version string
-			if fields[0] == "require" && len(fields) >= 3 {
-				modPath = fields[1]
-				version = fields[2]
-			} else if len(fields) >= 2 && fields[0] != "(" && fields[0] != ")" && fields[0] != "replace" {
-				modPath = fields[0]
-				version = fields[1]
+			if inIgnoredBlock {
+				if line == ")" {
+					inIgnoredBlock = false
+				}
+				continue
 			}
 
-			if modPath != "" && (modPath == query || strings.HasSuffix(modPath, "/"+query)) {
-				if strings.HasPrefix(modPath, "github.com/") ||
-					strings.HasPrefix(modPath, "gitlab.com/") ||
-					strings.HasPrefix(modPath, "codeberg.org/") {
-					tracker, normRepo := ClassifyTracker("", "", "https://"+modPath)
-					return &Target{
-						Query:         query,
-						CanonicalName: query,
-						LocalVersion:  version,
-						Layer:         LayerWorkspace,
-						RepositoryURL: normRepo,
-						Tracker:       tracker,
-					}, nil
+			if inRequireBlock {
+				if line == ")" {
+					inRequireBlock = false
+					continue
+				}
+
+				// Strip potential replacement targets
+				if idx := strings.Index(line, "=>"); idx != -1 {
+					line = line[:idx]
+				}
+
+				fields := strings.Fields(line)
+				if len(fields) >= 2 {
+					modPath := fields[0]
+					version := fields[1]
+					if modPath == query || strings.HasSuffix(modPath, "/"+query) {
+						if strings.HasPrefix(modPath, "github.com/") ||
+							strings.HasPrefix(modPath, "gitlab.com/") ||
+							strings.HasPrefix(modPath, "codeberg.org/") {
+							tracker, normRepo := ClassifyTracker("", "", "https://"+modPath)
+							return &Target{
+								Query:         query,
+								CanonicalName: query,
+								LocalVersion:  version,
+								Layer:         LayerWorkspace,
+								RepositoryURL: normRepo,
+								Tracker:       tracker,
+							}, nil
+						}
+					}
+				}
+				continue
+			}
+
+			if line == "require (" {
+				inRequireBlock = true
+				continue
+			}
+
+			if strings.HasPrefix(line, "replace (") ||
+				strings.HasPrefix(line, "exclude (") ||
+				strings.HasPrefix(line, "retract (") ||
+				strings.HasPrefix(line, "tool (") {
+				inIgnoredBlock = true
+				continue
+			}
+
+			if strings.HasPrefix(line, "require ") {
+				if idx := strings.Index(line, "=>"); idx != -1 {
+					line = line[:idx]
+				}
+				fields := strings.Fields(line)
+				if len(fields) >= 3 {
+					modPath := fields[1]
+					version := fields[2]
+					if modPath == query || strings.HasSuffix(modPath, "/"+query) {
+						if strings.HasPrefix(modPath, "github.com/") ||
+							strings.HasPrefix(modPath, "gitlab.com/") ||
+							strings.HasPrefix(modPath, "codeberg.org/") {
+							tracker, normRepo := ClassifyTracker("", "", "https://"+modPath)
+							return &Target{
+								Query:         query,
+								CanonicalName: query,
+								LocalVersion:  version,
+								Layer:         LayerWorkspace,
+								RepositoryURL: normRepo,
+								Tracker:       tracker,
+							}, nil
+						}
+					}
 				}
 			}
 		}

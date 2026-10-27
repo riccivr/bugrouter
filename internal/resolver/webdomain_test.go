@@ -30,7 +30,7 @@ func TestWebDomainProbe(t *testing.T) {
 		defer srv.Close()
 
 		host := strings.TrimPrefix(srv.URL, "http://")
-		client := httpx.NewClient(time.Second)
+		client := httpx.NewTestClient(time.Second)
 		probe := NewWebDomainProbe(client)
 		probe.scheme = "http"
 
@@ -50,6 +50,15 @@ func TestWebDomainProbe(t *testing.T) {
 		if target.Tracker.URL != "https://github.com/stripe/stripe-node/issues" {
 			t.Errorf("Tracker.URL = %q, want issues URL", target.Tracker.URL)
 		}
+
+		// Also verify domain resolution when input includes https:// scheme prefix
+		targetWithScheme, err := probe.Resolve(context.Background(), "https://"+host+"/")
+		if err != nil {
+			t.Fatalf("unexpected error resolving with scheme: %v", err)
+		}
+		if targetWithScheme.CanonicalName != "Stripe" {
+			t.Errorf("CanonicalName = %q, want Stripe", targetWithScheme.CanonicalName)
+		}
 	})
 
 	t.Run("security.txt fallback", func(t *testing.T) {
@@ -64,7 +73,7 @@ func TestWebDomainProbe(t *testing.T) {
 		defer srv.Close()
 
 		host := strings.TrimPrefix(srv.URL, "http://")
-		client := httpx.NewClient(time.Second)
+		client := httpx.NewTestClient(time.Second)
 		probe := NewWebDomainProbe(client)
 		probe.scheme = "http"
 
@@ -87,7 +96,7 @@ func TestWebDomainProbe(t *testing.T) {
 	})
 
 	t.Run("invalid queries", func(t *testing.T) {
-		client := httpx.NewClient(time.Second)
+		client := httpx.NewTestClient(time.Second)
 		probe := NewWebDomainProbe(client)
 
 		badQueries := []string{"nodot", "with space.com", "user@domain.com", "domain.com/path", "..", ".domain.com", "domain.com."}
@@ -106,7 +115,7 @@ func TestWebDomainProbe(t *testing.T) {
 		defer srv.Close()
 
 		host := strings.TrimPrefix(srv.URL, "http://")
-		client := httpx.NewClient(time.Second)
+		client := httpx.NewTestClient(time.Second)
 		probe := NewWebDomainProbe(client)
 		probe.scheme = "http"
 

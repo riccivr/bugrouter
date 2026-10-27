@@ -3,8 +3,10 @@ package resolver
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"strings"
 )
@@ -31,15 +33,35 @@ func defaultCmdRunner(ctx context.Context, name string, args ...string) ([]byte,
 	const maxOutputBytes = 256 * 1024
 	limitedReader := io.LimitReader(stdout, maxOutputBytes+1)
 	out, readErr := io.ReadAll(limitedReader)
-	waitErr := cmd.Wait()
 	if readErr != nil {
+		if cmd.Process != nil {
+			if killErr := cmd.Process.Kill(); killErr != nil && !errors.Is(killErr, os.ErrProcessDone) {
+				// Process termination is non-fatal if already dead.
+			}
+		}
+		waitErr := cmd.Wait()
+		if waitErr != nil {
+			return nil, fmt.Errorf("read %s stdout: %w; wait: %v", name, readErr, waitErr)
+		}
 		return nil, fmt.Errorf("read %s stdout: %w", name, readErr)
 	}
+
+	// Kill child process before calling Wait if output exceeds limit to avoid pipe deadlock.
 	if int64(len(out)) > maxOutputBytes {
+		if cmd.Process != nil {
+			if killErr := cmd.Process.Kill(); killErr != nil && !errors.Is(killErr, os.ErrProcessDone) {
+				// Process termination is non-fatal if already dead.
+			}
+		}
+		waitErr := cmd.Wait()
+		if waitErr != nil {
+			return nil, fmt.Errorf("%s output exceeded %d bytes limit", name, maxOutputBytes)
+		}
 		return nil, fmt.Errorf("%s output exceeded %d bytes limit", name, maxOutputBytes)
 	}
-	if waitErr != nil {
-		return nil, fmt.Errorf("execute %s: %w", name, waitErr)
+
+	if err := cmd.Wait(); err != nil {
+		return nil, fmt.Errorf("execute %s: %w", name, err)
 	}
 	return out, nil
 }

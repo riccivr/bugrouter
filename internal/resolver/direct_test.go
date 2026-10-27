@@ -67,8 +67,8 @@ func TestDirectProbe(t *testing.T) {
 		})
 	}
 
-	// Non-matching query
-	for _, nonMatch := range []string{"ripgrep", "curl", "grep", "package"} {
+	// Non-matching query and generic web root
+	for _, nonMatch := range []string{"ripgrep", "curl", "grep", "package", "https://stripe.com"} {
 		_, err := probe.Resolve(context.Background(), nonMatch)
 		if !errors.Is(err, ErrNotFound) {
 			t.Errorf("expected ErrNotFound for %q, got: %v", nonMatch, err)

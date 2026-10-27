@@ -43,22 +43,27 @@ type wellKnownBugReport struct {
 
 // Resolve attempts discovery via .well-known/bug-report and RFC 9116 security.txt.
 func (w *WebDomainProbe) Resolve(ctx context.Context, query string) (*Target, error) {
-	if !strings.Contains(query, ".") || strings.ContainsAny(query, " \t\r\n@/") {
+	domain := strings.TrimSpace(query)
+	domain = strings.TrimPrefix(domain, "https://")
+	domain = strings.TrimPrefix(domain, "http://")
+	domain = strings.TrimRight(domain, "/")
+
+	if !strings.Contains(domain, ".") || strings.ContainsAny(domain, " \t\r\n@/") {
 		return nil, ErrNotFound
 	}
-	if strings.HasPrefix(query, ".") || strings.HasSuffix(query, ".") || strings.Contains(query, "..") {
+	if strings.HasPrefix(domain, ".") || strings.HasSuffix(domain, ".") || strings.Contains(domain, "..") {
 		return nil, ErrNotFound
 	}
 
 	// 1. Check .well-known/bug-report endpoint
-	bugReportURL := fmt.Sprintf("%s://%s/.well-known/bug-report", w.scheme, query)
+	bugReportURL := fmt.Sprintf("%s://%s/.well-known/bug-report", w.scheme, domain)
 	var report wellKnownBugReport
 	if err := w.client.GetJSON(ctx, bugReportURL, &report); err == nil {
 		tracker, normRepo := ClassifyTracker(report.BugsURL, report.BugsEmail, report.RepositoryURL)
 		if isValidTracker(tracker) {
 			canonicalName := report.CanonicalName
 			if canonicalName == "" {
-				canonicalName = query
+				canonicalName = domain
 			}
 			return &Target{
 				Query:         query,
@@ -74,7 +79,7 @@ func (w *WebDomainProbe) Resolve(ctx context.Context, query string) (*Target, er
 	}
 
 	// 2. Fallback to RFC 9116 .well-known/security.txt
-	secURL := fmt.Sprintf("%s://%s/.well-known/security.txt", w.scheme, query)
+	secURL := fmt.Sprintf("%s://%s/.well-known/security.txt", w.scheme, domain)
 	data, err := w.client.GetBytes(ctx, secURL, "text/plain")
 	if err == nil {
 		scanner := bufio.NewScanner(bytes.NewReader(data))
@@ -103,7 +108,7 @@ func (w *WebDomainProbe) Resolve(ctx context.Context, query string) (*Target, er
 			}
 		}
 		if scanErr := scanner.Err(); scanErr != nil {
-			return nil, fmt.Errorf("scan security.txt for %s: %w", query, scanErr)
+			return nil, fmt.Errorf("scan security.txt for %s: %w", domain, scanErr)
 		}
 
 		if bugsURL != "" || bugsEmail != "" {
@@ -111,7 +116,7 @@ func (w *WebDomainProbe) Resolve(ctx context.Context, query string) (*Target, er
 			if isValidTracker(tracker) {
 				return &Target{
 					Query:         query,
-					CanonicalName: query,
+					CanonicalName: domain,
 					Layer:         LayerWebDomain,
 					RepositoryURL: normRepo,
 					Tracker:       tracker,

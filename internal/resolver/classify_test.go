@@ -139,6 +139,13 @@ func TestClassifyTracker(t *testing.T) {
 			wantProto: ProtocolSourceHut,
 			wantURL:   "https://todo.sr.ht/~emersion/gammastep",
 		},
+		{
+			name:        "spoofed github url in query parameter",
+			bugsURL:     "https://evil.com/redirect?url=https://github.com/owner/repo",
+			wantProto:   ProtocolWebURL,
+			wantURL:     "https://evil.com/redirect?url=https://github.com/owner/repo",
+			wantNormRep: "",
+		},
 	}
 
 	for _, tc := range tests {

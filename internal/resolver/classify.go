@@ -2,6 +2,7 @@ package resolver
 
 import (
 	"fmt"
+	"net/url"
 	"strings"
 )
 
@@ -85,83 +86,86 @@ func ClassifyTracker(bugsURL, bugsEmail, repoURL string) (TrackerInfo, string) {
 	}
 	targetURL = strings.TrimRight(targetURL, "/")
 
-	if strings.Contains(targetURL, "github.com/") {
-		idx := strings.Index(targetURL, "github.com/")
-		path := targetURL[idx+len("github.com/"):]
-		parts := strings.Split(path, "/")
-		if len(parts) >= 2 {
-			owner := parts[0]
-			repo := strings.TrimSuffix(parts[1], ".git")
-			return TrackerInfo{
-				Protocol: ProtocolGitHub,
-				URL:      fmt.Sprintf("https://github.com/%s/%s/issues", owner, repo),
-				Email:    bugsEmail,
-			}, normRepo
-		}
-	}
-
-	if strings.Contains(targetURL, "gitlab.") || strings.Contains(targetURL, "/gitlab/") {
-		if bugsURL != "" && (strings.Contains(bugsURL, "/-/issues") || strings.HasSuffix(bugsURL, "/issues")) {
-			return TrackerInfo{
-				Protocol: ProtocolGitLab,
-				URL:      bugsURL,
-				Email:    bugsEmail,
-			}, normRepo
+	if targetURL != "" {
+		parseURL := targetURL
+		if !strings.HasPrefix(parseURL, "http://") && !strings.HasPrefix(parseURL, "https://") {
+			parseURL = "https://" + parseURL
 		}
 
-		base := normRepo
-		if base == "" {
-			base = targetURL
+		if u, err := url.Parse(parseURL); err == nil && u != nil {
+			host := strings.ToLower(u.Hostname())
+			pathSegments := strings.FieldsFunc(u.Path, func(r rune) bool { return r == '/' })
+
+			// Strict hostname matching prevents parameter spoofing (e.g. evil.com?u=github.com/a/b).
+			if host == "github.com" && len(pathSegments) >= 2 {
+				owner := pathSegments[0]
+				repo := strings.TrimSuffix(pathSegments[1], ".git")
+				return TrackerInfo{
+					Protocol: ProtocolGitHub,
+					URL:      fmt.Sprintf("https://github.com/%s/%s/issues", owner, repo),
+					Email:    bugsEmail,
+				}, normRepo
+			}
+
+			if host == "gitlab.com" || strings.HasPrefix(host, "gitlab.") {
+				if bugsURL != "" && (strings.Contains(bugsURL, "/-/issues") || strings.HasSuffix(bugsURL, "/issues")) {
+					return TrackerInfo{
+						Protocol: ProtocolGitLab,
+						URL:      bugsURL,
+						Email:    bugsEmail,
+					}, normRepo
+				}
+
+				base := normRepo
+				if base == "" {
+					base = targetURL
+				}
+				base = strings.TrimSuffix(base, ".git")
+				base = strings.TrimRight(base, "/")
+				if !strings.HasSuffix(base, "/issues") {
+					base = base + "/issues"
+				}
+				return TrackerInfo{
+					Protocol: ProtocolGitLab,
+					URL:      base,
+					Email:    bugsEmail,
+				}, normRepo
+			}
+
+			if host == "codeberg.org" && len(pathSegments) >= 2 {
+				owner := pathSegments[0]
+				repo := strings.TrimSuffix(pathSegments[1], ".git")
+				return TrackerInfo{
+					Protocol: ProtocolCodeberg,
+					URL:      fmt.Sprintf("https://codeberg.org/%s/%s/issues", owner, repo),
+					Email:    bugsEmail,
+				}, normRepo
+			}
+
+			if host == "sr.ht" || strings.HasSuffix(host, ".sr.ht") {
+				return TrackerInfo{
+					Protocol: ProtocolSourceHut,
+					URL:      targetURL,
+					Email:    bugsEmail,
+				}, normRepo
+			}
+
+			if strings.HasPrefix(host, "bugzilla.") || strings.Contains(u.Path, "show_bug.cgi") || strings.Contains(u.Path, "enter_bug.cgi") {
+				return TrackerInfo{
+					Protocol: ProtocolBugzilla,
+					URL:      targetURL,
+					Email:    bugsEmail,
+				}, normRepo
+			}
+
+			if host == "bugs.debian.org" || host == "debbugs.gnu.org" {
+				return TrackerInfo{
+					Protocol: ProtocolDebbugs,
+					URL:      targetURL,
+					Email:    bugsEmail,
+				}, normRepo
+			}
 		}
-		base = strings.TrimSuffix(base, ".git")
-		base = strings.TrimRight(base, "/")
-		if !strings.HasSuffix(base, "/issues") {
-			base = base + "/issues"
-		}
-		return TrackerInfo{
-			Protocol: ProtocolGitLab,
-			URL:      base,
-			Email:    bugsEmail,
-		}, normRepo
-	}
-
-	if strings.Contains(targetURL, "codeberg.org/") {
-		idx := strings.Index(targetURL, "codeberg.org/")
-		path := targetURL[idx+len("codeberg.org/"):]
-		parts := strings.Split(path, "/")
-		if len(parts) >= 2 {
-			owner := parts[0]
-			repo := strings.TrimSuffix(parts[1], ".git")
-			return TrackerInfo{
-				Protocol: ProtocolCodeberg,
-				URL:      fmt.Sprintf("https://codeberg.org/%s/%s/issues", owner, repo),
-				Email:    bugsEmail,
-			}, normRepo
-		}
-	}
-
-	if strings.Contains(targetURL, "sr.ht/") {
-		return TrackerInfo{
-			Protocol: ProtocolSourceHut,
-			URL:      targetURL,
-			Email:    bugsEmail,
-		}, normRepo
-	}
-
-	if strings.Contains(targetURL, "bugzilla.") || strings.Contains(targetURL, "show_bug.cgi") || strings.Contains(targetURL, "enter_bug.cgi") {
-		return TrackerInfo{
-			Protocol: ProtocolBugzilla,
-			URL:      targetURL,
-			Email:    bugsEmail,
-		}, normRepo
-	}
-
-	if strings.Contains(targetURL, "bugs.debian.org") || strings.Contains(targetURL, "debbugs.gnu.org") {
-		return TrackerInfo{
-			Protocol: ProtocolDebbugs,
-			URL:      targetURL,
-			Email:    bugsEmail,
-		}, normRepo
 	}
 
 	if bugsEmail != "" {

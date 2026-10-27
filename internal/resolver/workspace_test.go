@@ -112,6 +112,14 @@ require (
 	github.com/BurntSushi/ripgrep v1.4.1
 	gitlab.com/gnachman/iterm2 v0.1.0 // indirect
 )
+
+replace (
+	github.com/replaced/module v1.0.0 => github.com/fork/module v1.0.1
+)
+
+exclude (
+	github.com/excluded/module v1.0.0
+)
 `
 	if err := os.WriteFile(filepath.Join(tempDir, "go.mod"), []byte(goModContent), 0644); err != nil {
 		t.Fatalf("write go.mod: %v", err)
@@ -142,14 +150,22 @@ require (
 	if t2.Tracker.Protocol != ProtocolGitLab {
 		t.Errorf("Protocol = %q, want gitlab", t2.Tracker.Protocol)
 	}
+
+	// Replaced and excluded modules must not be resolved
+	for _, query := range []string{"module", "replaced", "excluded"} {
+		_, err := probe.Resolve(context.Background(), query)
+		if !errors.Is(err, ErrNotFound) {
+			t.Errorf("expected ErrNotFound for %q, got: %v", query, err)
+		}
+	}
 }
 
 func TestWorkspaceProbeSecurityAndNotFound(t *testing.T) {
 	tempDir := t.TempDir()
 	probe := NewWorkspaceProbe(tempDir)
 
-	// Path traversal attempts
-	for _, bad := range []string{"../etc", "/bin/sh", "\\windows\\system32", "a/../../b"} {
+	// Path traversal attempts and invalid package names
+	for _, bad := range []string{"../etc", "/bin/sh", "\\windows\\system32", "a/../../b", ".", "@scope/a/b"} {
 		_, err := probe.Resolve(context.Background(), bad)
 		if !errors.Is(err, ErrNotFound) {
 			t.Errorf("expected ErrNotFound for %q, got: %v", bad, err)

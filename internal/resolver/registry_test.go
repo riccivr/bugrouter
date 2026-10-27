@@ -46,13 +46,33 @@ func TestRegistryProbe(t *testing.T) {
 				}
 			}`)
 
+		case "/delayed/latest":
+			time.Sleep(30 * time.Millisecond)
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{
+				"name": "delayed-npm",
+				"repository": "https://github.com/npm-org/delayed.git",
+				"bugs": "https://github.com/npm-org/delayed/issues"
+			}`)
+
+		case "/pypi/delayed/json":
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{
+				"info": {
+					"name": "fast-pypi",
+					"project_urls": {
+						"Source": "https://github.com/pypi-org/fast"
+					}
+				}
+			}`)
+
 		default:
 			http.NotFound(w, r)
 		}
 	}))
 	defer srv.Close()
 
-	client := httpx.NewClient(time.Second)
+	client := httpx.NewTestClient(time.Second)
 	endpoints := RegistryEndpoints{
 		NPMBaseURL:    srv.URL,
 		PyPIBaseURL:   srv.URL,
@@ -117,6 +137,17 @@ func TestRegistryProbe(t *testing.T) {
 		}
 		if target.Tracker.URL != "https://github.com/serde-rs/serde/issues" {
 			t.Errorf("Tracker.URL = %q, want serde issues URL", target.Tracker.URL)
+		}
+	})
+
+	t.Run("concurrent priority ordering", func(t *testing.T) {
+		// Even though PyPI responds faster, npm (priority index 0) must take precedence.
+		target, err := probe.Resolve(context.Background(), "delayed")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if target.CanonicalName != "delayed-npm" {
+			t.Errorf("CanonicalName = %q, want delayed-npm (npm priority)", target.CanonicalName)
 		}
 	})
 

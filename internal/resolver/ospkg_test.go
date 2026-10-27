@@ -3,7 +3,9 @@ package resolver
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestOSPackageProbeBinaryGrep(t *testing.T) {
@@ -118,5 +120,19 @@ func TestOSPackageProbeUnknown(t *testing.T) {
 		if !errors.Is(err, ErrNotFound) {
 			t.Errorf("expected ErrNotFound for %q, got: %v", bad, err)
 		}
+	}
+}
+
+func TestDefaultCmdRunnerPipeDeadlock(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	// "yes" produces continuous output far exceeding 256 KiB
+	_, err := defaultCmdRunner(ctx, "yes")
+	if err == nil {
+		t.Fatal("expected error on oversized output, got nil")
+	}
+	if !strings.Contains(err.Error(), "output exceeded") {
+		t.Fatalf("unexpected error message: %v", err)
 	}
 }

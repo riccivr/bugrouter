@@ -23,7 +23,7 @@ func TestClientUserAgent(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	client := NewClient(time.Second)
+	client := NewTestClient(time.Second)
 	var dst map[string]string
 	if err := client.GetJSON(context.Background(), srv.URL, &dst); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -51,7 +51,7 @@ func TestClientGetBytesPlainText(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	client := NewClient(time.Second)
+	client := NewTestClient(time.Second)
 	data, err := client.GetBytes(context.Background(), srv.URL, "text/plain")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -65,6 +65,23 @@ func TestClientGetBytesPlainText(t *testing.T) {
 	}
 }
 
+func TestClientBlocksLoopbackByDefault(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintln(w, `{"status":"leaked"}`)
+	}))
+	defer srv.Close()
+
+	client := NewClient(time.Second)
+	var dst map[string]string
+	err := client.GetJSON(context.Background(), srv.URL, &dst)
+	if err == nil {
+		t.Fatal("expected error blocking loopback host, got nil")
+	}
+	if !strings.Contains(err.Error(), "blocked connection to private or loopback address") {
+		t.Fatalf("unexpected error message: %v", err)
+	}
+}
+
 func TestClientTimeoutCancellation(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(150 * time.Millisecond)
@@ -72,7 +89,7 @@ func TestClientTimeoutCancellation(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	client := NewClient(30 * time.Millisecond)
+	client := NewTestClient(30 * time.Millisecond)
 	var dst map[string]string
 	err := client.GetJSON(context.Background(), srv.URL, &dst)
 	if err == nil {
@@ -88,7 +105,7 @@ func TestClientRateLimitError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	client := NewClient(time.Second)
+	client := NewTestClient(time.Second)
 	var dst map[string]string
 	err := client.GetJSON(context.Background(), srv.URL, &dst)
 	if err == nil {
@@ -118,7 +135,7 @@ func TestClientOversizedPayload(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	client := NewClient(time.Second)
+	client := NewTestClient(time.Second)
 	client.maxBodyBytes = 64
 
 	var dst map[string]string
