@@ -39,7 +39,12 @@ func main() {
 			os.Exit(1)
 		}
 
-		wf := resolver.NewWaterfall(0)
+		wf := resolver.NewWaterfall(
+			0,
+			resolver.NewDirectProbe(),
+			resolver.NewWorkspaceProbe("."),
+			resolver.NewOSPackageProbe(),
+		)
 		target, err := wf.Resolve(context.Background(), args[0])
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
@@ -57,6 +62,9 @@ func main() {
 		}
 
 		fmt.Printf("Canonical Name: %s\n", target.CanonicalName)
+		if target.LocalVersion != "" {
+			fmt.Printf("Local Version:  %s\n", target.LocalVersion)
+		}
 		fmt.Printf("Layer:          %s\n", target.Layer)
 		fmt.Printf("Protocol:       %s\n", target.Tracker.Protocol)
 		if target.Tracker.URL != "" {

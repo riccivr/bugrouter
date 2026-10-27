@@ -85,8 +85,16 @@ func (c *Client) GetJSON(ctx context.Context, url string, dst any) error {
 		return fmt.Errorf("unexpected status %d from %s", resp.StatusCode, url)
 	}
 
-	reader := io.LimitReader(resp.Body, c.maxBodyBytes)
-	if err := json.NewDecoder(reader).Decode(dst); err != nil {
+	reader := io.LimitReader(resp.Body, c.maxBodyBytes+1)
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		return fmt.Errorf("read response from %s: %w", url, err)
+	}
+	if int64(len(data)) > c.maxBodyBytes {
+		return fmt.Errorf("response from %s exceeds max body limit (%d bytes)", url, c.maxBodyBytes)
+	}
+
+	if err := json.Unmarshal(data, dst); err != nil {
 		return fmt.Errorf("decode response from %s: %w", url, err)
 	}
 	return nil
