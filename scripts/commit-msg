@@ -1,0 +1,34 @@
+#!/bin/sh
+set -e
+
+msg_file="$1"
+if [ ! -f "$msg_file" ]; then
+    echo "commit-msg error: message file '$msg_file' not found" >&2
+    exit 1
+fi
+
+first_line=$(head -n 1 "$msg_file" | tr -d '\r')
+
+pattern='^(feat|fix|perf|refactor|test|docs|build|ci|chore)\((cli|mcp|resolver|introspector|scrubber|adapter|cloud|core)\)!?: [a-z0-9][^\.]*$'
+
+if ! printf "%s" "$first_line" | grep -Eq "$pattern"; then
+    echo "commit-msg error: invalid commit message format" >&2
+    echo "Expected: <type>(<scope>): <summary>" >&2
+    echo "Types:    feat|fix|perf|refactor|test|docs|build|ci|chore" >&2
+    echo "Scopes:   cli|mcp|resolver|introspector|scrubber|adapter|cloud|core" >&2
+    echo "Summary must start with lowercase letter or number, with no trailing period." >&2
+    echo "Got: $first_line" >&2
+    exit 1
+fi
+
+line_len=$(printf "%s" "$first_line" | wc -m)
+if [ "$line_len" -gt 72 ]; then
+    # Allow the exact bootstrap commit mandated by Task Spec #01
+    if [ "$first_line" != "feat(core): bootstrap module, constitution, httpx client, and resolver contract" ]; then
+        echo "commit-msg error: commit subject exceeds 72 characters ($line_len chars)" >&2
+        echo "Subject: $first_line" >&2
+        exit 1
+    fi
+fi
+
+exit 0
