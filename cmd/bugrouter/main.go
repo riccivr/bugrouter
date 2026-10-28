@@ -21,6 +21,7 @@ func resolveTarget(query string, noCache bool) (*resolver.Target, error) {
 	httpClient := httpx.NewClient(0)
 	wf := resolver.NewWaterfall(
 		0,
+		resolver.NewOrgCloudProbe(),
 		resolver.NewDirectProbe(),
 		resolver.NewWorkspaceProbe("."),
 		resolver.NewOSPackageProbe(),
@@ -49,6 +50,7 @@ func main() {
 		cacheStore := cache.NewStore("", 0)
 		wf := resolver.NewWaterfall(
 			0,
+			resolver.NewOrgCloudProbe(),
 			resolver.NewDirectProbe(),
 			resolver.NewWorkspaceProbe("."),
 			resolver.NewOSPackageProbe(),
