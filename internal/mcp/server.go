@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/riccivr/bugrouter/internal/adapter"
+	"github.com/riccivr/bugrouter/internal/cloud"
 	"github.com/riccivr/bugrouter/internal/httpx"
 	"github.com/riccivr/bugrouter/internal/introspector"
 	"github.com/riccivr/bugrouter/internal/resolver"
@@ -59,20 +60,29 @@ type Server struct {
 	resolver     *resolver.Waterfall
 	draftStore   *adapter.DraftStore
 	introspector *introspector.Introspector
+	forgeClient  adapter.ForgeSubmitter
 }
 
 // NewServer creates an MCP server backed by the provided waterfall and draft store.
 func NewServer(wf *resolver.Waterfall, store *adapter.DraftStore) *Server {
+	httpClient := httpx.NewClient(0)
 	return &Server{
 		resolver:     wf,
 		draftStore:   store,
-		introspector: introspector.New(httpx.NewClient(0)),
+		introspector: introspector.New(httpClient),
+		forgeClient:  cloud.NewForgeClient(httpClient),
 	}
 }
 
 // WithIntrospector overrides the introspector client for testing or custom caching.
 func (s *Server) WithIntrospector(intro *introspector.Introspector) *Server {
 	s.introspector = intro
+	return s
+}
+
+// WithForgeClient overrides the default forge submitter for testing or custom authentication.
+func (s *Server) WithForgeClient(f adapter.ForgeSubmitter) *Server {
+	s.forgeClient = f
 	return s
 }
 
@@ -261,6 +271,33 @@ func (s *Server) toolDefinitions() []map[string]any {
 				"required": []string{"query", "title"},
 			},
 		},
+		{
+			"name":        "list_staged_drafts",
+			"description": "Lists all staged bug drafts pending review or approval.",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"status": map[string]any{
+						"type":        "string",
+						"description": "Optional filter by draft status (e.g. pending_review, submitted, discarded)",
+					},
+				},
+			},
+		},
+		{
+			"name":        "approve_draft",
+			"description": "Approves and submits a staged draft to its upstream tracker via authenticated OAuth connectors.",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"id": map[string]any{
+						"type":        "string",
+						"description": "Unique staged draft ID to approve and submit",
+					},
+				},
+				"required": []string{"id"},
+			},
+		},
 	}
 }
 
@@ -424,6 +461,133 @@ func (s *Server) handleToolCall(ctx context.Context, params toolCallParams) tool
 		if err != nil {
 			return toolCallResult{
 				Content: []toolContent{{Type: "text", Text: fmt.Sprintf("marshal draft: %v", err)}},
+				IsError: true,
+			}
+		}
+		return toolCallResult{
+			Content: []toolContent{{Type: "text", Text: string(data)}},
+			IsError: false,
+		}
+
+	case "list_staged_drafts":
+		var args struct {
+			Status string `json:"status"`
+		}
+		if len(params.Arguments) > 0 && string(params.Arguments) != "{}" && string(params.Arguments) != "null" {
+			if err := json.Unmarshal(params.Arguments, &args); err != nil {
+				return toolCallResult{
+					Content: []toolContent{{Type: "text", Text: fmt.Sprintf("parse arguments: %v", err)}},
+					IsError: true,
+				}
+			}
+		}
+
+		if s.draftStore == nil {
+			return toolCallResult{
+				Content: []toolContent{{Type: "text", Text: "draft store not configured"}},
+				IsError: true,
+			}
+		}
+
+		drafts, err := s.draftStore.List()
+		if err != nil {
+			return toolCallResult{
+				Content: []toolContent{{Type: "text", Text: fmt.Sprintf("list drafts: %v", err)}},
+				IsError: true,
+			}
+		}
+
+		if args.Status != "" {
+			var filtered []*adapter.StagedDraft
+			for _, d := range drafts {
+				if strings.EqualFold(d.Status, args.Status) {
+					filtered = append(filtered, d)
+				}
+			}
+			drafts = filtered
+		}
+		if drafts == nil {
+			drafts = []*adapter.StagedDraft{}
+		}
+
+		data, err := json.MarshalIndent(drafts, "", "  ")
+		if err != nil {
+			return toolCallResult{
+				Content: []toolContent{{Type: "text", Text: fmt.Sprintf("marshal drafts: %v", err)}},
+				IsError: true,
+			}
+		}
+		return toolCallResult{
+			Content: []toolContent{{Type: "text", Text: string(data)}},
+			IsError: false,
+		}
+
+	case "approve_draft":
+		var args struct {
+			ID string `json:"id"`
+		}
+		if err := json.Unmarshal(params.Arguments, &args); err != nil {
+			return toolCallResult{
+				Content: []toolContent{{Type: "text", Text: fmt.Sprintf("parse arguments: %v", err)}},
+				IsError: true,
+			}
+		}
+		if strings.TrimSpace(args.ID) == "" {
+			return toolCallResult{
+				Content: []toolContent{{Type: "text", Text: "id parameter cannot be empty"}},
+				IsError: true,
+			}
+		}
+
+		if s.draftStore == nil {
+			return toolCallResult{
+				Content: []toolContent{{Type: "text", Text: "draft store not configured"}},
+				IsError: true,
+			}
+		}
+
+		draft, err := s.draftStore.Get(args.ID)
+		if err != nil {
+			return toolCallResult{
+				Content: []toolContent{{Type: "text", Text: fmt.Sprintf("get draft %s: %v", args.ID, err)}},
+				IsError: true,
+			}
+		}
+
+		var issueURL string
+		if s.forgeClient != nil {
+			issueURL, err = s.forgeClient.Submit(ctx, draft)
+			if err != nil {
+				return toolCallResult{
+					Content: []toolContent{{Type: "text", Text: fmt.Sprintf("submit draft %s: %v", args.ID, err)}},
+					IsError: true,
+				}
+			}
+		} else if draft.SubmissionURL != "" {
+			issueURL = draft.SubmissionURL
+		}
+
+		draft.Status = "submitted"
+		if issueURL != "" {
+			draft.SubmissionURL = issueURL
+		}
+
+		if _, err := s.draftStore.Save(draft); err != nil {
+			return toolCallResult{
+				Content: []toolContent{{Type: "text", Text: fmt.Sprintf("save approved draft %s: %v", args.ID, err)}},
+				IsError: true,
+			}
+		}
+
+		resp := map[string]any{
+			"status":    "submitted",
+			"issue_url": issueURL,
+			"draft_id":  draft.ID,
+		}
+		data, err := json.MarshalIndent(resp, "", "  ")
+		if err != nil {
+			return toolCallResult{
+				Content: []toolContent{{Type: "text", Text: fmt.Sprintf("marshal response: %v", err)}},
 				IsError: true,
 			}
 		}
