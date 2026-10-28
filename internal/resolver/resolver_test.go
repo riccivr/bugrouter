@@ -161,3 +161,81 @@ func TestWaterfallEmptyQueryRejection(t *testing.T) {
 		t.Error("probe was invoked despite empty query")
 	}
 }
+
+type mockTargetCache struct {
+	items map[string]Target
+	gets  int32
+	puts  int32
+}
+
+func (m *mockTargetCache) Get(key string, dst any) (bool, error) {
+	atomic.AddInt32(&m.gets, 1)
+	targetDst, ok := dst.(*Target)
+	if !ok {
+		return false, errors.New("invalid dst type")
+	}
+	val, exists := m.items[key]
+	if !exists {
+		return false, nil
+	}
+	*targetDst = val
+	return true, nil
+}
+
+func (m *mockTargetCache) Put(key string, val any) error {
+	atomic.AddInt32(&m.puts, 1)
+	switch v := val.(type) {
+	case *Target:
+		m.items[key] = *v
+	case Target:
+		m.items[key] = v
+	default:
+		return errors.New("invalid val type")
+	}
+	return nil
+}
+
+func TestWaterfallCacheHitAndMiss(t *testing.T) {
+	var probeCalls int32
+	p := &mockProbe{
+		name:  "cache-probe",
+		layer: LayerOrgCloud,
+		resolve: func(ctx context.Context, query string) (*Target, error) {
+			atomic.AddInt32(&probeCalls, 1)
+			return &Target{Query: query, CanonicalName: "cached-pkg", Layer: LayerOrgCloud}, nil
+		},
+	}
+
+	cache := &mockTargetCache{items: make(map[string]Target)}
+	wf := NewWaterfall(time.Second, p).WithCache(cache)
+
+	// Miss: probe should run and write to cache
+	got1, err := wf.Resolve(context.Background(), "my-lib")
+	if err != nil {
+		t.Fatalf("first Resolve failed: %v", err)
+	}
+	if got1.CanonicalName != "cached-pkg" {
+		t.Errorf("got %q, want cached-pkg", got1.CanonicalName)
+	}
+	if atomic.LoadInt32(&probeCalls) != 1 {
+		t.Errorf("probe calls = %d, want 1", atomic.LoadInt32(&probeCalls))
+	}
+	if atomic.LoadInt32(&cache.puts) != 1 {
+		t.Errorf("cache puts = %d, want 1", atomic.LoadInt32(&cache.puts))
+	}
+
+	// Hit: probe should NOT run again
+	got2, err := wf.Resolve(context.Background(), "my-lib")
+	if err != nil {
+		t.Fatalf("second Resolve failed: %v", err)
+	}
+	if got2.CanonicalName != "cached-pkg" {
+		t.Errorf("got %q, want cached-pkg", got2.CanonicalName)
+	}
+	if atomic.LoadInt32(&probeCalls) != 1 {
+		t.Errorf("probe calls after second resolve = %d, want 1", atomic.LoadInt32(&probeCalls))
+	}
+	if atomic.LoadInt32(&cache.gets) != 2 {
+		t.Errorf("cache gets = %d, want 2", atomic.LoadInt32(&cache.gets))
+	}
+}

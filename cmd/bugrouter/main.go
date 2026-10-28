@@ -17,18 +17,6 @@ import (
 )
 
 func resolveTarget(query string, noCache bool) (*resolver.Target, error) {
-	var store *cache.Store
-	if !noCache {
-		store = cache.NewStore("", 0)
-		var cached resolver.Target
-		hit, err := store.Get(query, &cached)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "warning: cache read failed: %v\n", err)
-		} else if hit {
-			return &cached, nil
-		}
-	}
-
 	httpClient := httpx.NewClient(0)
 	wf := resolver.NewWaterfall(
 		0,
@@ -38,18 +26,10 @@ func resolveTarget(query string, noCache bool) (*resolver.Target, error) {
 		resolver.NewRegistryProbe(httpClient, resolver.DefaultRegistryEndpoints()),
 		resolver.NewWebDomainProbe(httpClient),
 	)
-	resolved, err := wf.Resolve(context.Background(), query)
-	if err != nil {
-		return nil, err
+	if !noCache {
+		wf.WithCache(cache.NewStore("", 0))
 	}
-
-	if !noCache && store != nil {
-		if err := store.Put(query, resolved); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: cache write failed: %v\n", err)
-		}
-	}
-
-	return resolved, nil
+	return wf.Resolve(context.Background(), query)
 }
 
 func main() {
@@ -72,7 +52,7 @@ func main() {
 			resolver.NewOSPackageProbe(),
 			resolver.NewRegistryProbe(httpClient, resolver.DefaultRegistryEndpoints()),
 			resolver.NewWebDomainProbe(httpClient),
-		)
+		).WithCache(cache.NewStore("", 0))
 		store := adapter.NewDraftStore("")
 		srv := mcp.NewServer(wf, store)
 		if err := srv.Run(context.Background(), os.Stdin, os.Stdout); err != nil {

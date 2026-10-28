@@ -59,10 +59,17 @@ type Probe interface {
 // ErrNotFound signals that no probe could resolve the requested query.
 var ErrNotFound = errors.New("target not found")
 
+// TargetCache defines optional read/write caching for resolved targets.
+type TargetCache interface {
+	Get(key string, dst any) (bool, error)
+	Put(key string, val any) error
+}
+
 // Waterfall orchestrates ordered resolution probes with bounded timeouts.
 type Waterfall struct {
 	probes       []Probe
 	probeTimeout time.Duration
+	cache        TargetCache
 }
 
 // NewWaterfall initializes an orchestrator with a per-probe execution limit.
@@ -76,11 +83,25 @@ func NewWaterfall(timeout time.Duration, probes ...Probe) *Waterfall {
 	}
 }
 
+// WithCache attaches an optional target cache to the waterfall orchestrator.
+func (w *Waterfall) WithCache(c TargetCache) *Waterfall {
+	w.cache = c
+	return w
+}
+
 // Resolve iterates through configured probes in sequential priority order.
 func (w *Waterfall) Resolve(ctx context.Context, query string) (*Target, error) {
 	trimmed := strings.TrimSpace(query)
 	if trimmed == "" {
 		return nil, errors.New("query cannot be empty")
+	}
+
+	if w.cache != nil {
+		var cached Target
+		hit, err := w.cache.Get(trimmed, &cached)
+		if err == nil && hit {
+			return &cached, nil
+		}
 	}
 
 	var probeErrs []error
@@ -90,6 +111,11 @@ func (w *Waterfall) Resolve(ctx context.Context, query string) (*Target, error) 
 		cancel()
 
 		if err == nil && target != nil {
+			if w.cache != nil {
+				if putErr := w.cache.Put(trimmed, target); putErr != nil {
+					// Non-fatal cache write error; resolution succeeded.
+				}
+			}
 			return target, nil
 		}
 		if err != nil {
