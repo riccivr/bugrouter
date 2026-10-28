@@ -17,6 +17,14 @@ import (
 	"github.com/riccivr/bugrouter/internal/resolver"
 )
 
+type mockSubmitter struct {
+	submittedURL string
+}
+
+func (m *mockSubmitter) Submit(ctx context.Context, draft *adapter.StagedDraft) (string, error) {
+	return m.submittedURL, nil
+}
+
 func TestMCPServer(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -45,7 +53,8 @@ body:
 	intro := introspector.New(httpx.NewTestClient(time.Second)).WithEndpoints(introspector.Endpoints{
 		GitHubAPIBaseURL: ts.URL,
 	})
-	server := NewServer(wf, store).WithIntrospector(intro)
+	mockSub := &mockSubmitter{submittedURL: "https://github.com/expressjs/express/issues/999"}
+	server := NewServer(wf, store).WithIntrospector(intro).WithForgeClient(mockSub)
 
 	var in bytes.Buffer
 	var out bytes.Buffer
@@ -66,16 +75,18 @@ body:
 	in.WriteString(`{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"introspect_template","arguments":{"query":"https://github.com/expressjs/express"}}}` + "\n")
 	// 8. tools/call: draft_bug_report
 	in.WriteString(`{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"draft_bug_report","arguments":{"query":"https://github.com/expressjs/express","title":"Crash on start","summary":"Failed with AKIAIOSFODNN7EXAMPLE","steps_to_reproduce":"Run server","logs":"error stack"}}}` + "\n")
-	// 9. unknown method
-	in.WriteString(`{"jsonrpc":"2.0","id":8,"method":"unknown_cmd"}` + "\n")
+	// 9. tools/call: list_staged_drafts
+	in.WriteString(`{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"list_staged_drafts","arguments":{}}}` + "\n")
+	// 10. unknown method
+	in.WriteString(`{"jsonrpc":"2.0","id":9,"method":"unknown_cmd"}` + "\n")
 
 	if err := server.Run(context.Background(), &in, &out); err != nil {
 		t.Fatalf("Server.Run failed: %v", err)
 	}
 
 	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
-	if len(lines) != 8 {
-		t.Fatalf("expected 8 responses (notification has no response), got %d: %v", len(lines), lines)
+	if len(lines) != 9 {
+		t.Fatalf("expected 9 responses (notification has no response), got %d: %v", len(lines), lines)
 	}
 
 	// Response 1: initialize
@@ -104,8 +115,8 @@ body:
 	}
 	res3 := resp3.Result.(map[string]any)
 	tools := res3["tools"].([]any)
-	if len(tools) != 4 {
-		t.Errorf("expected 4 tools, got %d", len(tools))
+	if len(tools) != 6 {
+		t.Errorf("expected 6 tools, got %d", len(tools))
 	}
 
 	// Response 4: tools/call scrub_text
@@ -174,12 +185,45 @@ body:
 		t.Errorf("staged draft missing introspected template: %+v", staged.Template)
 	}
 
-	// Response 8: unknown method error
+	// Response 8: tools/call list_staged_drafts
 	var resp8 jsonrpcResponse
 	if err := json.Unmarshal([]byte(lines[7]), &resp8); err != nil {
 		t.Fatalf("unmarshal resp8: %v", err)
 	}
-	if resp8.Error == nil || resp8.Error.Code != -32601 {
-		t.Errorf("expected -32601 error for unknown method, got: %+v", resp8.Error)
+	res8 := resp8.Result.(map[string]any)
+	if res8["isError"] != false {
+		t.Errorf("list_staged_drafts isError = true: %v", res8)
+	}
+	content8 := res8["content"].([]any)[0].(map[string]any)["text"].(string)
+	if !strings.Contains(content8, staged.ID) {
+		t.Errorf("list_staged_drafts missing created draft id: %s", content8)
+	}
+
+	// Response 9: unknown method error
+	var resp9 jsonrpcResponse
+	if err := json.Unmarshal([]byte(lines[8]), &resp9); err != nil {
+		t.Fatalf("unmarshal resp9: %v", err)
+	}
+	if resp9.Error == nil || resp9.Error.Code != -32601 {
+		t.Errorf("expected -32601 error for unknown method, got: %+v", resp9.Error)
+	}
+
+	// Test approve_draft separately
+	var inApprove, outApprove bytes.Buffer
+	inApprove.WriteString(fmt.Sprintf(`{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"approve_draft","arguments":{"id":%q}}}`+"\n", staged.ID))
+	serverApprove := NewServer(wf, store).WithForgeClient(mockSub)
+	if err := serverApprove.Run(context.Background(), &inApprove, &outApprove); err != nil {
+		t.Fatalf("serverApprove.Run failed: %v", err)
+	}
+	var respApprove jsonrpcResponse
+	if err := json.Unmarshal([]byte(strings.TrimSpace(outApprove.String())), &respApprove); err != nil {
+		t.Fatalf("unmarshal approve response: %v", err)
+	}
+	if respApprove.Result.(map[string]any)["isError"] != false {
+		t.Errorf("approve_draft isError = true")
+	}
+	contentApprove := respApprove.Result.(map[string]any)["content"].([]any)[0].(map[string]any)["text"].(string)
+	if !strings.Contains(contentApprove, "submitted") || !strings.Contains(contentApprove, mockSub.submittedURL) {
+		t.Errorf("approve_draft result missing expected content: %s", contentApprove)
 	}
 }
