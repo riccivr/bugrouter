@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"time"
 
@@ -404,4 +405,80 @@ func (s *DraftStore) Save(d *StagedDraft) (string, error) {
 	}
 
 	return targetPath, nil
+}
+
+// Dir returns the root storage directory for this draft store.
+func (s *DraftStore) Dir() string {
+	return s.dir
+}
+
+// List retrieves all staged drafts sorted descending by creation time.
+func (s *DraftStore) List() ([]*StagedDraft, error) {
+	if err := os.MkdirAll(s.dir, 0700); err != nil {
+		return nil, fmt.Errorf("create draft directory %s: %w", s.dir, err)
+	}
+
+	entries, err := os.ReadDir(s.dir)
+	if err != nil {
+		return nil, fmt.Errorf("read draft directory %s: %w", s.dir, err)
+	}
+
+	var drafts []*StagedDraft
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") || strings.HasPrefix(entry.Name(), "draft-") {
+			continue
+		}
+
+		path := filepath.Join(s.dir, entry.Name())
+		data, readErr := os.ReadFile(path)
+		if readErr != nil {
+			continue
+		}
+
+		var d StagedDraft
+		if unmarshalErr := json.Unmarshal(data, &d); unmarshalErr != nil {
+			continue
+		}
+		drafts = append(drafts, &d)
+	}
+
+	sort.Slice(drafts, func(i, j int) bool {
+		return drafts[i].CreatedAt.After(drafts[j].CreatedAt)
+	})
+
+	return drafts, nil
+}
+
+// Get retrieves a single staged draft by its unique draft ID.
+func (s *DraftStore) Get(id string) (*StagedDraft, error) {
+	cleanID := filepath.Base(id)
+	path := filepath.Join(s.dir, cleanID+".json")
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, fmt.Errorf("draft %s: not found", cleanID)
+		}
+		return nil, fmt.Errorf("read draft %s: %w", cleanID, err)
+	}
+
+	var d StagedDraft
+	if err := json.Unmarshal(data, &d); err != nil {
+		return nil, fmt.Errorf("unmarshal draft %s: %w", cleanID, err)
+	}
+
+	return &d, nil
+}
+
+// Delete removes a staged draft from disk.
+func (s *DraftStore) Delete(id string) error {
+	cleanID := filepath.Base(id)
+	path := filepath.Join(s.dir, cleanID+".json")
+	if err := os.Remove(path); err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("draft %s: not found", cleanID)
+		}
+		return fmt.Errorf("delete draft %s: %w", cleanID, err)
+	}
+	return nil
 }

@@ -375,3 +375,69 @@ func TestBuildDraftWithBugzillaSchema(t *testing.T) {
 		t.Errorf("SubmissionURL missing component: %s", draft.SubmissionURL)
 	}
 }
+
+func TestDraftStoreListGetDelete(t *testing.T) {
+	tempDir := t.TempDir()
+	store := NewDraftStore(tempDir)
+
+	d1, err := BuildDraft(DraftInput{
+		Target: resolver.Target{CanonicalName: "pkg-a"},
+		Title:  "Bug A",
+	})
+	if err != nil {
+		t.Fatalf("BuildDraft A failed: %v", err)
+	}
+	d2, err := BuildDraft(DraftInput{
+		Target: resolver.Target{CanonicalName: "pkg-b"},
+		Title:  "Bug B",
+	})
+	if err != nil {
+		t.Fatalf("BuildDraft B failed: %v", err)
+	}
+
+	if _, err := store.Save(d1); err != nil {
+		t.Fatalf("Save d1 failed: %v", err)
+	}
+	if _, err := store.Save(d2); err != nil {
+		t.Fatalf("Save d2 failed: %v", err)
+	}
+
+	// 1. List
+	drafts, err := store.List()
+	if err != nil {
+		t.Fatalf("List failed: %v", err)
+	}
+	if len(drafts) != 2 {
+		t.Fatalf("List returned %d drafts, want 2", len(drafts))
+	}
+
+	// 2. Get
+	loaded, err := store.Get(d1.ID)
+	if err != nil {
+		t.Fatalf("Get d1 failed: %v", err)
+	}
+	if loaded.ID != d1.ID || string(loaded.Title) != string(d1.Title) {
+		t.Errorf("loaded draft = %+v, want %+v", loaded, d1)
+	}
+
+	// Get non-existent
+	_, err = store.Get("nonexistent-id")
+	if err == nil {
+		t.Errorf("expected error getting nonexistent draft, got nil")
+	}
+
+	// 3. Delete
+	if err := store.Delete(d1.ID); err != nil {
+		t.Fatalf("Delete d1 failed: %v", err)
+	}
+	remaining, err := store.List()
+	if err != nil {
+		t.Fatalf("List after delete failed: %v", err)
+	}
+	if len(remaining) != 1 {
+		t.Fatalf("List after delete returned %d drafts, want 1", len(remaining))
+	}
+	if remaining[0].ID != d2.ID {
+		t.Errorf("remaining draft = %s, want %s", remaining[0].ID, d2.ID)
+	}
+}
