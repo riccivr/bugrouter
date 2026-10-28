@@ -13,9 +13,7 @@ import (
 )
 
 // ForgeSubmitter submits a staged draft to an authenticated upstream forge.
-type ForgeSubmitter interface {
-	Submit(ctx context.Context, draft *adapter.StagedDraft) (string, error)
-}
+type ForgeSubmitter = adapter.ForgeSubmitter
 
 // Server provides the Cloud Control Plane HTTP daemon and review queue UI.
 type Server struct {

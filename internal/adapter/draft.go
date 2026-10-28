@@ -1,6 +1,7 @@
 package adapter
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -323,6 +324,27 @@ func BuildDraft(in DraftInput) (*StagedDraft, error) {
 		DebbugsEmail:  debbugsEmail,
 		Template:      in.Template,
 	}, nil
+}
+
+// ForgeSubmitter represents an authenticated connector for upstream forges.
+type ForgeSubmitter interface {
+	Submit(ctx context.Context, draft *StagedDraft) (string, error)
+}
+
+// Submit dispatches the staged draft to its canonical tracker via the provided connector.
+func (d *StagedDraft) Submit(ctx context.Context, submitter ForgeSubmitter) (string, error) {
+	if submitter == nil {
+		return "", errors.New("forge submitter cannot be nil")
+	}
+	issueURL, err := submitter.Submit(ctx, d)
+	if err != nil {
+		return "", err
+	}
+	d.Status = "submitted"
+	if issueURL != "" {
+		d.SubmissionURL = issueURL
+	}
+	return issueURL, nil
 }
 
 // DraftStore manages local file staging for reviewed and pending bug tickets.
