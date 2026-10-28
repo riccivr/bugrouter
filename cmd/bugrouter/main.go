@@ -11,6 +11,7 @@ import (
 	"github.com/riccivr/bugrouter/internal/adapter"
 	"github.com/riccivr/bugrouter/internal/cache"
 	"github.com/riccivr/bugrouter/internal/httpx"
+	"github.com/riccivr/bugrouter/internal/introspector"
 	"github.com/riccivr/bugrouter/internal/mcp"
 	"github.com/riccivr/bugrouter/internal/resolver"
 	"github.com/riccivr/bugrouter/internal/version"
@@ -45,6 +46,7 @@ func main() {
 
 	case "mcp":
 		httpClient := httpx.NewClient(0)
+		cacheStore := cache.NewStore("", 0)
 		wf := resolver.NewWaterfall(
 			0,
 			resolver.NewDirectProbe(),
@@ -52,9 +54,10 @@ func main() {
 			resolver.NewOSPackageProbe(),
 			resolver.NewRegistryProbe(httpClient, resolver.DefaultRegistryEndpoints()),
 			resolver.NewWebDomainProbe(httpClient),
-		).WithCache(cache.NewStore("", 0))
+		).WithCache(cacheStore)
 		store := adapter.NewDraftStore("")
-		srv := mcp.NewServer(wf, store)
+		intro := introspector.New(httpClient).WithCache(cacheStore)
+		srv := mcp.NewServer(wf, store).WithIntrospector(intro)
 		if err := srv.Run(context.Background(), os.Stdin, os.Stdout); err != nil {
 			fmt.Fprintf(os.Stderr, "mcp server error: %v\n", err)
 			os.Exit(1)
@@ -132,12 +135,24 @@ func main() {
 			os.Exit(1)
 		}
 
+		httpClient := httpx.NewClient(0)
+		intro := introspector.New(httpClient)
+		if !*noCache {
+			intro.WithCache(cache.NewStore("", 0))
+		}
+		schema, err := intro.Introspect(context.Background(), *target)
+		if err != nil {
+			// Non-fatal; fallback to generic drafting if offline or no template found.
+			schema = nil
+		}
+
 		draft, err := adapter.BuildDraft(adapter.DraftInput{
 			Target:           *target,
 			Title:            *title,
 			Summary:          *summary,
 			StepsToReproduce: *steps,
 			Logs:             *logs,
+			Template:         schema,
 		})
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: build draft: %v\n", err)

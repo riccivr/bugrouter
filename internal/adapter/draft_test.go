@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/riccivr/bugrouter/internal/introspector"
 	"github.com/riccivr/bugrouter/internal/resolver"
 )
 
@@ -225,5 +226,152 @@ func TestDraftStoreSave(t *testing.T) {
 	perm := info.Mode().Perm()
 	if perm != 0600 {
 		t.Errorf("file mode = %o, want 0600", perm)
+	}
+}
+
+func TestBuildDraftWithGitHubFormTemplate(t *testing.T) {
+	tmpl := &introspector.TemplateSchema{
+		Name:        "Bug report",
+		FileName:    "bug_report.yml",
+		TitlePrefix: "[BUG]: ",
+		Format:      introspector.FormatGitHubForm,
+		Protocol:    resolver.ProtocolGitHub,
+		Fields: []introspector.FieldSchema{
+			{
+				ID:       "what_happened",
+				Label:    "What happened?",
+				Type:     introspector.FieldTextarea,
+				Required: true,
+			},
+			{
+				ID:       "steps",
+				Label:    "Steps to Reproduce",
+				Type:     introspector.FieldTextarea,
+				Required: true,
+			},
+			{
+				ID:       "logs",
+				Label:    "Relevant log output",
+				Type:     introspector.FieldTextarea,
+				Required: false,
+			},
+		},
+	}
+
+	in := DraftInput{
+		Target: resolver.Target{
+			CanonicalName: "my-cli",
+			Tracker: resolver.TrackerInfo{
+				Protocol: resolver.ProtocolGitHub,
+				URL:      "https://github.com/org/my-cli/issues",
+			},
+		},
+		Title:            "segfault on start",
+		Summary:          "Crashed with exit code 139",
+		StepsToReproduce: "Run my-cli without args",
+		Logs:             "panic: runtime error",
+		Template:         tmpl,
+	}
+
+	draft, err := BuildDraft(in)
+	if err != nil {
+		t.Fatalf("BuildDraft failed: %v", err)
+	}
+
+	expectedTitle := "[BUG]: segfault on start"
+	if string(draft.Title) != expectedTitle {
+		t.Errorf("Title = %q, want %q", string(draft.Title), expectedTitle)
+	}
+
+	body := string(draft.MarkdownBody)
+	if !strings.Contains(body, "### What happened?\n\nCrashed with exit code 139") {
+		t.Errorf("MarkdownBody missing '### What happened?' section: %s", body)
+	}
+	if !strings.Contains(body, "### Steps to Reproduce\n\nRun my-cli without args") {
+		t.Errorf("MarkdownBody missing '### Steps to Reproduce' section: %s", body)
+	}
+	if !strings.Contains(body, "### Relevant log output\n\npanic: runtime error") {
+		t.Errorf("MarkdownBody missing '### Relevant log output' section: %s", body)
+	}
+
+	if !strings.Contains(draft.SubmissionURL, "template="+url.QueryEscape("bug_report.yml")) {
+		t.Errorf("SubmissionURL missing template query param: %s", draft.SubmissionURL)
+	}
+	if !strings.Contains(draft.SubmissionURL, "what_happened="+url.QueryEscape("Crashed with exit code 139")) {
+		t.Errorf("SubmissionURL missing what_happened query param: %s", draft.SubmissionURL)
+	}
+	if !strings.Contains(draft.SubmissionURL, "steps="+url.QueryEscape("Run my-cli without args")) {
+		t.Errorf("SubmissionURL missing steps query param: %s", draft.SubmissionURL)
+	}
+	if !strings.Contains(draft.SubmissionURL, "logs="+url.QueryEscape("panic: runtime error")) {
+		t.Errorf("SubmissionURL missing logs query param: %s", draft.SubmissionURL)
+	}
+	if draft.Template == nil || draft.Template.FileName != "bug_report.yml" {
+		t.Errorf("draft.Template not preserved: %+v", draft.Template)
+	}
+}
+
+func TestBuildDraftWithBugzillaSchema(t *testing.T) {
+	tmpl := &introspector.TemplateSchema{
+		Name:     "Bugzilla Schema",
+		Format:   introspector.FormatBugzillaSchema,
+		Protocol: resolver.ProtocolBugzilla,
+		Fields: []introspector.FieldSchema{
+			{
+				ID:       "product",
+				Label:    "Product",
+				Type:     introspector.FieldDropdown,
+				Required: true,
+				Value:    "Core",
+			},
+			{
+				ID:       "component",
+				Label:    "Component",
+				Type:     introspector.FieldDropdown,
+				Required: true,
+				Value:    "Networking",
+			},
+			{
+				ID:    "severity",
+				Label: "Severity",
+				Type:  introspector.FieldDropdown,
+				Value: "critical",
+			},
+		},
+	}
+
+	in := DraftInput{
+		Target: resolver.Target{
+			CanonicalName: "core-net",
+			Tracker: resolver.TrackerInfo{
+				Protocol: resolver.ProtocolBugzilla,
+				URL:      "https://bugzilla.example.com",
+			},
+		},
+		Title:    "Connection dropped unexpectedly",
+		Summary:  "Socket reset after handshake",
+		Severity: "critical",
+		Template: tmpl,
+	}
+
+	draft, err := BuildDraft(in)
+	if err != nil {
+		t.Fatalf("BuildDraft failed: %v", err)
+	}
+
+	if !strings.HasPrefix(draft.SubmissionURL, "https://bugzilla.example.com/enter_bug.cgi?") {
+		t.Errorf("Bugzilla SubmissionURL unexpected base: %s", draft.SubmissionURL)
+	}
+	if !strings.Contains(draft.SubmissionURL, "short_desc="+url.QueryEscape("Connection dropped unexpectedly")) {
+		t.Errorf("SubmissionURL missing short_desc: %s", draft.SubmissionURL)
+	}
+	if !strings.Contains(draft.SubmissionURL, "bug_severity="+url.QueryEscape("critical")) {
+		t.Errorf("SubmissionURL missing bug_severity: %s", draft.SubmissionURL)
+	}
+	if !strings.Contains(draft.SubmissionURL, "product="+url.QueryEscape("Core")) {
+		t.Errorf("SubmissionURL missing product: %s", draft.SubmissionURL)
+	}
+	if !strings.Contains(draft.SubmissionURL, "component="+url.QueryEscape("Networking")) {
+		t.Errorf("SubmissionURL missing component: %s", draft.SubmissionURL)
 	}
 }

@@ -4,19 +4,48 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/riccivr/bugrouter/internal/adapter"
+	"github.com/riccivr/bugrouter/internal/httpx"
+	"github.com/riccivr/bugrouter/internal/introspector"
 	"github.com/riccivr/bugrouter/internal/resolver"
 )
 
 func TestMCPServer(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/repos/expressjs/express/contents/.github/ISSUE_TEMPLATE":
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprintf(w, `[{"name": "bug.yml", "download_url": "http://%s/raw/bug.yml", "type": "file"}]`, r.Host)
+		case "/raw/bug.yml":
+			w.Header().Set("Content-Type", "text/plain")
+			fmt.Fprint(w, `
+name: Bug Report
+body:
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer ts.Close()
+
 	tempDir := t.TempDir()
 	store := adapter.NewDraftStore(tempDir)
 	wf := resolver.NewWaterfall(time.Second, resolver.NewDirectProbe())
-	server := NewServer(wf, store)
+	intro := introspector.New(httpx.NewTestClient(time.Second)).WithEndpoints(introspector.Endpoints{
+		GitHubAPIBaseURL: ts.URL,
+	})
+	server := NewServer(wf, store).WithIntrospector(intro)
 
 	var in bytes.Buffer
 	var out bytes.Buffer
@@ -33,18 +62,20 @@ func TestMCPServer(t *testing.T) {
 	in.WriteString(`{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"scrub_text","arguments":{"text":"Bearer token123 in /home/alice"}}}` + "\n")
 	// 6. tools/call: resolve_target
 	in.WriteString(`{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"resolve_target","arguments":{"query":"https://github.com/expressjs/express"}}}` + "\n")
-	// 7. tools/call: draft_bug_report
-	in.WriteString(`{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"draft_bug_report","arguments":{"query":"https://github.com/expressjs/express","title":"Crash on start","summary":"Failed with AKIAIOSFODNN7EXAMPLE","steps_to_reproduce":"Run server","logs":"error stack"}}}` + "\n")
-	// 8. unknown method
-	in.WriteString(`{"jsonrpc":"2.0","id":7,"method":"unknown_cmd"}` + "\n")
+	// 7. tools/call: introspect_template
+	in.WriteString(`{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"introspect_template","arguments":{"query":"https://github.com/expressjs/express"}}}` + "\n")
+	// 8. tools/call: draft_bug_report
+	in.WriteString(`{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"draft_bug_report","arguments":{"query":"https://github.com/expressjs/express","title":"Crash on start","summary":"Failed with AKIAIOSFODNN7EXAMPLE","steps_to_reproduce":"Run server","logs":"error stack"}}}` + "\n")
+	// 9. unknown method
+	in.WriteString(`{"jsonrpc":"2.0","id":8,"method":"unknown_cmd"}` + "\n")
 
 	if err := server.Run(context.Background(), &in, &out); err != nil {
 		t.Fatalf("Server.Run failed: %v", err)
 	}
 
 	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
-	if len(lines) != 7 {
-		t.Fatalf("expected 7 responses (notification has no response), got %d: %v", len(lines), lines)
+	if len(lines) != 8 {
+		t.Fatalf("expected 8 responses (notification has no response), got %d: %v", len(lines), lines)
 	}
 
 	// Response 1: initialize
@@ -73,8 +104,8 @@ func TestMCPServer(t *testing.T) {
 	}
 	res3 := resp3.Result.(map[string]any)
 	tools := res3["tools"].([]any)
-	if len(tools) != 3 {
-		t.Errorf("expected 3 tools, got %d", len(tools))
+	if len(tools) != 4 {
+		t.Errorf("expected 4 tools, got %d", len(tools))
 	}
 
 	// Response 4: tools/call scrub_text
@@ -105,18 +136,32 @@ func TestMCPServer(t *testing.T) {
 		t.Errorf("resolve_target missing express: %s", content5)
 	}
 
-	// Response 6: tools/call draft_bug_report
+	// Response 6: tools/call introspect_template
 	var resp6 jsonrpcResponse
 	if err := json.Unmarshal([]byte(lines[5]), &resp6); err != nil {
 		t.Fatalf("unmarshal resp6: %v", err)
 	}
 	res6 := resp6.Result.(map[string]any)
 	if res6["isError"] != false {
-		t.Errorf("draft_bug_report isError = true")
+		t.Errorf("introspect_template isError = true: %v", res6)
 	}
 	content6 := res6["content"].([]any)[0].(map[string]any)["text"].(string)
+	if !strings.Contains(content6, "github-form") || !strings.Contains(content6, "what-happened") {
+		t.Errorf("introspect_template response missing expected schema: %s", content6)
+	}
+
+	// Response 7: tools/call draft_bug_report
+	var resp7 jsonrpcResponse
+	if err := json.Unmarshal([]byte(lines[6]), &resp7); err != nil {
+		t.Fatalf("unmarshal resp7: %v", err)
+	}
+	res7 := resp7.Result.(map[string]any)
+	if res7["isError"] != false {
+		t.Errorf("draft_bug_report isError = true: %v", res7)
+	}
+	content7 := res7["content"].([]any)[0].(map[string]any)["text"].(string)
 	var staged adapter.StagedDraft
-	if err := json.Unmarshal([]byte(content6), &staged); err != nil {
+	if err := json.Unmarshal([]byte(content7), &staged); err != nil {
 		t.Fatalf("unmarshal staged draft: %v", err)
 	}
 	if staged.Status != "pending_review" {
@@ -125,13 +170,16 @@ func TestMCPServer(t *testing.T) {
 	if strings.Contains(string(staged.MarkdownBody), "AKIAIOSFODNN7EXAMPLE") {
 		t.Errorf("staged draft body leaked AWS key")
 	}
-
-	// Response 7: unknown method error
-	var resp7 jsonrpcResponse
-	if err := json.Unmarshal([]byte(lines[6]), &resp7); err != nil {
-		t.Fatalf("unmarshal resp7: %v", err)
+	if staged.Template == nil || staged.Template.FileName != "bug.yml" {
+		t.Errorf("staged draft missing introspected template: %+v", staged.Template)
 	}
-	if resp7.Error == nil || resp7.Error.Code != -32601 {
-		t.Errorf("expected -32601 error for unknown method, got: %+v", resp7.Error)
+
+	// Response 8: unknown method error
+	var resp8 jsonrpcResponse
+	if err := json.Unmarshal([]byte(lines[7]), &resp8); err != nil {
+		t.Fatalf("unmarshal resp8: %v", err)
+	}
+	if resp8.Error == nil || resp8.Error.Code != -32601 {
+		t.Errorf("expected -32601 error for unknown method, got: %+v", resp8.Error)
 	}
 }

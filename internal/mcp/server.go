@@ -9,6 +9,8 @@ import (
 	"strings"
 
 	"github.com/riccivr/bugrouter/internal/adapter"
+	"github.com/riccivr/bugrouter/internal/httpx"
+	"github.com/riccivr/bugrouter/internal/introspector"
 	"github.com/riccivr/bugrouter/internal/resolver"
 	"github.com/riccivr/bugrouter/internal/scrubber"
 	"github.com/riccivr/bugrouter/internal/version"
@@ -54,16 +56,24 @@ type toolCallParams struct {
 
 // Server exposes bugrouter capabilities via JSON-RPC 2.0 MCP stdio transport.
 type Server struct {
-	resolver   *resolver.Waterfall
-	draftStore *adapter.DraftStore
+	resolver     *resolver.Waterfall
+	draftStore   *adapter.DraftStore
+	introspector *introspector.Introspector
 }
 
 // NewServer creates an MCP server backed by the provided waterfall and draft store.
 func NewServer(wf *resolver.Waterfall, store *adapter.DraftStore) *Server {
 	return &Server{
-		resolver:   wf,
-		draftStore: store,
+		resolver:     wf,
+		draftStore:   store,
+		introspector: introspector.New(httpx.NewClient(0)),
 	}
+}
+
+// WithIntrospector overrides the introspector client for testing or custom caching.
+func (s *Server) WithIntrospector(intro *introspector.Introspector) *Server {
+	s.introspector = intro
+	return s
 }
 
 // Run processes newline-delimited JSON-RPC messages from in and writes responses to out.
@@ -208,6 +218,20 @@ func (s *Server) toolDefinitions() []map[string]any {
 			},
 		},
 		{
+			"name":        "introspect_template",
+			"description": "Discovers and parses upstream bug tracker issue templates or schemas for a target.",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"query": map[string]any{
+						"type":        "string",
+						"description": "Software package name, binary name, repository URL, or domain",
+					},
+				},
+				"required": []string{"query"},
+			},
+		},
+		{
 			"name":        "draft_bug_report",
 			"description": "Resolves target, scrubs credentials, stages draft to disk, and returns structured ticket with pre-filled submission links.",
 			"inputSchema": map[string]any{
@@ -295,6 +319,51 @@ func (s *Server) handleToolCall(ctx context.Context, params toolCallParams) tool
 			IsError: false,
 		}
 
+	case "introspect_template":
+		var args struct {
+			Query string `json:"query"`
+		}
+		if err := json.Unmarshal(params.Arguments, &args); err != nil {
+			return toolCallResult{
+				Content: []toolContent{{Type: "text", Text: fmt.Sprintf("parse arguments: %v", err)}},
+				IsError: true,
+			}
+		}
+		if strings.TrimSpace(args.Query) == "" {
+			return toolCallResult{
+				Content: []toolContent{{Type: "text", Text: "query parameter cannot be empty"}},
+				IsError: true,
+			}
+		}
+
+		target, err := s.resolver.Resolve(ctx, args.Query)
+		if err != nil {
+			return toolCallResult{
+				Content: []toolContent{{Type: "text", Text: fmt.Sprintf("resolve target %s: %v", args.Query, err)}},
+				IsError: true,
+			}
+		}
+
+		schema, err := s.introspector.Introspect(ctx, *target)
+		if err != nil {
+			return toolCallResult{
+				Content: []toolContent{{Type: "text", Text: fmt.Sprintf("introspect template for %s: %v", args.Query, err)}},
+				IsError: true,
+			}
+		}
+
+		data, err := json.MarshalIndent(schema, "", "  ")
+		if err != nil {
+			return toolCallResult{
+				Content: []toolContent{{Type: "text", Text: fmt.Sprintf("marshal template schema: %v", err)}},
+				IsError: true,
+			}
+		}
+		return toolCallResult{
+			Content: []toolContent{{Type: "text", Text: string(data)}},
+			IsError: false,
+		}
+
 	case "draft_bug_report":
 		var args struct {
 			Query            string `json:"query"`
@@ -324,12 +393,18 @@ func (s *Server) handleToolCall(ctx context.Context, params toolCallParams) tool
 			}
 		}
 
+		schema, err := s.introspector.Introspect(ctx, *target)
+		if err != nil {
+			schema = nil
+		}
+
 		draft, err := adapter.BuildDraft(adapter.DraftInput{
 			Target:           *target,
 			Title:            args.Title,
 			Summary:          args.Summary,
 			StepsToReproduce: args.StepsToReproduce,
 			Logs:             args.Logs,
+			Template:         schema,
 		})
 		if err != nil {
 			return toolCallResult{

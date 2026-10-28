@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/riccivr/bugrouter/internal/introspector"
 	"github.com/riccivr/bugrouter/internal/resolver"
 	"github.com/riccivr/bugrouter/internal/scrubber"
 	"github.com/riccivr/bugrouter/internal/version"
@@ -28,18 +29,20 @@ type DraftInput struct {
 	ActualBehavior   string
 	Logs             string
 	Severity         string
+	Template         *introspector.TemplateSchema
 }
 
 // StagedDraft represents a redacted and formatted issue ready for review or submission.
 type StagedDraft struct {
-	ID            string                `json:"id"`
-	CreatedAt     time.Time             `json:"created_at"`
-	Status        string                `json:"status"`
-	Target        resolver.Target       `json:"target"`
-	Title         scrubber.ScrubbedText `json:"title"`
-	MarkdownBody  scrubber.ScrubbedText `json:"markdown_body"`
-	SubmissionURL string                `json:"submission_url,omitempty"`
-	DebbugsEmail  string                `json:"debbugs_email,omitempty"`
+	ID            string                       `json:"id"`
+	CreatedAt     time.Time                    `json:"created_at"`
+	Status        string                       `json:"status"`
+	Target        resolver.Target              `json:"target"`
+	Title         scrubber.ScrubbedText        `json:"title"`
+	MarkdownBody  scrubber.ScrubbedText        `json:"markdown_body"`
+	SubmissionURL string                       `json:"submission_url,omitempty"`
+	DebbugsEmail  string                       `json:"debbugs_email,omitempty"`
+	Template      *introspector.TemplateSchema `json:"template,omitempty"`
 }
 
 func generateDraftID() (string, error) {
@@ -57,11 +60,72 @@ func sanitizeTitle(t string) string {
 	return strings.Join(strings.Fields(t), " ")
 }
 
+func mapFieldToValue(f introspector.FieldSchema, scrubbedSummary, scrubbedSteps, scrubbedExpected, scrubbedActual, scrubbedLogs, canonicalName, localVersion, severity string, format introspector.TemplateFormat) string {
+	id := strings.ToLower(strings.ReplaceAll(strings.ReplaceAll(f.ID, "-", "_"), " ", "_"))
+	lbl := strings.ToLower(f.Label)
+
+	has := func(keywords ...string) bool {
+		for _, kw := range keywords {
+			kwNorm := strings.ToLower(kw)
+			if id == kwNorm || strings.Contains(id, kwNorm) || strings.Contains(lbl, kwNorm) {
+				return true
+			}
+		}
+		return false
+	}
+
+	if has("what_happened", "what happened", "summary", "description", "problem") || id == "bug" || strings.Contains(lbl, "describe the bug") {
+		return scrubbedSummary
+	}
+	if has("to_reproduce", "reproduce", "repro", "steps") {
+		return scrubbedSteps
+	}
+	if has("expected") {
+		return scrubbedExpected
+	}
+	if has("actual", "current") {
+		return scrubbedActual
+	}
+	if has("logs", "output", "stack", "trace", "console") {
+		if format == introspector.FormatGitHubMarkdown || format == introspector.FormatGitLabMarkdown {
+			if scrubbedLogs != "" {
+				if strings.HasPrefix(scrubbedLogs, "```") {
+					return scrubbedLogs
+				}
+				return fmt.Sprintf("```\n%s\n```", scrubbedLogs)
+			}
+			return ""
+		}
+		return scrubbedLogs
+	}
+	if has("version") {
+		return localVersion
+	}
+	if has("environment", "os", "platform", "system") {
+		return fmt.Sprintf("%s (%s/%s)", canonicalName, runtime.GOOS, runtime.GOARCH)
+	}
+	if has("severity") {
+		return severity
+	}
+
+	if f.Value != "" {
+		return f.Value
+	}
+	return ""
+}
+
 // BuildDraft constructs a staged ticket with scrubbed markdown content and submission endpoints.
 func BuildDraft(in DraftInput) (*StagedDraft, error) {
 	cleanTitle := sanitizeTitle(in.Title)
 	if cleanTitle == "" {
 		return nil, errors.New("draft title cannot be empty")
+	}
+
+	if in.Template != nil && in.Template.TitlePrefix != "" {
+		prefix := in.Template.TitlePrefix
+		if !strings.HasPrefix(cleanTitle, prefix) {
+			cleanTitle = prefix + cleanTitle
+		}
 	}
 
 	id, err := generateDraftID()
@@ -90,48 +154,65 @@ func BuildDraft(in DraftInput) (*StagedDraft, error) {
 		severity = "normal"
 	}
 
-	var sb strings.Builder
-	sb.WriteString("## Summary\n\n")
-	if scrubbedSummary != "" {
-		sb.WriteString(string(scrubbedSummary))
+	var markdownBody scrubber.ScrubbedText
+	if in.Template != nil && in.Template.Format != introspector.FormatBugzillaSchema && len(in.Template.Fields) > 0 {
+		var sb strings.Builder
+		for _, f := range in.Template.Fields {
+			val := mapFieldToValue(f, string(scrubbedSummary), string(scrubbedSteps), string(scrubbedExpected), string(scrubbedActual), string(scrubbedLogs), canonicalName, localVersion, severity, in.Template.Format)
+			if val == "" && f.Value != "" {
+				val = f.Value
+			}
+			if val == "" {
+				val = "_No response_"
+			}
+			sb.WriteString(fmt.Sprintf("### %s\n\n%s\n\n", f.Label, val))
+		}
+		sb.WriteString(fmt.Sprintf("*Staged via bugrouter/%s*\n", version.Version))
+		markdownBody = scrubber.ScrubbedText(sb.String())
 	} else {
-		sb.WriteString("No summary provided.")
-	}
-	sb.WriteString("\n\n## Steps to Reproduce\n\n")
-	if scrubbedSteps != "" {
-		sb.WriteString(string(scrubbedSteps))
-	} else {
-		sb.WriteString("1. ")
-	}
-	sb.WriteString("\n\n## Expected vs Actual Behavior\n\n")
-	if scrubbedExpected != "" {
-		sb.WriteString("**Expected:**\n")
-		sb.WriteString(string(scrubbedExpected))
-		sb.WriteString("\n\n")
-	}
-	if scrubbedActual != "" {
-		sb.WriteString("**Actual:**\n")
-		sb.WriteString(string(scrubbedActual))
-		sb.WriteString("\n\n")
-	}
-	if scrubbedExpected == "" && scrubbedActual == "" {
-		sb.WriteString("Not specified.\n\n")
-	}
-	sb.WriteString("## Logs & Output\n\n")
-	if scrubbedLogs != "" {
-		sb.WriteString("```\n")
-		sb.WriteString(string(scrubbedLogs))
-		sb.WriteString("\n```\n\n")
-	} else {
-		sb.WriteString("None provided.\n\n")
-	}
-	sb.WriteString("## Environment\n\n")
-	sb.WriteString(fmt.Sprintf("- **Target:** %s\n", canonicalName))
-	sb.WriteString(fmt.Sprintf("- **Version:** %s\n", localVersion))
-	sb.WriteString(fmt.Sprintf("- **Platform:** %s/%s\n\n", runtime.GOOS, runtime.GOARCH))
-	sb.WriteString(fmt.Sprintf("*Staged via bugrouter/%s*\n", version.Version))
+		var sb strings.Builder
+		sb.WriteString("## Summary\n\n")
+		if scrubbedSummary != "" {
+			sb.WriteString(string(scrubbedSummary))
+		} else {
+			sb.WriteString("No summary provided.")
+		}
+		sb.WriteString("\n\n## Steps to Reproduce\n\n")
+		if scrubbedSteps != "" {
+			sb.WriteString(string(scrubbedSteps))
+		} else {
+			sb.WriteString("1. ")
+		}
+		sb.WriteString("\n\n## Expected vs Actual Behavior\n\n")
+		if scrubbedExpected != "" {
+			sb.WriteString("**Expected:**\n")
+			sb.WriteString(string(scrubbedExpected))
+			sb.WriteString("\n\n")
+		}
+		if scrubbedActual != "" {
+			sb.WriteString("**Actual:**\n")
+			sb.WriteString(string(scrubbedActual))
+			sb.WriteString("\n\n")
+		}
+		if scrubbedExpected == "" && scrubbedActual == "" {
+			sb.WriteString("Not specified.\n\n")
+		}
+		sb.WriteString("## Logs & Output\n\n")
+		if scrubbedLogs != "" {
+			sb.WriteString("```\n")
+			sb.WriteString(string(scrubbedLogs))
+			sb.WriteString("\n```\n\n")
+		} else {
+			sb.WriteString("None provided.\n\n")
+		}
+		sb.WriteString("## Environment\n\n")
+		sb.WriteString(fmt.Sprintf("- **Target:** %s\n", canonicalName))
+		sb.WriteString(fmt.Sprintf("- **Version:** %s\n", localVersion))
+		sb.WriteString(fmt.Sprintf("- **Platform:** %s/%s\n\n", runtime.GOOS, runtime.GOARCH))
+		sb.WriteString(fmt.Sprintf("*Staged via bugrouter/%s*\n", version.Version))
 
-	markdownBody := scrubber.ScrubbedText(sb.String())
+		markdownBody = scrubber.ScrubbedText(sb.String())
+	}
 
 	var submissionURL string
 	var debbugsEmail string
@@ -147,6 +228,25 @@ func BuildDraft(in DraftInput) (*StagedDraft, error) {
 			base = base + "/new"
 		}
 		submissionURL = fmt.Sprintf("%s?title=%s&body=%s", base, url.QueryEscape(string(scrubbedTitle)), url.QueryEscape(string(markdownBody)))
+		if in.Template != nil {
+			if in.Template.FileName != "" {
+				submissionURL += "&template=" + url.QueryEscape(in.Template.FileName)
+			}
+			if in.Template.Format == introspector.FormatGitHubForm {
+				for _, f := range in.Template.Fields {
+					if f.ID == "" {
+						continue
+					}
+					val := mapFieldToValue(f, string(scrubbedSummary), string(scrubbedSteps), string(scrubbedExpected), string(scrubbedActual), string(scrubbedLogs), canonicalName, localVersion, severity, in.Template.Format)
+					if val == "" && f.Value != "" {
+						val = f.Value
+					}
+					if val != "" {
+						submissionURL += fmt.Sprintf("&%s=%s", url.QueryEscape(f.ID), url.QueryEscape(val))
+					}
+				}
+			}
+		}
 
 	case resolver.ProtocolGitLab:
 		base := strings.TrimRight(trackerURL, "/")
@@ -154,6 +254,31 @@ func BuildDraft(in DraftInput) (*StagedDraft, error) {
 			base = base + "/new"
 		}
 		submissionURL = fmt.Sprintf("%s?issue[title]=%s&issue[description]=%s", base, url.QueryEscape(string(scrubbedTitle)), url.QueryEscape(string(markdownBody)))
+		if in.Template != nil && in.Template.Name != "" {
+			submissionURL += "&issuable_template=" + url.QueryEscape(in.Template.Name)
+		}
+
+	case resolver.ProtocolBugzilla:
+		base := strings.TrimRight(trackerURL, "/")
+		if strings.HasSuffix(base, "/enter_bug.cgi") {
+			base = strings.TrimSuffix(base, "/enter_bug.cgi")
+		}
+		submissionURL = fmt.Sprintf("%s/enter_bug.cgi?short_desc=%s&comment=%s&bug_severity=%s",
+			base,
+			url.QueryEscape(string(scrubbedTitle)),
+			url.QueryEscape(string(markdownBody)),
+			url.QueryEscape(severity),
+		)
+		if in.Template != nil {
+			for _, f := range in.Template.Fields {
+				if f.ID == "product" && f.Value != "" {
+					submissionURL += "&product=" + url.QueryEscape(f.Value)
+				}
+				if f.ID == "component" && f.Value != "" {
+					submissionURL += "&component=" + url.QueryEscape(f.Value)
+				}
+			}
+		}
 
 	case resolver.ProtocolDebbugs:
 		emailTo := trackerEmail
@@ -195,6 +320,7 @@ func BuildDraft(in DraftInput) (*StagedDraft, error) {
 		MarkdownBody:  markdownBody,
 		SubmissionURL: submissionURL,
 		DebbugsEmail:  debbugsEmail,
+		Template:      in.Template,
 	}, nil
 }
 
