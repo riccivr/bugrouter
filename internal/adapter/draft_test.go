@@ -144,6 +144,43 @@ func TestBuildDraftEmptyTitleRejection(t *testing.T) {
 	}
 }
 
+func TestBuildDraftTitleNewlineSanitization(t *testing.T) {
+	in := DraftInput{
+		Target: resolver.Target{
+			CanonicalName: "coreutils",
+			LocalVersion:  "9.1",
+			Tracker: resolver.TrackerInfo{
+				Protocol: resolver.ProtocolDebbugs,
+				Email:    "bug-coreutils@gnu.org",
+			},
+		},
+		Title: "Crash in ls\r\nBcc: attacker@evil.com\nPackage: hijacked",
+	}
+
+	draft, err := BuildDraft(in)
+	if err != nil {
+		t.Fatalf("BuildDraft failed: %v", err)
+	}
+
+	expectedTitle := "Crash in ls Bcc: attacker@evil.com Package: hijacked"
+	if string(draft.Title) != expectedTitle {
+		t.Errorf("draft.Title = %q, want %q", string(draft.Title), expectedTitle)
+	}
+	if strings.Contains(string(draft.Title), "\r") || strings.Contains(string(draft.Title), "\n") {
+		t.Errorf("draft.Title contains newline characters: %q", string(draft.Title))
+	}
+
+	expectedSubject := "Subject: " + expectedTitle
+	if !strings.Contains(draft.DebbugsEmail, expectedSubject) {
+		t.Errorf("DebbugsEmail missing single-line subject: %s", draft.DebbugsEmail)
+	}
+	for _, line := range strings.Split(draft.DebbugsEmail, "\n") {
+		if strings.HasPrefix(line, "Bcc:") {
+			t.Errorf("DebbugsEmail contains injected Bcc header line: %q", line)
+		}
+	}
+}
+
 func TestDraftStoreSave(t *testing.T) {
 	tempDir := t.TempDir()
 	store := NewDraftStore(tempDir)

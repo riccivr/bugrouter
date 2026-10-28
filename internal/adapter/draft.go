@@ -50,9 +50,17 @@ func generateDraftID() (string, error) {
 	return hex.EncodeToString(b), nil
 }
 
+// sanitizeTitle replaces all CRLF sequences with single spaces and collapses whitespace.
+func sanitizeTitle(t string) string {
+	t = strings.ReplaceAll(t, "\r", " ")
+	t = strings.ReplaceAll(t, "\n", " ")
+	return strings.Join(strings.Fields(t), " ")
+}
+
 // BuildDraft constructs a staged ticket with scrubbed markdown content and submission endpoints.
 func BuildDraft(in DraftInput) (*StagedDraft, error) {
-	if strings.TrimSpace(in.Title) == "" {
+	cleanTitle := sanitizeTitle(in.Title)
+	if cleanTitle == "" {
 		return nil, errors.New("draft title cannot be empty")
 	}
 
@@ -61,7 +69,7 @@ func BuildDraft(in DraftInput) (*StagedDraft, error) {
 		return nil, err
 	}
 
-	scrubbedTitle := scrubber.Scrub(strings.TrimSpace(in.Title))
+	scrubbedTitle := scrubber.Scrub(cleanTitle)
 	scrubbedSummary := scrubber.Scrub(strings.TrimSpace(in.Summary))
 	scrubbedSteps := scrubber.Scrub(strings.TrimSpace(in.StepsToReproduce))
 	scrubbedExpected := scrubber.Scrub(strings.TrimSpace(in.ExpectedBehavior))
