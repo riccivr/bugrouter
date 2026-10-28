@@ -52,7 +52,9 @@ func (p *DirectProbe) Resolve(ctx context.Context, query string) (*Target, error
 			tracker.Protocol == ProtocolCodeberg ||
 			tracker.Protocol == ProtocolSourceHut ||
 			tracker.Protocol == ProtocolBugzilla ||
-			tracker.Protocol == ProtocolDebbugs
+			tracker.Protocol == ProtocolDebbugs ||
+			tracker.Protocol == ProtocolJira ||
+			tracker.Protocol == ProtocolLinear
 
 		hasIssuePath := strings.Contains(queryURL, "/issues") || strings.Contains(queryURL, "/bugs")
 

@@ -213,3 +213,44 @@ func TestServerIndexHTML(t *testing.T) {
 		t.Errorf("index HTML missing expected title markers: %s", html)
 	}
 }
+
+func TestServerPathTraversalRejected(t *testing.T) {
+	tempDir := t.TempDir()
+	store := adapter.NewDraftStore(tempDir)
+	srv := NewServer(":0", store, nil)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	badIDs := []string{"bad..id", "bad-id!", "bad_id$", "bad%20id"}
+	for _, bad := range badIDs {
+		resp, err := http.Post(ts.URL+"/api/v1/drafts/"+bad+"/approve", "application/json", nil)
+		if err != nil {
+			t.Fatalf("POST failed for id %q: %v", bad, err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Errorf("expected 400 Bad Request for bad id %q, got: %d", bad, resp.StatusCode)
+		}
+	}
+}
+
+func TestServerIndexHTMLDOMXSSGuard(t *testing.T) {
+	srv := NewServer(":0", nil, nil)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/")
+	if err != nil {
+		t.Fatalf("GET / failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	html := string(data)
+	if !strings.Contains(html, "startsWith('https://')") || !strings.Contains(html, "escapeHTML(u)") {
+		t.Errorf("index HTML missing URL scheme validation or escaping guards")
+	}
+}

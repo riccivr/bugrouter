@@ -133,3 +133,31 @@ func TestOrgCloudProbeFileResolution(t *testing.T) {
 		t.Errorf("CanonicalName = %q, want search-engine", envTarget.CanonicalName)
 	}
 }
+
+func TestOrgCloudProbeDeriveTrackerFromRepoURL(t *testing.T) {
+	reg := &OrgCloudRegistry{
+		Services: []ServiceEntry{
+			{
+				Name:          "internal-svc",
+				RepositoryURL: "https://github.com/org/internal-svc",
+			},
+		},
+	}
+
+	probe := NewOrgCloudProbeWithRegistry(reg)
+	target, err := probe.Resolve(context.Background(), "internal-svc")
+	if err != nil {
+		t.Fatalf("Resolve internal-svc failed: %v", err)
+	}
+
+	if target.Tracker.Protocol != ProtocolGitHub {
+		t.Errorf("Protocol = %q, want %q", target.Tracker.Protocol, ProtocolGitHub)
+	}
+	expectedURL := "https://github.com/org/internal-svc/issues"
+	if target.Tracker.URL != expectedURL {
+		t.Errorf("Tracker.URL = %q, want %q", target.Tracker.URL, expectedURL)
+	}
+	if target.RepositoryURL != "https://github.com/org/internal-svc" {
+		t.Errorf("RepositoryURL = %q, want https://github.com/org/internal-svc", target.RepositoryURL)
+	}
+}

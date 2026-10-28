@@ -314,12 +314,17 @@ func (intro *Introspector) introspectBugzilla(ctx context.Context, target resolv
 	baseURL := u.Scheme + "://" + u.Host
 
 	data, err := intro.client.GetBytes(ctx, baseURL+"/rest/product?type=enterable", "application/json")
-	if err != nil {
-		data, err = intro.client.GetBytes(ctx, baseURL+"/rest/field/bug", "application/json")
-		if err != nil {
-			return nil, ErrNoTemplateFound
+	if err == nil {
+		schema, parseErr := ParseBugzillaRESTSchema(data)
+		if parseErr == nil {
+			return schema, nil
 		}
 	}
 
-	return ParseBugzillaRESTSchema(data)
+	fieldData, fieldErr := intro.client.GetBytes(ctx, baseURL+"/rest/field/bug", "application/json")
+	if fieldErr != nil {
+		return nil, ErrNoTemplateFound
+	}
+
+	return ParseBugzillaRESTSchema(fieldData)
 }

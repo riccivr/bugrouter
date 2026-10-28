@@ -127,26 +127,41 @@ func (p *OrgCloudProbe) Resolve(ctx context.Context, query string) (*Target, err
 
 	for _, svc := range reg.Services {
 		if strings.ToLower(strings.TrimSpace(svc.Name)) == trimmed {
-			return &Target{
-				Query:         query,
-				CanonicalName: svc.Name,
-				Layer:         LayerOrgCloud,
-				RepositoryURL: svc.RepositoryURL,
-				Tracker:       svc.Tracker,
-			}, nil
+			return buildOrgCloudTarget(query, svc), nil
 		}
 		for _, alias := range svc.Aliases {
 			if strings.ToLower(strings.TrimSpace(alias)) == trimmed {
-				return &Target{
-					Query:         query,
-					CanonicalName: svc.Name,
-					Layer:         LayerOrgCloud,
-					RepositoryURL: svc.RepositoryURL,
-					Tracker:       svc.Tracker,
-				}, nil
+				return buildOrgCloudTarget(query, svc), nil
 			}
 		}
 	}
 
 	return nil, ErrNotFound
+}
+
+func buildOrgCloudTarget(query string, svc ServiceEntry) *Target {
+	tracker := svc.Tracker
+	repoURL := svc.RepositoryURL
+	if tracker.Protocol == "" || (tracker.URL == "" && tracker.Email == "") {
+		derivedTracker, normRepo := ClassifyTracker(tracker.URL, tracker.Email, repoURL)
+		if tracker.Protocol == "" {
+			tracker.Protocol = derivedTracker.Protocol
+		}
+		if tracker.URL == "" {
+			tracker.URL = derivedTracker.URL
+		}
+		if tracker.Email == "" {
+			tracker.Email = derivedTracker.Email
+		}
+		if normRepo != "" {
+			repoURL = normRepo
+		}
+	}
+	return &Target{
+		Query:         query,
+		CanonicalName: svc.Name,
+		Layer:         LayerOrgCloud,
+		RepositoryURL: repoURL,
+		Tracker:       tracker,
+	}
 }

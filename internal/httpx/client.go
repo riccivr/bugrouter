@@ -1,6 +1,7 @@
 package httpx
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -9,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/riccivr/bugrouter/internal/version"
@@ -216,4 +218,60 @@ func (c *Client) GetJSON(ctx context.Context, url string, dst any) error {
 		return fmt.Errorf("decode response from %s: %w", url, err)
 	}
 	return nil
+}
+
+// PostBytes executes a bounded POST request with custom headers and returns response bytes.
+func (c *Client) PostBytes(ctx context.Context, url string, contentType string, body []byte, headers map[string]string) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("create request for %s: %w", url, err)
+	}
+	req.Header.Set("User-Agent", version.UserAgent())
+	if contentType != "" {
+		req.Header.Set("Content-Type", contentType)
+	}
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("execute request to %s: %w", url, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusTooManyRequests || (resp.StatusCode == http.StatusServiceUnavailable && resp.Header.Get("Retry-After") != "") {
+		retryAfter := resp.Header.Get("Retry-After")
+		var dur time.Duration
+		if secs, parseErr := strconv.Atoi(retryAfter); parseErr == nil && secs > 0 {
+			dur = time.Duration(secs) * time.Second
+		} else if t, parseErr := http.ParseTime(retryAfter); parseErr == nil {
+			dur = time.Until(t)
+		}
+		return nil, &RateLimitError{
+			StatusCode: resp.StatusCode,
+			RetryAfter: retryAfter,
+			Duration:   dur,
+		}
+	}
+
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		reader := io.LimitReader(resp.Body, 1024)
+		errData, readErr := io.ReadAll(reader)
+		if readErr != nil || len(errData) == 0 {
+			return nil, fmt.Errorf("unexpected status %d from %s", resp.StatusCode, url)
+		}
+		return nil, fmt.Errorf("unexpected status %d from %s: %s", resp.StatusCode, url, strings.TrimSpace(string(errData)))
+	}
+
+	reader := io.LimitReader(resp.Body, c.maxBodyBytes+1)
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		return nil, fmt.Errorf("read response from %s: %w", url, err)
+	}
+	if int64(len(data)) > c.maxBodyBytes {
+		return nil, fmt.Errorf("response from %s exceeds max body limit (%d bytes)", url, c.maxBodyBytes)
+	}
+
+	return data, nil
 }

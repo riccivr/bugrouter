@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/riccivr/bugrouter/internal/adapter"
 	"github.com/riccivr/bugrouter/internal/version"
@@ -88,13 +89,16 @@ func (s *Server) handleListDrafts(w http.ResponseWriter, r *http.Request) {
 
 func extractDraftID(r *http.Request) string {
 	id := r.PathValue("id")
-	if id != "" {
-		return id
+	if id == "" {
+		trimmed := strings.TrimPrefix(r.URL.Path, "/api/v1/drafts/")
+		trimmed = strings.TrimSuffix(trimmed, "/approve")
+		trimmed = strings.TrimSuffix(trimmed, "/discard")
+		id = strings.Trim(trimmed, "/")
 	}
-	trimmed := strings.TrimPrefix(r.URL.Path, "/api/v1/drafts/")
-	trimmed = strings.TrimSuffix(trimmed, "/approve")
-	trimmed = strings.TrimSuffix(trimmed, "/discard")
-	return strings.Trim(trimmed, "/")
+	if !adapter.IsValidDraftID(id) {
+		return ""
+	}
+	return id
 }
 
 func (s *Server) handleApproveDraft(w http.ResponseWriter, r *http.Request) {
@@ -197,7 +201,13 @@ func (s *Server) Start() error {
 	if err != nil {
 		return fmt.Errorf("listen on %s: %w", s.addr, err)
 	}
-	s.httpServer = &http.Server{Handler: s.mux}
+	s.httpServer = &http.Server{
+		Handler:           s.mux,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      15 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
 	return s.httpServer.Serve(listener)
 }
 
@@ -437,7 +447,12 @@ const indexHTML = `<!DOCTYPE html>
       document.getElementById('modal-title').textContent = 'Draft: ' + d.title;
       let bodyHtml = '<h4>Target Metadata</h4><p>Target: <b>' + (d.target.canonical_name || '') + '</b> | Protocol: <b>' + (d.target.tracker.protocol || '') + '</b></p>';
       if (d.submission_url) {
-        bodyHtml += '<p>Submission URL: <a href="' + d.submission_url + '" target="_blank" style="color:var(--accent);">' + escapeHTML(d.submission_url) + '</a></p>';
+        const u = d.submission_url;
+        if (u.startsWith('https://') || u.startsWith('http://') || u.startsWith('mailto:')) {
+          bodyHtml += '<p>Submission URL: <a href="' + escapeHTML(u) + '" target="_blank" style="color:var(--accent);">' + escapeHTML(u) + '</a></p>';
+        } else {
+          bodyHtml += '<p>Submission URL: <span>' + escapeHTML(u) + '</span></p>';
+        }
       }
       if (d.template) {
         bodyHtml += '<h4>Template Schema</h4><p>Name: ' + escapeHTML(d.template.name || '') + ' (' + d.template.format + ')</p>';

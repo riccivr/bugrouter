@@ -1,14 +1,11 @@
 package cloud
 
 import (
-	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"net/http"
 	"net/url"
 	"os"
 	"strings"
@@ -16,7 +13,6 @@ import (
 	"github.com/riccivr/bugrouter/internal/adapter"
 	"github.com/riccivr/bugrouter/internal/httpx"
 	"github.com/riccivr/bugrouter/internal/resolver"
-	"github.com/riccivr/bugrouter/internal/version"
 )
 
 // ForgeClient provides authenticated OAuth and token-based issue creation.
@@ -75,13 +71,13 @@ func (c *ForgeClient) getToken(protocol resolver.Protocol) string {
 				return v
 			}
 		}
-	case resolver.ProtocolBugzilla:
+	case resolver.ProtocolJira:
 		for _, k := range []string{"JIRA_TOKEN", "BUGROUTER_JIRA_TOKEN"} {
 			if v := os.Getenv(k); v != "" {
 				return v
 			}
 		}
-	case resolver.ProtocolWebURL:
+	case resolver.ProtocolLinear:
 		for _, k := range []string{"LINEAR_API_KEY", "LINEAR_TOKEN", "BUGROUTER_LINEAR_TOKEN"} {
 			if v := os.Getenv(k); v != "" {
 				return v
@@ -103,9 +99,9 @@ func (c *ForgeClient) Submit(ctx context.Context, draft *adapter.StagedDraft) (s
 		return c.submitGitHub(ctx, draft)
 	case resolver.ProtocolGitLab:
 		return c.submitGitLab(ctx, draft)
-	case resolver.ProtocolBugzilla:
+	case resolver.ProtocolJira:
 		return c.submitJira(ctx, draft)
-	case resolver.ProtocolWebURL:
+	case resolver.ProtocolLinear:
 		return c.submitLinear(ctx, draft)
 	default:
 		return "", fmt.Errorf("no authenticated connector for protocol %s", protocol)
@@ -264,12 +260,12 @@ func (c *ForgeClient) submitGitLab(ctx context.Context, draft *adapter.StagedDra
 }
 
 func (c *ForgeClient) submitJira(ctx context.Context, draft *adapter.StagedDraft) (string, error) {
-	token := c.getToken(resolver.ProtocolBugzilla)
+	token := c.getToken(resolver.ProtocolJira)
 	if token == "" {
 		return "", errors.New("missing jira authentication token")
 	}
 
-	jiraBase := c.baseURLs[resolver.ProtocolBugzilla]
+	jiraBase := c.baseURLs[resolver.ProtocolJira]
 	if jiraBase == "" {
 		raw := draft.Target.Tracker.URL
 		u, err := url.Parse(raw)
@@ -345,7 +341,7 @@ func (c *ForgeClient) submitJira(ctx context.Context, draft *adapter.StagedDraft
 }
 
 func (c *ForgeClient) submitLinear(ctx context.Context, draft *adapter.StagedDraft) (string, error) {
-	token := c.getToken(resolver.ProtocolWebURL)
+	token := c.getToken(resolver.ProtocolLinear)
 	if token == "" {
 		return "", errors.New("missing linear authentication token")
 	}
@@ -435,43 +431,5 @@ func (c *ForgeClient) submitLinear(ctx context.Context, draft *adapter.StagedDra
 }
 
 func (c *ForgeClient) postJSON(ctx context.Context, targetURL string, body []byte, headers map[string]string) ([]byte, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, bytes.NewReader(body))
-	if err != nil {
-		return nil, fmt.Errorf("create request for %s: %w", targetURL, err)
-	}
-
-	req.Header.Set("User-Agent", version.UserAgent())
-	req.Header.Set("Content-Type", "application/json")
-	for k, v := range headers {
-		req.Header.Set(k, v)
-	}
-
-	// Use c.httpClient.AllowPrivateHosts or direct test client when loopback
-	client := http.DefaultClient
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("execute request to %s: %w", targetURL, err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		reader := io.LimitReader(resp.Body, 1024)
-		errData, readErr := io.ReadAll(reader)
-		if readErr != nil {
-			return nil, fmt.Errorf("unexpected status %d from %s", resp.StatusCode, targetURL)
-		}
-		return nil, fmt.Errorf("unexpected status %d from %s: %s", resp.StatusCode, targetURL, strings.TrimSpace(string(errData)))
-	}
-
-	const maxLimit = 2 * 1024 * 1024
-	reader := io.LimitReader(resp.Body, maxLimit+1)
-	data, err := io.ReadAll(reader)
-	if err != nil {
-		return nil, fmt.Errorf("read response from %s: %w", targetURL, err)
-	}
-	if int64(len(data)) > maxLimit {
-		return nil, fmt.Errorf("response from %s exceeds max limit", targetURL)
-	}
-
-	return data, nil
+	return c.httpClient.PostBytes(ctx, targetURL, "application/json", body, headers)
 }

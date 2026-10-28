@@ -289,3 +289,52 @@ func TestParseBugzillaRESTSchema(t *testing.T) {
 		t.Errorf("Severity field unexpected: %+v", fSev)
 	}
 }
+
+func TestParseGitHubYAMLFormWithTopLevelAssignees(t *testing.T) {
+	yamlData := `
+name: "Bug Report"
+description: "File a bug"
+body:
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating System
+      options:
+        - Linux
+        - macOS
+assignees:
+  - octocat
+  - maintainer
+`
+	schema, err := ParseGitHubYAMLForm("bug_report.yml", []byte(yamlData))
+	if err != nil {
+		t.Fatalf("ParseGitHubYAMLForm failed: %v", err)
+	}
+	if len(schema.Fields) != 1 {
+		t.Fatalf("expected 1 field, got %d", len(schema.Fields))
+	}
+	field := schema.Fields[0]
+	if field.ID != "os" {
+		t.Errorf("field ID = %q, want os", field.ID)
+	}
+	expectedOptions := []string{"Linux", "macOS"}
+	if !reflect.DeepEqual(field.Options, expectedOptions) {
+		t.Errorf("field Options = %v, want %v (top-level assignees polluted field options)", field.Options, expectedOptions)
+	}
+}
+
+func TestParseBugzillaRESTSchemaEmpty(t *testing.T) {
+	emptyJSONs := [][]byte{
+		[]byte(`{}`),
+		[]byte(`{"products": []}`),
+		[]byte(`{"fields": []}`),
+		[]byte(`{"error": "not found"}`),
+	}
+
+	for _, data := range emptyJSONs {
+		schema, err := ParseBugzillaRESTSchema(data)
+		if err != ErrNoTemplateFound {
+			t.Errorf("ParseBugzillaRESTSchema(%s) err = %v, want ErrNoTemplateFound (got schema: %+v)", string(data), err, schema)
+		}
+	}
+}

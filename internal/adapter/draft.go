@@ -471,8 +471,27 @@ func (s *DraftStore) List() ([]*StagedDraft, error) {
 	return drafts, nil
 }
 
+// IsValidDraftID reports whether a draft ID contains only safe alphanumeric, dash, and underscore characters.
+func IsValidDraftID(id string) bool {
+	if id == "" {
+		return false
+	}
+	if strings.Contains(id, "/") || strings.Contains(id, "\\") || strings.Contains(id, "..") {
+		return false
+	}
+	for _, r := range id {
+		if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_') {
+			return false
+		}
+	}
+	return true
+}
+
 // Get retrieves a single staged draft by its unique draft ID.
 func (s *DraftStore) Get(id string) (*StagedDraft, error) {
+	if !IsValidDraftID(id) {
+		return nil, fmt.Errorf("invalid draft id %q", id)
+	}
 	cleanID := filepath.Base(id)
 	path := filepath.Join(s.dir, cleanID+".json")
 
@@ -494,6 +513,9 @@ func (s *DraftStore) Get(id string) (*StagedDraft, error) {
 
 // Delete removes a staged draft from disk.
 func (s *DraftStore) Delete(id string) error {
+	if !IsValidDraftID(id) {
+		return fmt.Errorf("invalid draft id %q", id)
+	}
 	cleanID := filepath.Base(id)
 	path := filepath.Join(s.dir, cleanID+".json")
 	if err := os.Remove(path); err != nil {

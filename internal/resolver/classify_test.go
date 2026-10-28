@@ -146,6 +146,27 @@ func TestClassifyTracker(t *testing.T) {
 			wantURL:     "https://evil.com/redirect?url=https://github.com/owner/repo",
 			wantNormRep: "",
 		},
+		{
+			name:        "jira atlassian net url",
+			bugsURL:     "https://myteam.atlassian.net/browse/PROJ-123",
+			wantProto:   ProtocolJira,
+			wantURL:     "https://myteam.atlassian.net/browse/PROJ-123",
+			wantNormRep: "",
+		},
+		{
+			name:        "jira custom host with rest api",
+			bugsURL:     "https://jira.corp.internal/rest/api/2/issue",
+			wantProto:   ProtocolJira,
+			wantURL:     "https://jira.corp.internal/rest/api/2/issue",
+			wantNormRep: "",
+		},
+		{
+			name:        "linear app url",
+			bugsURL:     "https://linear.app/myteam/issue/ENG-101",
+			wantProto:   ProtocolLinear,
+			wantURL:     "https://linear.app/myteam/issue/ENG-101",
+			wantNormRep: "",
+		},
 	}
 
 	for _, tc := range tests {

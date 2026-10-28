@@ -18,6 +18,8 @@ const (
 	ProtocolSourceHut Protocol = "sourcehut"
 	ProtocolDebbugs   Protocol = "debbugs"
 	ProtocolBugzilla  Protocol = "bugzilla"
+	ProtocolJira      Protocol = "jira"
+	ProtocolLinear    Protocol = "linear"
 	ProtocolWebURL    Protocol = "web-url"
 )
 

@@ -118,14 +118,14 @@ func TestForgeClientJira(t *testing.T) {
 	defer ts.Close()
 
 	client := NewForgeClient(httpx.NewTestClient(time.Second)).
-		WithToken(resolver.ProtocolBugzilla, "admin:secretpassword").
-		WithBaseURL(resolver.ProtocolBugzilla, ts.URL)
+		WithToken(resolver.ProtocolJira, "admin:secretpassword").
+		WithBaseURL(resolver.ProtocolJira, ts.URL)
 
 	draft := &adapter.StagedDraft{
 		Target: resolver.Target{
 			CanonicalName: "PROJ",
 			Tracker: resolver.TrackerInfo{
-				Protocol: resolver.ProtocolBugzilla,
+				Protocol: resolver.ProtocolJira,
 				URL:      ts.URL,
 			},
 		},
@@ -156,14 +156,14 @@ func TestForgeClientLinear(t *testing.T) {
 
 	t.Setenv("LINEAR_TEAM_ID", "team-123")
 	client := NewForgeClient(httpx.NewTestClient(time.Second)).
-		WithToken(resolver.ProtocolWebURL, "test-lin-key").
+		WithToken(resolver.ProtocolLinear, "test-lin-key").
 		WithLinearURL(ts.URL)
 
 	draft := &adapter.StagedDraft{
 		Target: resolver.Target{
 			CanonicalName: "frontend",
 			Tracker: resolver.TrackerInfo{
-				Protocol: resolver.ProtocolWebURL,
+				Protocol: resolver.ProtocolLinear,
 				URL:      "https://linear.app/myteam",
 			},
 		},
@@ -178,6 +178,38 @@ func TestForgeClientLinear(t *testing.T) {
 	expectedURL := "https://linear.app/myteam/issue/ENG-404"
 	if url != expectedURL {
 		t.Errorf("url = %q, want %q", url, expectedURL)
+	}
+}
+
+func TestForgeClientBlocksLoopbackByDefault(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, `{"html_url": "https://example.com/issue/1"}`)
+	}))
+	defer ts.Close()
+
+	client := NewForgeClient(httpx.NewClient(time.Second)).
+		WithToken(resolver.ProtocolGitHub, "test-token").
+		WithBaseURL(resolver.ProtocolGitHub, ts.URL)
+
+	draft := &adapter.StagedDraft{
+		Target: resolver.Target{
+			CanonicalName: "repo",
+			RepositoryURL: "https://github.com/org/repo",
+			Tracker: resolver.TrackerInfo{
+				Protocol: resolver.ProtocolGitHub,
+				URL:      "https://github.com/org/repo/issues",
+			},
+		},
+		Title: "Test SSRF loopback block",
+	}
+
+	_, err := client.Submit(context.Background(), draft)
+	if err == nil {
+		t.Fatal("expected SSRF block error on loopback server, got nil")
+	}
+	if !strings.Contains(err.Error(), "blocked connection") && !strings.Contains(err.Error(), "loopback") {
+		t.Errorf("expected error containing 'blocked connection' or 'loopback', got: %v", err)
 	}
 }
 

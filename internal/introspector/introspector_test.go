@@ -183,3 +183,76 @@ func TestIntrospectBugzilla(t *testing.T) {
 		t.Errorf("Product value = %q, want Bugzilla", schema.Fields[0].Value)
 	}
 }
+
+func TestIntrospectBugzillaFallbackToFieldBug(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/rest/product":
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"products": []}`)
+		case "/rest/field/bug":
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{
+				"fields": [
+					{
+						"name": "product",
+						"values": [{"name": "Core"}, {"name": "Firefox"}]
+					},
+					{
+						"name": "component",
+						"values": [{"name": "General"}]
+					}
+				]
+			}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer ts.Close()
+
+	client := httpx.NewTestClient(time.Second)
+	intro := New(client)
+
+	target := resolver.Target{
+		CanonicalName: "firefox",
+		Tracker: resolver.TrackerInfo{
+			Protocol: resolver.ProtocolBugzilla,
+			URL:      ts.URL + "/enter_bug.cgi",
+		},
+	}
+
+	schema, err := intro.Introspect(context.Background(), target)
+	if err != nil {
+		t.Fatalf("Introspect Bugzilla fallback failed: %v", err)
+	}
+	if schema.Format != FormatBugzillaSchema {
+		t.Errorf("Format = %v, want %v", schema.Format, FormatBugzillaSchema)
+	}
+	if schema.Fields[0].Value != "Core" {
+		t.Errorf("Product value = %q, want Core", schema.Fields[0].Value)
+	}
+}
+
+func TestIntrospectBugzillaBothEmptyReturnsErrNoTemplate(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{}`)
+	}))
+	defer ts.Close()
+
+	client := httpx.NewTestClient(time.Second)
+	intro := New(client)
+
+	target := resolver.Target{
+		CanonicalName: "empty-bugzilla",
+		Tracker: resolver.TrackerInfo{
+			Protocol: resolver.ProtocolBugzilla,
+			URL:      ts.URL + "/enter_bug.cgi",
+		},
+	}
+
+	_, err := intro.Introspect(context.Background(), target)
+	if err != ErrNoTemplateFound {
+		t.Errorf("expected ErrNoTemplateFound, got: %v", err)
+	}
+}

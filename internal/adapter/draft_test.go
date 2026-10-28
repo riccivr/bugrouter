@@ -441,3 +441,45 @@ func TestDraftStoreListGetDelete(t *testing.T) {
 		t.Errorf("remaining draft = %s, want %s", remaining[0].ID, d2.ID)
 	}
 }
+
+func TestDraftStoreIDValidation(t *testing.T) {
+	tempDir := t.TempDir()
+	store := NewDraftStore(tempDir)
+
+	invalidIDs := []string{
+		"",
+		"..",
+		"../evil",
+		"evil/../secret",
+		"a/b",
+		"a\\b",
+		"draft with spaces",
+		"draft*special",
+		"id;rm -rf",
+	}
+
+	for _, id := range invalidIDs {
+		if IsValidDraftID(id) {
+			t.Errorf("IsValidDraftID(%q) = true, want false", id)
+		}
+		if _, err := store.Get(id); err == nil {
+			t.Errorf("store.Get(%q) succeeded, expected error", id)
+		}
+		if err := store.Delete(id); err == nil {
+			t.Errorf("store.Delete(%q) succeeded, expected error", id)
+		}
+	}
+
+	validIDs := []string{
+		"abc123DEF",
+		"draft-1",
+		"draft_2",
+		"a-b_c-123",
+	}
+
+	for _, id := range validIDs {
+		if !IsValidDraftID(id) {
+			t.Errorf("IsValidDraftID(%q) = false, want true", id)
+		}
+	}
+}

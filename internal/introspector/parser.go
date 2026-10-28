@@ -103,6 +103,14 @@ func ParseGitHubYAMLForm(fileName string, data []byte) (*TemplateSchema, error) 
 			continue
 		}
 
+		if inBody {
+			indent := len(line) - len(strings.TrimLeft(line, " "))
+			if indent == 0 && !strings.HasPrefix(trimmed, "-") && !strings.HasPrefix(trimmed, "body:") {
+				flushField()
+				inBody = false
+			}
+		}
+
 		if !inBody {
 			if strings.HasPrefix(trimmed, "body:") {
 				inBody = true
@@ -165,7 +173,7 @@ func ParseGitHubYAMLForm(fileName string, data []byte) (*TemplateSchema, error) 
 			continue
 		}
 
-		if strings.HasPrefix(trimmed, "type:") {
+		if currentSection == "" && strings.HasPrefix(trimmed, "type:") {
 			typeVal := stripQuotes(strings.TrimPrefix(trimmed, "type:"))
 			if typeVal == "markdown" {
 				isMarkdown = true
@@ -174,7 +182,7 @@ func ParseGitHubYAMLForm(fileName string, data []byte) (*TemplateSchema, error) 
 			continue
 		}
 
-		if strings.HasPrefix(trimmed, "id:") {
+		if currentSection == "" && strings.HasPrefix(trimmed, "id:") {
 			currentField.ID = stripQuotes(strings.TrimPrefix(trimmed, "id:"))
 			continue
 		}
@@ -404,6 +412,10 @@ func ParseBugzillaRESTSchema(data []byte) (*TemplateSchema, error) {
 	fieldErr := json.Unmarshal(data, &fieldPayload)
 	if prodErr != nil && fieldErr != nil {
 		return nil, fmt.Errorf("parse bugzilla rest schema: %w", prodErr)
+	}
+
+	if len(prodPayload.Products) == 0 && len(fieldPayload.Fields) == 0 {
+		return nil, ErrNoTemplateFound
 	}
 
 	var productOptions []string

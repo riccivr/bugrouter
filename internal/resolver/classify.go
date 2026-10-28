@@ -150,6 +150,23 @@ func ClassifyTracker(bugsURL, bugsEmail, repoURL string) (TrackerInfo, string) {
 				}, normRepo
 			}
 
+			if host == "linear.app" || strings.HasSuffix(host, ".linear.app") {
+				return TrackerInfo{
+					Protocol: ProtocolLinear,
+					URL:      targetURL,
+					Email:    bugsEmail,
+				}, normRepo
+			}
+
+			isJiraHost := strings.HasSuffix(host, ".atlassian.net") || host == "atlassian.net" || strings.HasPrefix(host, "jira.") || strings.Contains(host, "jira")
+			if strings.HasSuffix(host, ".atlassian.net") || strings.HasPrefix(host, "jira.") || (isJiraHost && (strings.Contains(u.Path, "/rest/api/") || strings.Contains(u.Path, "/browse/"))) {
+				return TrackerInfo{
+					Protocol: ProtocolJira,
+					URL:      targetURL,
+					Email:    bugsEmail,
+				}, normRepo
+			}
+
 			if strings.HasPrefix(host, "bugzilla.") || strings.Contains(u.Path, "show_bug.cgi") || strings.Contains(u.Path, "enter_bug.cgi") {
 				return TrackerInfo{
 					Protocol: ProtocolBugzilla,
