@@ -345,7 +345,7 @@ func (s *Server) toolDefinitions() []map[string]any {
 		},
 		{
 			"name":        "triage_crash_log",
-			"description": "Analyzes raw crash logs or stack traces, deterministically attributes failures to upstream dependencies, scrubs credentials, checks duplicates, and stages a quality-gated draft.",
+			"description": "Analyzes raw crash logs or stack traces, deterministically extracts suspect targets, introspects templates, checks duplicates, and returns structured agent triage envelopes.",
 			"inputSchema": map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -353,17 +353,9 @@ func (s *Server) toolDefinitions() []map[string]any {
 						"type":        "string",
 						"description": "Raw crash log, stack trace, or panic output to analyze",
 					},
-					"target": map[string]any{
-						"type":        "string",
-						"description": "Optional target package name or repository query to override auto-attribution",
-					},
 					"title": map[string]any{
 						"type":        "string",
-						"description": "Optional bug report title override",
-					},
-					"strict_quality": map[string]any{
-						"type":        "boolean",
-						"description": "If true, enforces strict anti-slop quality gating and rejects drafts with violations",
+						"description": "Optional bug report title or problem description override",
 					},
 				},
 				"required": []string{"log"},
@@ -773,10 +765,8 @@ func (s *Server) handleToolCall(ctx context.Context, params toolCallParams) tool
 
 	case "triage_crash_log":
 		var args struct {
-			Log           string `json:"log"`
-			Target        string `json:"target"`
-			Title         string `json:"title"`
-			StrictQuality bool   `json:"strict_quality"`
+			Log   string `json:"log"`
+			Title string `json:"title"`
 		}
 		if err := json.Unmarshal(params.Arguments, &args); err != nil {
 			return toolCallResult{
@@ -791,96 +781,68 @@ func (s *Server) handleToolCall(ctx context.Context, params toolCallParams) tool
 			}
 		}
 
-		attributor := resolver.NewTraceAttributor(s.resolver)
+		candidates := resolver.ExtractTargetsFromLog(args.Log)
 		var resolvedTarget *resolver.Target
-		var rep *resolver.CrashReport
 
-		if strings.TrimSpace(args.Target) != "" {
-			var err error
-			resolvedTarget, err = s.resolver.Resolve(ctx, args.Target)
-			if err != nil {
-				return toolCallResult{
-					Content: []toolContent{{Type: "text", Text: fmt.Sprintf("resolve target %s: %v", args.Target, err)}},
-					IsError: true,
-				}
-			}
-			rep = resolver.ParseCrashTrace(args.Log)
-			rep.PrimaryTarget = resolvedTarget.CanonicalName
-		} else {
-			var err error
-			resolvedTarget, rep, err = attributor.AttributeAndResolve(ctx, args.Log)
-			if err != nil && resolvedTarget == nil {
-				if rep != nil && rep.PrimaryTarget != "" {
-					resolvedTarget, err = s.resolver.Resolve(ctx, rep.PrimaryTarget)
-				}
-				if resolvedTarget == nil {
-					return toolCallResult{
-						Content: []toolContent{{Type: "text", Text: fmt.Sprintf("attribute and resolve crash: %v", err)}},
-						IsError: true,
-					}
-				}
+		for _, c := range candidates {
+			t, err := s.resolver.Resolve(ctx, c.Query)
+			if err == nil && t != nil {
+				resolvedTarget = t
+				break
 			}
 		}
 
-		title := args.Title
-		if strings.TrimSpace(title) == "" {
-			title = rep.SuggestedTitle()
-		}
-
-		summary := rep.SuggestedSummary()
-		steps := rep.SuggestedSteps()
-		logs := rep.CleanTrace()
-
-		schema, err := s.introspector.Introspect(ctx, *resolvedTarget)
-		if err != nil {
-			schema = nil
-		}
-
+		var schema *introspector.TemplateSchema
 		var dups []dedup.ExistingIssue
-		if s.dedupFinder != nil {
-			if d, err := s.dedupFinder.FindDuplicates(ctx, *resolvedTarget, scrubber.Scrub(title)); err == nil {
-				dups = d
+
+		if resolvedTarget != nil {
+			tmpl, err := s.introspector.Introspect(ctx, *resolvedTarget)
+			if err == nil {
+				schema = tmpl
+			}
+
+			searchTitle := args.Title
+			if searchTitle == "" && len(candidates) > 0 {
+				searchTitle = candidates[0].Evidence
+			}
+			if searchTitle != "" && s.dedupFinder != nil {
+				d, err := s.dedupFinder.FindDuplicates(ctx, *resolvedTarget, scrubber.Scrub(searchTitle))
+				if err == nil {
+					dups = d
+				}
 			}
 		}
 
-		draft, err := adapter.BuildDraft(adapter.DraftInput{
-			Target:           *resolvedTarget,
-			Title:            title,
-			Summary:          summary,
-			StepsToReproduce: steps,
-			Logs:             logs,
-			Template:         schema,
-			Duplicates:       dups,
-		})
-		if err != nil {
-			return toolCallResult{
-				Content: []toolContent{{Type: "text", Text: fmt.Sprintf("build draft: %v", err)}},
-				IsError: true,
+		var nextActions []string
+		if resolvedTarget != nil {
+			nextActions = append(nextActions, fmt.Sprintf("Run 'bugrouter draft --title <title> --steps <steps> %s' to stage a verified bug ticket", resolvedTarget.CanonicalName))
+			if len(dups) > 0 {
+				nextActions = append(nextActions, "Review potential upstream duplicates before submitting")
 			}
+			if schema != nil && schema.Name != "" {
+				nextActions = append(nextActions, fmt.Sprintf("Fill required fields defined in upstream issue template: %s", schema.Name))
+			}
+		} else {
+			nextActions = append(nextActions, "No candidates could be automatically resolved to an upstream tracker. Specify target manually via '--query <target>'")
 		}
 
-		if args.StrictQuality && draft.Quality != nil && !draft.Quality.Passed {
-			violMsg := adapter.FormatViolations(draft.Quality)
-			return toolCallResult{
-				Content: []toolContent{{Type: "text", Text: fmt.Sprintf("strict quality gate rejected draft:\n%s", violMsg)}},
-				IsError: true,
-			}
+		if dups == nil {
+			dups = []dedup.ExistingIssue{}
+		}
+		if candidates == nil {
+			candidates = []resolver.TraceCandidate{}
 		}
 
-		if _, err := s.draftStore.Save(draft); err != nil {
-			return toolCallResult{
-				Content: []toolContent{{Type: "text", Text: fmt.Sprintf("save draft: %v", err)}},
-				IsError: true,
-			}
+		result := map[string]any{
+			"candidates":           candidates,
+			"resolved_target":      resolvedTarget,
+			"template_schema":      schema,
+			"potential_duplicates": dups,
+			"scrubbed_log":         scrubber.Scrub(args.Log),
+			"next_actions":         nextActions,
 		}
 
-		resMap := map[string]any{
-			"attribution": rep,
-			"target":      resolvedTarget,
-			"quality":     draft.Quality,
-			"draft":       draft,
-		}
-		data, err := json.MarshalIndent(resMap, "", "  ")
+		data, err := json.MarshalIndent(result, "", "  ")
 		if err != nil {
 			return toolCallResult{
 				Content: []toolContent{{Type: "text", Text: fmt.Sprintf("marshal triage result: %v", err)}},

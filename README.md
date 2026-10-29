@@ -98,41 +98,21 @@ bugrouter draft requests \
   --steps "1. Call requests.get(stream=True)\n2. Read chunks" \
   --logs "SSLEOFError: EOF occurred in violation of protocol"
 
-# Draft using a Markdown body file
-bugrouter draft checkout-api --body-file ./bug-details.md
-
-# Draft by piping from stdin
-cat error.log | bugrouter draft payment-service --title "Timeout in worker" --body-file -
+# Draft using a Markdown body file with strict quality enforcement
+cat error.log | bugrouter draft payment-service --body-file - --strict-quality
 ```
 
-#### Markdown Body File Format
-When using `--body-file`, sections with level-2 headings (`##`) are mapped automatically:
-```markdown
-## Summary
-Detailed explanation of what failed.
-
-## Steps to Reproduce
-1. Execute step 1
-2. Trigger the failure condition
-
-## Logs & Output
-Console output or stack trace (secrets will be automatically redacted).
-```
-
-### Autonomous Agent Mode (`bugrouter agent`)
-Run autonomous, headless triage of raw crash logs or stack traces with deterministic attribution and anti-slop gating:
+### Autonomous Agent Mode (`bugrouter agent triage`)
+Run autonomous, single-shot triage of raw crash logs or stack traces to extract candidates, resolve trackers, introspect schemas, and detect duplicates:
 ```bash
-# Triage a crash log from file with strict anti-slop enforcement
-bugrouter agent --log-file ./panic.log --strict-quality
+# Triage a crash log file and output structured JSON envelope
+bugrouter agent triage --log-file ./panic.log
 
 # Triage piped crash log from stdin
-cat server-crash.log | bugrouter agent --log-file - --strict-quality
-
-# Triage with JSON output for programmatic agent loops
-bugrouter agent --log-file ./traceback.log --json
+npm test 2>&1 | bugrouter agent triage --log-file -
 
 # Triage with explicit target override
-bugrouter agent --log-file ./segfault.log --target "openssl" --strict-quality
+bugrouter agent triage --log-file ./traceback.log --query "requests"
 ```
 
 ### Serve Cloud Control Plane

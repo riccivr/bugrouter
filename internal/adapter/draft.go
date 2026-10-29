@@ -48,7 +48,7 @@ type StagedDraft struct {
 	DebbugsEmail        string                       `json:"debbugs_email,omitempty"`
 	Template            *introspector.TemplateSchema `json:"template,omitempty"`
 	PotentialDuplicates []dedup.ExistingIssue        `json:"potential_duplicates,omitempty"`
-	Quality             *QualityReport               `json:"quality,omitempty"`
+	Quality             QualityReport                `json:"quality"`
 }
 
 func generateDraftID() (string, error) {
@@ -328,8 +328,8 @@ func BuildDraft(in DraftInput) (*StagedDraft, error) {
 		DebbugsEmail:        debbugsEmail,
 		Template:            in.Template,
 		PotentialDuplicates: in.Duplicates,
+		Quality:             LintDraft(in),
 	}
-	draft.Quality = LintInput(in)
 	return draft, nil
 }
 

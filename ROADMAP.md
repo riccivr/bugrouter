@@ -1,141 +1,92 @@
-# Project Roadmap
+# ROADMAP.md — bugrouter Project Roadmap & Vision
 
-This document outlines the architectural milestones and development plan for bugrouter. It tracks completed milestones, the active milestone, and upcoming milestones.
-
-## Milestone Status Summary
-
-| Milestone | Focus | Status |
-| :--- | :--- | :--- |
-| Milestone 1 | Foundations and Core Waterfall Resolution | Completed |
-| Milestone 2 | Upstream Issue Template Introspection and Cloud Control Plane | Completed |
-| Milestone 3 | Upstream Deduplication, Polyglot Ecosystems, and Control Plane Security | Completed |
-| Milestone 4 | Production Readiness, CLI Polish, Scrubber Precision, and Security Hardening | Completed |
-| Milestone 5 | CLI Agentic Mode and Anti-Slop Quality Gate | Active |
-| Milestone 6 | Human Tech-Stack Dependency Radar | Planned |
-| Milestone 7 | Everyday Linux and Windows Desktop User Experience | Planned |
+This document tracks the long-term architectural trajectory, active implementation focus, and milestone ledger for `bugrouter`. It guides current and future contributors on what has been built, what is active now, and what comes next.
 
 ---
 
-## Milestone 1: Foundations and Core Waterfall Resolution (Completed)
+## 1. Vision & Three Core Pillars
 
-Milestone 1 established the core resolution, scrubbing, draft staging, and agent protocol foundations.
+`bugrouter` is an autonomous upstream router and triage system designed to eliminate friction between failing software, coding agents, engineering teams, and upstream maintainers. The project is organized around three strategic pillars:
 
-### Implemented Capabilities
-- Six-layer resolution waterfall:
-  - Direct repository and forge URLs (GitHub, GitLab, Codeberg, SourceHut).
-  - Local workspace dependency manifests (`node_modules`, `go.mod`).
-  - System package managers on Debian and Ubuntu (`dpkg`, `apt`).
-  - Concurrent registry probes for npm, PyPI, and Crates.io.
-  - Web domain discovery via `/.well-known/bug-report` and RFC 9116 `security.txt`.
-- Type-safe secret and PII scrubber producing immutable `ScrubbedText`, redacting AWS keys, GitHub tokens, Slack tokens, OpenAI keys, PEM private keys, URI credentials, and local home directory paths.
-- Local draft staging engine (`DraftStore`) writing JSON records with `0600` permissions to `$XDG_DATA_HOME/bugrouter/drafts`.
-- Initial Model Context Protocol (MCP) server running over JSON-RPC 2.0 stdio, publishing `resolve_target`, `scrub_text`, and `draft_bug_report`.
-- Bounded HTTP client (`httpx.Client`) enforcing 2 MiB body caps, bounded timeouts, redirect limits, and SSRF protection against private, loopback, and link-local IP addresses.
+### Pillar 1 — Autonomous CLI & MCP Agentic Mode (Current Focus)
+AI coding agents (such as Claude Code, Antigravity, and CI bots) hitting runtime failures, panics, or broken dependencies should never have to manually inspect stack traces, deduce repository URLs, search for duplicate tickets, or craft submission templates. Through single-shot crash attribution, upstream template introspection, duplicate detection, deterministic credential scrubbing, and an Anti-Slop Quality Gate, `bugrouter` enables agents to stage and submit maintainer-grade, high-signal bug reports with zero human babysitting.
+
+### Pillar 2 — Tech Stack & Downstream Bug Radar for Engineering Teams (Milestone 6)
+Engineering teams need continuous visibility into whether upstream bugs, regressions, or security advisories affect their pinned dependencies. Through full workspace inventory scanning (`bugrouter stack`), `bugrouter` maps every dependency in `package.json`, `go.mod`, `Cargo.toml`, `pyproject.toml`, and enterprise `services.json` to its canonical upstream tracker, surfacing active upstream issues that impact the team's local dependency tree.
+
+### Pillar 3 — Everyday Linux & Windows PC User Experience (Milestone 7)
+Desktop developers and non-technical users who encounter crashes in GUI applications (for example, GPU rendering crashes in Blender on Windows or Linux) need a zero-friction, zero-slop reporting path. `bugrouter` extends beyond developer manifests to inspect desktop package managers (`winget`, `flatpak`, `snap`, Gitea/Forgejo platforms like `projects.blender.org`), collect hardware and OS telemetry, and guide users through an interactive, human-friendly bug wizard.
 
 ---
 
-## Milestone 2: Upstream Issue Template Introspection and Cloud Control Plane (Completed)
+## 2. Completed Milestones Ledger (Milestones 1–4, Specs #01–#10.1)
 
-Milestone 2 introduced automated upstream schema discovery and human-in-the-loop review capabilities.
+All milestones and specs below have been fully implemented, verified with race-detector tests, and merged into the core engine:
 
-### Implemented Capabilities
-- Upstream template introspector discovering and parsing:
-  - GitHub YAML Issue Forms and Markdown issue templates.
-  - GitLab Markdown issue templates.
-  - Bugzilla REST schemas (`/rest/product` and `/rest/field/bug`).
-- Enterprise organization service catalog probe (`LayerOrgCloud`) reading `services.json` to route internal microservices and monorepos to private issue trackers.
-- Cloud control plane HTTP daemon (`bugrouter serve`) with an embedded single-page application for reviewing and submitting staged bug reports.
-- Authenticated issue submission connectors for GitHub Enterprise, GitLab Self-Managed, Jira REST, and Linear GraphQL.
-- Decoupled Jira and Linear protocols, reinforced SSRF guards, and protected draft store paths against traversal attacks.
-- Added MCP tools `introspect_template`, `list_staged_drafts`, and `approve_draft`.
-
----
-
-## Milestone 3: Upstream Deduplication, Polyglot Ecosystems, and Control Plane Security (Completed)
-
-Milestone 3 expanded language ecosystem support, added duplicate issue detection, and hardened server security.
-
-### Implemented Capabilities
-- Polyglot workspace probes parsing Rust `Cargo.toml`/`Cargo.lock` dependencies and Python `pyproject.toml` manifests (PEP 508 dependencies, Poetry git sources, and project URLs).
-- Cross-distribution package manager probes for Fedora/RHEL (`rpm`) and Arch Linux (`pacman`), prioritizing upstream source homepages over downstream bug trackers.
-- Upstream issue deduplication engine (`internal/dedup`) using title keyword extraction, English stop word filtering, and deterministic token overlap scoring against GitHub, GitLab, and Bugzilla issues.
-- Control plane security hardening:
-  - Constant-time Bearer token authentication via `crypto/subtle.ConstantTimeCompare` with SHA-256 pre-hashing.
-  - CSRF origin and custom request header verification.
-  - Append-only JSONL audit logger (`audit.log`) with bounded reverse retrieval.
-  - SSRF-guarded HMAC-SHA256 signed webhook dispatcher (`X-Bugrouter-Signature`).
-- Added MCP tool `search_duplicates`.
-
----
-
-## Milestone 4: Production Readiness, CLI Polish, Scrubber Precision, and Boundary Hardening (Completed)
-
-Milestone 4 focused on production stability, boundary remediation, and end-to-end integration.
-
-### Implemented Capabilities
-- Scrubber false-positive prevention: refined generic secret regex to enforce a minimum length of 6 characters and preserve boolean, nil, and null literals.
-- CLI polish:
-  - Bounded context timeouts (`--timeout`, default 15s) across `resolve` and `draft` commands.
-  - Markdown body file and stdin support (`--body-file`) with automatic level-2 heading extraction.
-  - Graceful signal handling (`SIGINT`, `SIGTERM`) with bounded shutdown timeouts.
-- Idempotent approval guard returning HTTP 409 Conflict in cloud server and error status in MCP, preventing duplicate ticket submissions.
-- MCP audit integration recording `draft.approved` and `draft.submit_failed` events with stdio remote IP markers.
-- Enterprise forge authentication scoping: added token authentication for private GitHub and GitLab repositories, restricted GitHub auth headers to trusted domains, and stripped credentials on cross-host redirects.
+- **Spec #01: Zero-Dependency Core Resolver & Contract [COMPLETED]**
+  - Bootstrapped CalVer versioning, bounded `httpx.Client`, and initial `resolver.Target` abstraction.
+- **Spec #02: Classification Engine, DirectProbe & OSPackageProbe [COMPLETED]**
+  - Added URL normalization, forge classification (GitHub, GitLab, Codeberg, SourceHut), and Debian/Ubuntu package queries (`dpkg`, `apt`).
+- **Spec #03: Workspace Probe, Registry Probe & Web Domain Discovery [COMPLETED]**
+  - Implemented Node.js `node_modules` and Go `go.mod` parsing, concurrent registry probing for npm, PyPI, and Crates.io, and web discovery via RFC 9116 `security.txt` and `/.well-known/bug-report`.
+- **Spec #04: Type-Safe Secret Scrubber & Draft Engine [COMPLETED]**
+  - Implemented immutable `ScrubbedText`, regex redaction for AWS, GitHub, Slack, OpenAI, PEM keys, and URI credentials, and local draft staging in `$XDG_DATA_HOME/bugrouter/drafts` with `0600` permissions.
+- **Spec #05: Upstream Issue Template Introspector [COMPLETED]**
+  - Built zero-dependency YAML and Markdown issue template parsers, Bugzilla REST schema discovery, and query parameter pre-fill adaptation.
+- **Spec #06: WorkOS-Style Org Discovery & Cloud Control Plane [COMPLETED]**
+  - Added Layer 0 `OrgCloudProbe` for enterprise `services.json`, embedded review queue Web UI, and authenticated OAuth connectors (GitHub, GitLab, Jira, Linear).
+- **Spec #06.1: Control Plane Hardening & Post-M2 Remediation [COMPLETED]**
+  - Bound forge client with `httpx.PostBytes` SSRF protection, hardened draft IDs against directory traversal, and decoupled Jira and Linear protocols.
+- **Spec #07: Upstream Issue Deduplicator & Polyglot Manifests [COMPLETED]**
+  - Added Rust `Cargo.toml`/`Cargo.lock` and Python `pyproject.toml` parsing, Fedora/RHEL `rpm` and Arch `pacman` probes, and token overlap duplicate detection for GitHub, GitLab, and Bugzilla.
+- **Spec #07.1: Deduplication Hardening & Python PEP Normalization [COMPLETED]**
+  - Fixed TOML inline table scanning, implemented PEP 503/508 package name normalization, and derived enterprise forge API base URLs.
+- **Spec #08: Control Plane Security, Audit Logger & Webhooks [COMPLETED]**
+  - Implemented constant-time Bearer token authentication with SHA-256 pre-hashing, CSRF origin verification, append-only JSONL audit logging (`audit.log`), and HMAC-SHA256 signed webhook dispatching (`X-Bugrouter-Signature`).
+- **Spec #09: v1.0 Production Readiness, CLI Polish & Golden Path [COMPLETED]**
+  - Refined secret scrubber thresholds (>= 6 chars, preserving booleans and nil), added `--timeout` context bounds, `--body-file` stdin markdown parsing, and end-to-end integration tests.
+- **Spec #09.1: Red-Team Remediation & Scrubber Precision [COMPLETED]**
+  - Removed private host environment bypasses, shared bounded HTTP clients across CLI workflows, and preserved quoted strings during redaction.
+- **Spec #10: CLI/README Parity, MCP Audit Trail & Private Repo Auth [COMPLETED]**
+  - Aligned CLI version formatting, added idempotent draft approval guards returning HTTP 409 Conflict, and added environment token authentication for private GitHub and GitLab repositories.
+- **Spec #10.1: Credential Boundary Remediation [COMPLETED]**
+  - Removed GitLab token leaks to Bugzilla endpoints, added automated cross-host redirect credential stripping in `httpx.Client`, and restricted GitHub token forwarding to verified API and raw download hostnames.
 
 ---
 
-## Milestone 5: CLI Agentic Mode and Anti-Slop Quality Gate (Active)
+## 3. Active & Upcoming Milestones
 
-Milestone 5 brings headless autonomous triage, deterministic crash attribution, and quality filtering to bugrouter.
+### Milestone 5: CLI Agentic Mode & Anti-Slop Gate (Active)
+Focuses on autonomous, zero-friction developer and agent triage from terminal errors.
 
-### Core Objectives
-- Deterministic Crash and Stack Trace Attribution Engine (`internal/resolver/trace.go`):
-  - Parse crash logs and stack traces across Go panics, Python tracebacks, Node.js errors, Rust panics, and native segfaults.
-  - Identify culprit source files, line numbers, failing functions, and candidate upstream dependencies.
-  - Rank candidate targets and resolve them against the waterfall engine.
-- Anti-Slop Quality Linter (`internal/adapter/linter.go`):
-  - Detect AI filler words, puffery, and banned buzzwords.
-  - Reject chatbot conversational phrases, em dashes, curly quotes, decorative emojis, and unfilled placeholders.
-  - Enforce minimum length and specificity standards on issue titles, summaries, and reproduction steps.
-- Headless Agentic CLI (`bugrouter agent`):
-  - Autonomous pipeline reading crash logs from files or stdin, attributing failures, resolving canonical trackers, building drafts, and running quality checks.
-  - Strict quality flag (`--strict-quality`) blocking draft staging when violations occur.
-- MCP Tool `triage_crash_log`:
-  - Expose crash log triage and attribution directly to coding agents over MCP.
+- **Spec #11: Crash Log Auto-Attribution, Anti-Slop Gate & Agent CLI [ACTIVE]**
+  - `ROADMAP.md` master plan.
+  - Deterministic Crash and Stack Trace Attribution Engine (`internal/resolver/trace.go`): extracts `TraceCandidate` slices from Node.js, Go, Python, Rust, and Unix CLI error logs.
+  - Deterministic Anti-Slop Quality Linter (`internal/adapter/linter.go`): calculates a 0 to 100 quality score, checks for AI conversational filler, vague titles, and missing steps, and gates drafts via `--strict-quality`.
+  - CLI Agentic Mode (`bugrouter agent triage`): single-shot crash triage command outputting structured JSON envelopes for autonomous calling agents.
+  - MCP Tool `triage_crash_log`: exposes autonomous crash attribution and draft triage to MCP agent workflows.
+- **Spec #12: Agentic Self-Verification & Reproduction Script Validator [PLANNED]**
+  - Introduce `bugrouter agent verify`: executes bounded reproduction commands in isolated subshells, records deterministic exit codes and stderr captures, and embeds cryptographic proof-of-reproduction into staged drafts.
 
 ---
 
-## Milestone 6: Human Tech-Stack Dependency Radar (Planned)
+### Milestone 6: Tech Stack Explorer & Downstream Bug Radar (Planned)
+Shifts bugrouter from reactive ticket routing to proactive dependency health and upstream tracking.
 
-Milestone 6 expands bugrouter from reactive triage to proactive dependency health tracking and visibility.
-
-### Planned Capabilities
-- Dependency Radar Scanner:
-  - Deep workspace scanning across polyglot manifests to build a complete local dependency graph.
-  - Direct mapping of all direct and transitive dependencies to their upstream issue trackers and repository release feeds.
-- Upstream Velocity and Health Metrics:
-  - Check open issue volume, median resolution time, commit activity, and maintenance status.
-  - Flag abandoned, archived, or unmaintained upstream packages before critical failures occur.
-- Security and Advisory Correlation:
-  - Cross-reference resolved dependencies with public advisory databases without adding external runtime dependencies.
-  - Automated draft generation when an installed package has a reported vulnerability or breaking patch.
-- Proactive Alerts:
-  - CLI subcommand (`bugrouter radar`) providing a terminal summary of tech-stack health and tracker endpoints.
+- **Spec #13: Workspace Stack Scanner & Downstream Radar [PLANNED]**
+  - Command `bugrouter stack [--json] [--check-upstream]`: recursively catalogs all dependencies across `package.json`, `go.mod`, `Cargo.toml`, and `pyproject.toml`.
+  - Maps each dependency to its upstream tracker and queries trackers for active bugs matching the local installed version.
+  - Adds "Connected Tech Stack & Downstream Bugs" dashboard tab to the embedded Cloud Control Plane Web UI.
 
 ---
 
-## Milestone 7: Everyday Linux and Windows Desktop User Experience (Planned)
+### Milestone 7: Desktop/PC User Mode & Hardware Telemetry (Planned)
+Brings zero-dependency bug routing to desktop operating systems and everyday GUI applications.
 
-Milestone 7 makes bugrouter accessible to desktop developers and everyday users across Linux and Windows environments.
-
-### Planned Capabilities
-- Desktop Crash Interceptor:
-  - Optional lightweight background watcher monitoring system journals (`systemd-coredump`, Linux `/var/log/syslog`) and Windows Event Logs (`Application Error` events).
-  - Desktop notifications prompting user review when a native desktop application crashes.
-- One-Click Desktop Triage UI:
-  - Local desktop dialog or tray interface displaying crash attribution, scrubbed logs, and canonical upstream bug trackers.
-  - One-click button to open pre-filled browser submission URLs or stage tickets in the local review queue.
-- Interactive Terminal UI (TUI):
-  - Terminal-based interactive dashboard for browsing staged drafts, viewing audit logs, and inspecting dependency health directly inside tmux or terminal windows.
-- Native Cross-Platform Distribution:
-  - Native packaging (.deb, .rpm, Arch PKGBUILD, Windows MSI/winget manifest) for standard package manager installations.
+- **Spec #14: Desktop App Resolver & Hardware Telemetry Collector [PLANNED]**
+  - Package probes for Windows `winget` and Linux `flatpak`/`snap`.
+  - Support for community forges and custom issue trackers (such as Gitea/Forgejo at `projects.blender.org`).
+  - Native hardware telemetry collector (`internal/telemetry`) gathering GPU model, driver versions, CPU architecture, and OS kernel info without third-party dependencies.
+- **Spec #15: Guided Human Bug Wizard [PLANNED]**
+  - Interactive terminal wizard (`bugrouter report <app>`) prompting users for symptoms and reproducing steps with real-time anti-slop suggestions.
+  - Web UI guided composer providing step-by-step assistance for non-technical users.

@@ -278,7 +278,7 @@ Fatal error reading config from /home/alice/secret.txt
 	}
 }
 
-func TestAgentCrashLogAttributionPipeline(t *testing.T) {
+func TestAgentTriagePipeline(t *testing.T) {
 	tempDir := t.TempDir()
 	t.Setenv("XDG_DATA_HOME", filepath.Join(tempDir, "data"))
 	t.Setenv("XDG_CACHE_HOME", filepath.Join(tempDir, "cache"))
@@ -292,29 +292,21 @@ main.main()
 	/app/main.go:24 +0x50
 `
 
-	logFile := filepath.Join(tempDir, "crash.log")
-	if err := os.WriteFile(logFile, []byte(crashLog), 0600); err != nil {
-		t.Fatalf("write crash log: %v", err)
+	// 1. Extract candidates
+	candidates := resolver.ExtractTargetsFromLog(crashLog)
+	if len(candidates) == 0 {
+		t.Fatal("expected at least 1 candidate, got 0")
+	}
+	if candidates[0].Query != "github.com/example/worker" {
+		t.Errorf("candidate query = %q, want github.com/example/worker", candidates[0].Query)
+	}
+	if candidates[0].Source != "go_module" {
+		t.Errorf("candidate source = %q, want go_module", candidates[0].Source)
 	}
 
-	// 1. Trace Attribution
-	rep := resolver.ParseCrashTrace(crashLog)
-	if rep == nil {
-		t.Fatal("expected non-nil crash report")
-	}
-	if rep.Language != "go" {
-		t.Errorf("rep.Language = %q, want go", rep.Language)
-	}
-	if rep.PrimaryTarget != "github.com/example/worker" {
-		t.Errorf("rep.PrimaryTarget = %q, want github.com/example/worker", rep.PrimaryTarget)
-	}
-	if rep.CulpritLine != 88 {
-		t.Errorf("rep.CulpritLine = %d, want 88", rep.CulpritLine)
-	}
-
-	// 2. Resolve Target
+	// 2. Resolve target
 	httpClient := httpx.NewTestClient(0)
-	target, err := resolveTarget(context.Background(), httpClient, rep.PrimaryTarget, true)
+	target, err := resolveTarget(context.Background(), httpClient, candidates[0].Query, true)
 	if err != nil {
 		t.Fatalf("resolveTarget failed: %v", err)
 	}
@@ -322,67 +314,71 @@ main.main()
 		t.Errorf("target protocol = %s, want github", target.Tracker.Protocol)
 	}
 
-	// 3. Build Draft
-	title := rep.SuggestedTitle()
-	summary := rep.SuggestedSummary()
-	steps := rep.SuggestedSteps()
-	logs := rep.CleanTrace()
-
-	draft, err := adapter.BuildDraft(adapter.DraftInput{
-		Target:           *target,
-		Title:            title,
-		Summary:          summary,
-		StepsToReproduce: steps,
-		Logs:             logs,
-	})
-	if err != nil {
-		t.Fatalf("BuildDraft failed: %v", err)
+	// 3. Assemble AgentTriageResult
+	res := AgentTriageResult{
+		Candidates:     candidates,
+		ResolvedTarget: target,
+		ScrubbedLog:    scrubber.Scrub(crashLog),
+		NextActions: []string{
+			fmt.Sprintf("Run 'bugrouter draft --title <title> --steps <steps> %s' to stage a verified bug ticket", target.CanonicalName),
+		},
 	}
 
-	// 4. Quality Verification
-	if draft.Quality == nil {
-		t.Fatal("expected non-nil Quality report")
+	if len(res.Candidates) != 1 {
+		t.Errorf("len(res.Candidates) = %d, want 1", len(res.Candidates))
 	}
-	if !draft.Quality.Passed {
-		t.Errorf("expected auto-generated crash draft to pass quality gate: %v", draft.Quality.Violations)
+	if res.ResolvedTarget.CanonicalName != "worker" {
+		t.Errorf("resolved target = %s, want worker", res.ResolvedTarget.CanonicalName)
 	}
-	if draft.Quality.Score != 1.0 {
-		t.Errorf("Score = %.2f, want 1.0", draft.Quality.Score)
+	if !strings.Contains(res.ResolvedTarget.RepositoryURL, "github.com/example/worker") {
+		t.Errorf("resolved repo = %s, want github.com/example/worker", res.ResolvedTarget.RepositoryURL)
 	}
-
-	// 5. Save Draft
-	store := adapter.NewDraftStore("")
-	savedPath, err := store.Save(draft)
-	if err != nil {
-		t.Fatalf("save draft: %v", err)
-	}
-	if _, err := os.Stat(savedPath); err != nil {
-		t.Errorf("saved draft file missing: %v", err)
+	if len(res.NextActions) == 0 {
+		t.Errorf("expected NextActions, got empty")
 	}
 }
 
-func TestAgentStrictQualityRejection(t *testing.T) {
+func TestDraftStrictQualityEvaluation(t *testing.T) {
+	// 1. Bad input with AI slop
 	badInput := adapter.DraftInput{
 		Target: resolver.Target{
 			CanonicalName: "my-package",
 		},
-		Title:            "Crash when we delve into configuration — critical error 🚀",
-		Summary:          "I hope this helps! We must analyze this landscape.",
+		Title:            "Crash when we delve into configuration",
+		Summary:          "I hope this message finds you well. As an AI, I noticed an issue.",
 		StepsToReproduce: "1. Run app.",
 	}
 
-	draft, err := adapter.BuildDraft(badInput)
+	draftBad, err := adapter.BuildDraft(badInput)
 	if err != nil {
 		t.Fatalf("BuildDraft failed: %v", err)
 	}
-
-	if draft.Quality == nil {
-		t.Fatal("expected Quality report on staged draft")
-	}
-	if draft.Quality.Passed {
+	if draftBad.Quality.Passed {
 		t.Errorf("expected draft with slop to fail quality check")
 	}
-	if len(draft.Quality.Violations) == 0 {
-		t.Errorf("expected violations in quality report")
+	if len(draftBad.Quality.Issues) == 0 {
+		t.Errorf("expected issues in quality report")
+	}
+
+	// 2. High signal input
+	cleanInput := adapter.DraftInput{
+		Target: resolver.Target{
+			CanonicalName: "my-package",
+		},
+		Title:            "Panic on invalid memory address during server initialization",
+		Summary:          "When starting the worker without a valid configuration, a nil pointer panic occurs.",
+		StepsToReproduce: "1. Run worker binary without config flag\n2. Observe panic stack trace",
+		Logs:             "panic: runtime error: invalid memory address",
+	}
+
+	draftClean, err := adapter.BuildDraft(cleanInput)
+	if err != nil {
+		t.Fatalf("BuildDraft failed: %v", err)
+	}
+	if !draftClean.Quality.Passed {
+		t.Errorf("expected clean draft to pass quality gate, got issues: %v", draftClean.Quality.Issues)
+	}
+	if draftClean.Quality.Score != 100 {
+		t.Errorf("clean draft score = %d, want 100", draftClean.Quality.Score)
 	}
 }

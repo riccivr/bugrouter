@@ -27,6 +27,16 @@ import (
 	"github.com/riccivr/bugrouter/internal/version"
 )
 
+// AgentTriageResult represents the structured JSON envelope returned by agent triage.
+type AgentTriageResult struct {
+	Candidates          []resolver.TraceCandidate    `json:"candidates"`
+	ResolvedTarget      *resolver.Target             `json:"resolved_target,omitempty"`
+	TemplateSchema      *introspector.TemplateSchema `json:"template_schema,omitempty"`
+	PotentialDuplicates []dedup.ExistingIssue        `json:"potential_duplicates,omitempty"`
+	ScrubbedLog         scrubber.ScrubbedText        `json:"scrubbed_log,omitempty"`
+	NextActions         []string                     `json:"next_actions"`
+}
+
 func resolveTarget(ctx context.Context, httpClient *httpx.Client, query string, noCache bool) (*resolver.Target, error) {
 	if httpClient == nil {
 		httpClient = httpx.NewClient(0)
@@ -193,6 +203,7 @@ func main() {
 		logs := fs.String("logs", "", "error logs or console output")
 		bodyFile := fs.String("body-file", "", "path to markdown body file or '-' for stdin")
 		timeout := fs.Duration("timeout", 15*time.Second, "request and probe timeout duration")
+		strictQuality := fs.Bool("strict-quality", false, "reject draft if quality checks fail")
 		jsonOut := fs.Bool("json", false, "output structured JSON")
 		noCache := fs.Bool("no-cache", false, "disable disk cache")
 		if err := fs.Parse(os.Args[2:]); err != nil {
@@ -281,6 +292,20 @@ func main() {
 			os.Exit(1)
 		}
 
+		if *strictQuality && !draft.Quality.Passed {
+			if *jsonOut {
+				enc := json.NewEncoder(os.Stdout)
+				enc.SetIndent("", "  ")
+				_ = enc.Encode(draft.Quality)
+			} else {
+				fmt.Fprintf(os.Stderr, "error: strict quality gate failed (Score: %d/100, Grade: %s):\n", draft.Quality.Score, draft.Quality.Grade)
+				for _, issue := range draft.Quality.Issues {
+					fmt.Fprintf(os.Stderr, "  - %s\n", issue)
+				}
+			}
+			os.Exit(2)
+		}
+
 		draftStore := adapter.NewDraftStore("")
 		savedPath, err := draftStore.Save(draft)
 		if err != nil {
@@ -316,22 +341,27 @@ func main() {
 		}
 
 	case "agent":
-		fs := flag.NewFlagSet("agent", flag.ContinueOnError)
-		logArg := fs.String("log", "", "raw crash log, stack trace, or error output")
-		logFile := fs.String("log-file", "", "path to crash log file or '-' for stdin")
-		targetArg := fs.String("target", "", "target package name, binary name, or repo query")
-		titleArg := fs.String("title", "", "bug report title override")
-		summaryArg := fs.String("summary", "", "summary override")
-		stepsArg := fs.String("steps", "", "steps to reproduce override")
-		strictQuality := fs.Bool("strict-quality", false, "fail and reject draft if anti-slop violations are detected")
-		timeout := fs.Duration("timeout", 15*time.Second, "request and probe timeout duration")
-		jsonOut := fs.Bool("json", false, "output structured JSON")
-		noCache := fs.Bool("no-cache", false, "disable disk cache")
-		if err := fs.Parse(os.Args[2:]); err != nil {
+		var agentArgs []string
+		if len(os.Args) > 2 && os.Args[2] == "triage" {
+			agentArgs = os.Args[3:]
+		} else if len(os.Args) > 2 && strings.HasPrefix(os.Args[2], "-") {
+			agentArgs = os.Args[2:]
+		} else {
+			fmt.Fprintln(os.Stderr, "Usage: bugrouter agent triage [--log-file <path>] [--query <target>] [--title <t>] [--timeout <dur>]")
 			os.Exit(1)
 		}
 
-		rawLog := *logArg
+		fs := flag.NewFlagSet("agent triage", flag.ContinueOnError)
+		logFile := fs.String("log-file", "", "path to crash log file or '-' for stdin")
+		query := fs.String("query", "", "target package name, binary name, or repo query override")
+		title := fs.String("title", "", "bug report title override for duplicate search")
+		timeout := fs.Duration("timeout", 15*time.Second, "request and probe timeout duration")
+		noCache := fs.Bool("no-cache", false, "disable disk cache")
+		if err := fs.Parse(agentArgs); err != nil {
+			os.Exit(1)
+		}
+
+		var rawLog string
 		if *logFile != "" {
 			var r io.Reader
 			if *logFile == "-" {
@@ -352,177 +382,100 @@ func main() {
 				os.Exit(1)
 			}
 			rawLog = string(data)
-		}
-
-		args := fs.Args()
-		if rawLog == "" && len(args) > 0 {
-			// Check if positional argument is an existing file
-			if fi, err := os.Stat(args[0]); err == nil && !fi.IsDir() {
-				data, err := os.ReadFile(args[0])
-				if err == nil {
-					rawLog = string(data)
-				}
+		} else if *query == "" {
+			const maxLogBytes = 512 * 1024
+			data, err := io.ReadAll(io.LimitReader(os.Stdin, maxLogBytes))
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "error: read stdin: %v\n", err)
+				os.Exit(1)
 			}
+			rawLog = string(data)
 		}
 
+		candidates := resolver.ExtractTargetsFromLog(rawLog)
 		ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 		defer cancel()
 
 		httpClient := httpx.NewClient(0)
-		var target *resolver.Target
-		var rep *resolver.CrashReport
-		var targetQuery string
+		var resolvedTarget *resolver.Target
 
-		if rawLog != "" {
-			rep = resolver.ParseCrashTrace(rawLog)
-			if *targetArg != "" {
-				targetQuery = *targetArg
-			} else {
-				// Try resolving suspects extracted from crash trace
-				for _, suspect := range rep.SuspectTargets {
-					t, err := resolveTarget(ctx, httpClient, suspect, *noCache)
-					if err == nil && t != nil {
-						target = t
-						targetQuery = t.CanonicalName
-						rep.PrimaryTarget = t.CanonicalName
-						break
-					}
-				}
-				if target == nil && rep.PrimaryTarget != "" {
-					targetQuery = rep.PrimaryTarget
-				}
+		if *query != "" {
+			t, err := resolveTarget(ctx, httpClient, *query, *noCache)
+			if err == nil {
+				resolvedTarget = t
 			}
-		} else if *targetArg != "" {
-			targetQuery = *targetArg
-		} else if len(args) > 0 {
-			targetQuery = args[0]
-		}
-
-		if target == nil {
-			if targetQuery == "" {
-				fmt.Fprintln(os.Stderr, "error: agent requires a crash log (--log, --log-file) or target query")
-				os.Exit(1)
-			}
-			var err error
-			target, err = resolveTarget(ctx, httpClient, targetQuery, *noCache)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "error: resolve target %s: %v\n", targetQuery, err)
-				os.Exit(1)
-			}
-		}
-
-		title := *titleArg
-		summary := *summaryArg
-		steps := *stepsArg
-		logs := ""
-
-		if rep != nil {
-			if title == "" {
-				title = rep.SuggestedTitle()
-			}
-			if summary == "" {
-				summary = rep.SuggestedSummary()
-			}
-			if steps == "" {
-				steps = rep.SuggestedSteps()
-			}
-			logs = rep.CleanTrace()
 		} else {
-			if strings.TrimSpace(title) == "" {
-				fmt.Fprintln(os.Stderr, "error: --title is required when no crash log is provided")
-				os.Exit(1)
-			}
-		}
-
-		intro := introspector.New(httpClient)
-		if !*noCache {
-			intro.WithCache(cache.NewStore("", 0))
-		}
-		schema, err := intro.Introspect(ctx, *target)
-		if err != nil {
-			schema = nil
-		}
-
-		finder := dedup.NewFinder(httpClient)
-		dups, err := finder.FindDuplicates(ctx, *target, scrubber.Scrub(title))
-		if err != nil {
-			dups = nil
-		}
-
-		draft, err := adapter.BuildDraft(adapter.DraftInput{
-			Target:           *target,
-			Title:            title,
-			Summary:          summary,
-			StepsToReproduce: steps,
-			Logs:             logs,
-			Template:         schema,
-			Duplicates:       dups,
-		})
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "error: build draft: %v\n", err)
-			os.Exit(1)
-		}
-
-		if *strictQuality && draft.Quality != nil && !draft.Quality.Passed {
-			violMsg := adapter.FormatViolations(draft.Quality)
-			if *jsonOut {
-				errResp := map[string]any{
-					"error":   "strict quality gate failed",
-					"quality": draft.Quality,
+			for _, c := range candidates {
+				t, err := resolveTarget(ctx, httpClient, c.Query, *noCache)
+				if err == nil && t != nil {
+					resolvedTarget = t
+					break
 				}
-				enc := json.NewEncoder(os.Stdout)
-				enc.SetIndent("", "  ")
-				_ = enc.Encode(errResp)
-			} else {
-				fmt.Fprintf(os.Stderr, "error: %s\n", violMsg)
 			}
+		}
+
+		var schema *introspector.TemplateSchema
+		var dups []dedup.ExistingIssue
+
+		if resolvedTarget != nil {
+			intro := introspector.New(httpClient)
+			if !*noCache {
+				intro.WithCache(cache.NewStore("", 0))
+			}
+			s, err := intro.Introspect(ctx, *resolvedTarget)
+			if err == nil {
+				schema = s
+			}
+
+			searchTitle := *title
+			if searchTitle == "" && len(candidates) > 0 {
+				searchTitle = candidates[0].Evidence
+			}
+			if searchTitle != "" {
+				finder := dedup.NewFinder(httpClient)
+				d, err := finder.FindDuplicates(ctx, *resolvedTarget, scrubber.Scrub(searchTitle))
+				if err == nil {
+					dups = d
+				}
+			}
+		}
+
+		var nextActions []string
+		if resolvedTarget != nil {
+			nextActions = append(nextActions, fmt.Sprintf("Run 'bugrouter draft --title <title> --steps <steps> %s' to stage a verified bug ticket", resolvedTarget.CanonicalName))
+			if len(dups) > 0 {
+				nextActions = append(nextActions, "Review potential upstream duplicates before submitting")
+			}
+			if schema != nil && schema.Name != "" {
+				nextActions = append(nextActions, fmt.Sprintf("Fill required fields defined in upstream issue template: %s", schema.Name))
+			}
+		} else {
+			nextActions = append(nextActions, "No candidates could be automatically resolved to an upstream tracker. Specify target manually via '--query <target>'")
+		}
+
+		if dups == nil {
+			dups = []dedup.ExistingIssue{}
+		}
+		if candidates == nil {
+			candidates = []resolver.TraceCandidate{}
+		}
+
+		result := AgentTriageResult{
+			Candidates:          candidates,
+			ResolvedTarget:      resolvedTarget,
+			TemplateSchema:      schema,
+			PotentialDuplicates: dups,
+			ScrubbedLog:         scrubber.Scrub(rawLog),
+			NextActions:         nextActions,
+		}
+
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		if err := enc.Encode(result); err != nil {
+			fmt.Fprintf(os.Stderr, "error: encode json: %v\n", err)
 			os.Exit(1)
 		}
-
-		draftStore := adapter.NewDraftStore("")
-		savedPath, err := draftStore.Save(draft)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "error: save draft: %v\n", err)
-			os.Exit(1)
-		}
-
-		if *jsonOut {
-			resMap := map[string]any{
-				"staged_path": savedPath,
-				"draft":       draft,
-			}
-			if rep != nil {
-				resMap["attribution"] = rep
-			}
-			enc := json.NewEncoder(os.Stdout)
-			enc.SetIndent("", "  ")
-			if err := enc.Encode(resMap); err != nil {
-				fmt.Fprintf(os.Stderr, "encode json: %v\n", err)
-				os.Exit(1)
-			}
-			return
-		}
-
-		fmt.Printf("Draft ID:       %s\n", draft.ID)
-		fmt.Printf("Staged Path:    %s\n", savedPath)
-		fmt.Printf("Target:         %s\n", draft.Target.CanonicalName)
-		fmt.Printf("Title:          %s\n", draft.Title)
-		if draft.Quality != nil {
-			status := "Passed"
-			if !draft.Quality.Passed {
-				status = "Failed"
-			}
-			fmt.Printf("Quality:        %s (Score: %.2f/1.00)\n", status, draft.Quality.Score)
-		}
-		if draft.SubmissionURL != "" {
-			fmt.Printf("Submission URL: %s\n", draft.SubmissionURL)
-		}
-		if len(draft.PotentialDuplicates) > 0 {
-			fmt.Printf("\nPotential Upstream Duplicates (%d found):\n", len(draft.PotentialDuplicates))
-			for _, d := range draft.PotentialDuplicates {
-				fmt.Printf("  - [%s] (%.0f%% match) %s\n    %s\n", d.State, d.Score*100, d.Title, d.URL)
-			}
-		}
+		return
 
 	case "serve":
 		fs := flag.NewFlagSet("serve", flag.ContinueOnError)
@@ -579,11 +532,10 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "  resolve [--json] [--no-cache] [--timeout <dur>] <q>")
 	fmt.Fprintln(os.Stderr, "                              Resolve software target to bug tracker")
 	fmt.Fprintln(os.Stderr, "  draft [--title <t>] [--summary <s>] [--steps <st>] [--logs <l>]")
-	fmt.Fprintln(os.Stderr, "        [--body-file <path>] [--timeout <dur>] [--json] [--no-cache] <q>")
+	fmt.Fprintln(os.Stderr, "        [--body-file <path>] [--strict-quality] [--timeout <dur>] [--json] [--no-cache] <q>")
 	fmt.Fprintln(os.Stderr, "                              Stage bug report draft and generate submission URLs")
-	fmt.Fprintln(os.Stderr, "  agent [--log <text>] [--log-file <path>] [--target <q>] [--title <t>]")
-	fmt.Fprintln(os.Stderr, "        [--strict-quality] [--timeout <dur>] [--json] [--no-cache] [<target>|<file>]")
-	fmt.Fprintln(os.Stderr, "                              Autonomous triage of crash logs with anti-slop gating")
+	fmt.Fprintln(os.Stderr, "  agent triage [--log-file <path>] [--query <target>] [--title <t>] [--timeout <dur>]")
+	fmt.Fprintln(os.Stderr, "                              Autonomous triage of crash logs outputting machine-parseable JSON")
 	fmt.Fprintln(os.Stderr, "  serve [--addr <addr>] [--drafts-dir <dir>] [--auth-token <tok>] [--audit-log <path>] [--webhook-url <url>] [--webhook-secret <sec>]")
 	fmt.Fprintln(os.Stderr, "                              Start Cloud Control Plane HTTP daemon and Web UI")
 	fmt.Fprintln(os.Stderr, "  mcp                         Start Model Context Protocol (MCP) stdio server")

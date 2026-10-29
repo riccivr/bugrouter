@@ -296,19 +296,13 @@ func TestTriageCrashLogTool(t *testing.T) {
 	wf := resolver.NewWaterfall(0, resolver.NewDirectProbe())
 	server := NewServer(wf, store)
 
-	log := `Traceback (most recent call last):
-  File "/app/main.py", line 45, in <module>
-    fetch_data()
-  File "/app/main.py", line 32, in fetch_data
-    response = requests.get("https://example.com")
-  File "/usr/local/lib/python3.11/site-packages/requests/api.py", line 73, in get
-    return request("get", url, params=params, **kwargs)
-  File "/usr/local/lib/python3.11/site-packages/requests/adapters.py", line 520, in send
-    raise SSLError(e, request=request)
-requests.exceptions.SSLError: HTTPSConnectionPool(host='example.com', port=443): Max retries exceeded
+	log := `panic: runtime error: slice bounds out of range [:20] with capacity 10
+
+goroutine 1 [running]:
+github.com/example/worker.ProcessItems(0xc000088000)
+	/go/pkg/mod/github.com/example/worker@v1.2.0/process.go:88 +0x34
 `
 
-	// 1. Success case with explicit direct target
 	var in, out bytes.Buffer
 	reqPayload := map[string]any{
 		"jsonrpc": "2.0",
@@ -317,8 +311,7 @@ requests.exceptions.SSLError: HTTPSConnectionPool(host='example.com', port=443):
 		"params": map[string]any{
 			"name": "triage_crash_log",
 			"arguments": map[string]any{
-				"log":    log,
-				"target": "https://github.com/psf/requests",
+				"log": log,
 			},
 		},
 	}
@@ -340,44 +333,7 @@ requests.exceptions.SSLError: HTTPSConnectionPool(host='example.com', port=443):
 	}
 
 	rawText := resMap["content"].([]any)[0].(map[string]any)["text"].(string)
-	if !strings.Contains(rawText, "SSLError") || !strings.Contains(rawText, "https://github.com/psf/requests") {
+	if !strings.Contains(rawText, "github.com/example/worker") || !strings.Contains(rawText, "candidates") {
 		t.Errorf("triage result missing expected tokens: %s", rawText)
-	}
-
-	// 2. Strict quality violation test
-	var inStrict, outStrict bytes.Buffer
-	reqStrictPayload := map[string]any{
-		"jsonrpc": "2.0",
-		"id":      2,
-		"method":  "tools/call",
-		"params": map[string]any{
-			"name": "triage_crash_log",
-			"arguments": map[string]any{
-				"log":            log,
-				"target":         "https://github.com/psf/requests",
-				"title":          "Crash when we delve into network requests",
-				"strict_quality": true,
-			},
-		},
-	}
-	reqStrictBytes, _ := json.Marshal(reqStrictPayload)
-	inStrict.Write(append(reqStrictBytes, '\n'))
-
-	if err := server.Run(context.Background(), &inStrict, &outStrict); err != nil {
-		t.Fatalf("server.Run strict failed: %v", err)
-	}
-
-	var respStrict jsonrpcResponse
-	if err := json.Unmarshal([]byte(strings.TrimSpace(outStrict.String())), &respStrict); err != nil {
-		t.Fatalf("unmarshal strict response: %v", err)
-	}
-
-	resStrictMap := respStrict.Result.(map[string]any)
-	if resStrictMap["isError"] != true {
-		t.Errorf("expected isError = true for strict quality violation, got false")
-	}
-	contentStrict := resStrictMap["content"].([]any)[0].(map[string]any)["text"].(string)
-	if !strings.Contains(contentStrict, "strict quality gate rejected draft") || !strings.Contains(contentStrict, "delve") {
-		t.Errorf("expected strict rejection mentioning delve, got: %s", contentStrict)
 	}
 }

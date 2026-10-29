@@ -532,16 +532,17 @@ func TestBuildDraftQualityReport(t *testing.T) {
 		Title:            "Memory leak in streaming worker",
 		Summary:          "Memory usage grows unbounded during long-lived websocket connections.",
 		StepsToReproduce: "1. Open connection.\n2. Stream 100k messages.\n3. Observe memory growth.",
+		Logs:             "FATAL: heap memory exceeded limit",
 	}
 
 	draft, err := BuildDraft(in)
 	if err != nil {
 		t.Fatalf("BuildDraft failed: %v", err)
 	}
-	if draft.Quality == nil {
-		t.Fatalf("expected Quality report on staged draft, got nil")
-	}
 	if !draft.Quality.Passed {
-		t.Errorf("expected clean draft to pass quality check, got violations: %v", draft.Quality.Violations)
+		t.Errorf("expected clean draft to pass quality check, got issues: %v", draft.Quality.Issues)
+	}
+	if draft.Quality.Score != 100 {
+		t.Errorf("expected Score=100, got %d", draft.Quality.Score)
 	}
 }
