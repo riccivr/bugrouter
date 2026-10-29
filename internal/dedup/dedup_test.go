@@ -179,3 +179,75 @@ func TestFindDuplicatesGitHubGitLabBugzilla(t *testing.T) {
 		t.Errorf("bzDups[0].URL = %q, want %q", bzDups[0].URL, expectedBZURL)
 	}
 }
+
+func TestFindDuplicatesEnterpriseHostDerivation(t *testing.T) {
+	var ghEnterpriseHit, glEnterpriseHit bool
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasPrefix(r.URL.Path, "/api/v3/search/issues"):
+			ghEnterpriseHit = true
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{
+				"total_count": 1,
+				"items": [
+					{"number": 404, "title": "Enterprise buffer overflow", "html_url": "https://github.corp/myorg/myrepo/issues/404", "state": "open"}
+				]
+			}`)
+		case strings.Contains(r.URL.EscapedPath(), "/api/v4/projects/mygroup%2Fmyproject/issues"):
+			glEnterpriseHit = true
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `[
+				{"iid": 505, "title": "Self-managed buffer overflow crash", "web_url": "https://gitlab.corp/mygroup/myproject/-/issues/505", "state": "opened"}
+			]`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer ts.Close()
+
+	client := httpx.NewTestClient(0)
+	finder := NewFinder(client) // Uses default endpoints: https://api.github.com, https://gitlab.com
+
+	// 1. GitHub Enterprise target
+	ghTarget := resolver.Target{
+		CanonicalName: "enterprise-pkg",
+		RepositoryURL: ts.URL + "/myorg/myrepo",
+		Tracker: resolver.TrackerInfo{
+			Protocol: resolver.ProtocolGitHub,
+			URL:      ts.URL + "/myorg/myrepo/issues",
+		},
+	}
+
+	ghDups, err := finder.FindDuplicates(context.Background(), ghTarget, scrubber.ScrubbedText("Buffer overflow"))
+	if err != nil {
+		t.Fatalf("FindDuplicates GitHub Enterprise failed: %v", err)
+	}
+	if !ghEnterpriseHit {
+		t.Error("GitHub Enterprise /api/v3 base URL was not derived")
+	}
+	if len(ghDups) != 1 || ghDups[0].ID != "404" {
+		t.Errorf("unexpected GitHub Enterprise dups: %+v", ghDups)
+	}
+
+	// 2. GitLab Self-Managed target
+	glTarget := resolver.Target{
+		CanonicalName: "gitlab-self-managed-pkg",
+		RepositoryURL: ts.URL + "/mygroup/myproject",
+		Tracker: resolver.TrackerInfo{
+			Protocol: resolver.ProtocolGitLab,
+			URL:      ts.URL + "/mygroup/myproject/-/issues",
+		},
+	}
+
+	glDups, err := finder.FindDuplicates(context.Background(), glTarget, scrubber.ScrubbedText("Buffer overflow"))
+	if err != nil {
+		t.Fatalf("FindDuplicates GitLab Self-Managed failed: %v", err)
+	}
+	if !glEnterpriseHit {
+		t.Error("GitLab Self-Managed host base URL was not derived")
+	}
+	if len(glDups) != 1 || glDups[0].ID != "505" {
+		t.Errorf("unexpected GitLab Self-Managed dups: %+v", glDups)
+	}
+}
