@@ -23,7 +23,7 @@ var (
 	slackRegex   = regexp.MustCompile(`\bxox[baprs]-[0-9a-zA-Z\-]{10,}\b`)
 
 	// Generic assignment statements in configuration files and command invocations.
-	genericSecretRegex = regexp.MustCompile(`(?i)\b([a-zA-Z0-9_-]*(?:api[_-]?key|secret|password|passwd|token|client[_-]?secret|access[_-]?key))\b(\s*[:=]\s*["']?)([^"'\s,;\[][^"'\s,;]*)`)
+	genericSecretRegex = regexp.MustCompile(`(?i)\b([a-zA-Z0-9_-]*(?:api[_-]?key|secret|password|passwd|token|client[_-]?secret|access[_-]?key))\b(\s*[:=]\s*["']?)([^"'\s,;\[][^\s,;]*)`)
 
 	// Common non-secret literals to preserve.
 	nonSecretLiterals = map[string]bool{
@@ -66,11 +66,27 @@ func Scrub(raw string) ScrubbedText {
 		if len(subs) < 4 {
 			return match
 		}
-		val := strings.Trim(strings.TrimSpace(subs[3]), "\"'")
-		if len(val) < 6 || nonSecretLiterals[strings.ToLower(val)] {
+		rawVal := subs[3]
+		var trailingQuote string
+		if strings.HasSuffix(rawVal, "\"") {
+			trailingQuote = "\""
+			rawVal = strings.TrimSuffix(rawVal, "\"")
+		} else if strings.HasSuffix(rawVal, "'") {
+			trailingQuote = "'"
+			rawVal = strings.TrimSuffix(rawVal, "'")
+		}
+		cleanVal := strings.Trim(strings.TrimSpace(rawVal), "\"'")
+		if len(cleanVal) < 6 || nonSecretLiterals[strings.ToLower(cleanVal)] {
 			return match
 		}
-		return subs[1] + subs[2] + "[REDACTED_SECRET]"
+		if trailingQuote == "" {
+			if strings.HasSuffix(subs[2], "\"") {
+				trailingQuote = "\""
+			} else if strings.HasSuffix(subs[2], "'") {
+				trailingQuote = "'"
+			}
+		}
+		return subs[1] + subs[2] + "[REDACTED_SECRET]" + trailingQuote
 	})
 
 	// 5. Connection string credentials

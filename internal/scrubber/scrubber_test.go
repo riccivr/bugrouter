@@ -63,8 +63,8 @@ func TestScrub(t *testing.T) {
 		},
 		{
 			name: "generic secret false positive preservation",
-			in:   "password_auth = false\ntoken_required: true\nsecret_key = null\napi_key: nil\ntoken: short",
-			want: "password_auth = false\ntoken_required: true\nsecret_key = null\napi_key: nil\ntoken: short",
+			in:   "password_auth = false\ntoken_required: true\nsecret_key = null\napi_key: nil\ntoken: short\ntoken=\"short\"\npassword='false'",
+			want: "password_auth = false\ntoken_required: true\nsecret_key = null\napi_key: nil\ntoken: short\ntoken=\"short\"\npassword='false'",
 		},
 		{
 			name: "postgres connection string",
