@@ -2,10 +2,14 @@ package cloud
 
 import (
 	"context"
+	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -18,11 +22,14 @@ type ForgeSubmitter = adapter.ForgeSubmitter
 
 // Server provides the Cloud Control Plane HTTP daemon and review queue UI.
 type Server struct {
-	mux        *http.ServeMux
-	draftStore *adapter.DraftStore
-	addr       string
-	submitter  ForgeSubmitter
-	httpServer *http.Server
+	mux             *http.ServeMux
+	draftStore      *adapter.DraftStore
+	addr            string
+	submitter       ForgeSubmitter
+	authToken       string
+	auditLogger     *AuditLogger
+	webhookNotifier *WebhookNotifier
+	httpServer      *http.Server
 }
 
 // NewServer initializes a Cloud Control Plane server with routes registered.
@@ -35,14 +42,96 @@ func NewServer(addr string, store *adapter.DraftStore, submitter ForgeSubmitter)
 		draftStore: store,
 		addr:       addr,
 		submitter:  submitter,
+		authToken:  os.Getenv("BUGROUTER_CLOUD_TOKEN"),
 	}
 	s.registerRoutes()
 	return s
 }
 
-// Handler returns the underlying http.Handler for testing or custom wrapping.
+// WithAuthToken configures a Bearer token requirement for API endpoints.
+func (s *Server) WithAuthToken(token string) *Server {
+	s.authToken = token
+	return s
+}
+
+// WithAuditLogger attaches an append-only JSONL audit logger.
+func (s *Server) WithAuditLogger(logger *AuditLogger) *Server {
+	s.auditLogger = logger
+	return s
+}
+
+// WithWebhookNotifier attaches a webhook notification dispatcher.
+func (s *Server) WithWebhookNotifier(notifier *WebhookNotifier) *Server {
+	s.webhookNotifier = notifier
+	return s
+}
+
+// Handler returns the underlying http.Handler with security middleware applied.
 func (s *Server) Handler() http.Handler {
-	return s.mux
+	return s.securityMiddleware(s.mux)
+}
+
+func (s *Server) securityMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// 1. Bearer Token Auth (when s.authToken != "")
+		if s.authToken != "" {
+			isPublic := r.Method == http.MethodGet && (r.URL.Path == "/" || r.URL.Path == "/api/v1/health")
+			if !isPublic {
+				authHeader := r.Header.Get("Authorization")
+				if !strings.HasPrefix(authHeader, "Bearer ") {
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusUnauthorized)
+					if err := json.NewEncoder(w).Encode(map[string]string{"error": "unauthorized"}); err != nil {
+						http.Error(w, err.Error(), http.StatusInternalServerError)
+					}
+					return
+				}
+				tokenProvided := strings.TrimSpace(strings.TrimPrefix(authHeader, "Bearer "))
+				hProvided := sha256.Sum256([]byte(tokenProvided))
+				hExpected := sha256.Sum256([]byte(s.authToken))
+				if subtle.ConstantTimeCompare(hProvided[:], hExpected[:]) != 1 {
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusUnauthorized)
+					if err := json.NewEncoder(w).Encode(map[string]string{"error": "unauthorized"}); err != nil {
+						http.Error(w, err.Error(), http.StatusInternalServerError)
+					}
+					return
+				}
+			}
+		}
+
+		// 2. CSRF / Cross-Origin Mutation Guard on POST /api/v1/... routes
+		if r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/api/v1/") {
+			if origin := r.Header.Get("Origin"); origin != "" {
+				u, err := url.Parse(origin)
+				if err != nil || u.Host == "" || !strings.EqualFold(u.Host, r.Host) {
+					http.Error(w, "forbidden: cross-origin mutation rejected", http.StatusForbidden)
+					return
+				}
+			}
+
+			hasCustomHeader := r.Header.Get("X-Bugrouter-Request") == "1"
+			hasValidAuth := false
+			if s.authToken != "" {
+				authHeader := r.Header.Get("Authorization")
+				if strings.HasPrefix(authHeader, "Bearer ") {
+					tokenProvided := strings.TrimSpace(strings.TrimPrefix(authHeader, "Bearer "))
+					hProvided := sha256.Sum256([]byte(tokenProvided))
+					hExpected := sha256.Sum256([]byte(s.authToken))
+					if subtle.ConstantTimeCompare(hProvided[:], hExpected[:]) == 1 {
+						hasValidAuth = true
+					}
+				}
+			}
+
+			if !hasCustomHeader && !hasValidAuth {
+				http.Error(w, "forbidden: missing CSRF guard header", http.StatusForbidden)
+				return
+			}
+		}
+
+		next.ServeHTTP(w, r)
+	})
 }
 
 func (s *Server) registerRoutes() {
@@ -50,6 +139,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/v1/drafts", s.handleListDrafts)
 	s.mux.HandleFunc("POST /api/v1/drafts/{id}/approve", s.handleApproveDraft)
 	s.mux.HandleFunc("POST /api/v1/drafts/{id}/discard", s.handleDiscardDraft)
+	s.mux.HandleFunc("GET /api/v1/audit", s.handleAuditLog)
 	s.mux.HandleFunc("GET /", s.handleIndex)
 }
 
@@ -119,10 +209,34 @@ func (s *Server) handleApproveDraft(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	remoteIP, _, ipErr := net.SplitHostPort(r.RemoteAddr)
+	if ipErr != nil {
+		remoteIP = r.RemoteAddr
+	}
+
 	var issueURL string
 	if s.submitter != nil {
 		issueURL, err = s.submitter.Submit(r.Context(), draft)
 		if err != nil {
+			if s.auditLogger != nil {
+				failEv := AuditEvent{
+					Timestamp: time.Now().UTC(),
+					Action:    "draft.submit_failed",
+					DraftID:   id,
+					Target:    draft.Target.CanonicalName,
+					Protocol:  draft.Target.Tracker.Protocol,
+					RemoteIP:  remoteIP,
+					Error:     err.Error(),
+				}
+				if logErr := s.auditLogger.Record(failEv); logErr != nil {
+					fmt.Fprintf(os.Stderr, "audit log record error: %v\n", logErr)
+				}
+				if s.webhookNotifier != nil {
+					if notifyErr := s.webhookNotifier.Notify(r.Context(), failEv); notifyErr != nil {
+						fmt.Fprintf(os.Stderr, "webhook notify error: %v\n", notifyErr)
+					}
+				}
+			}
 			http.Error(w, fmt.Sprintf("submit draft to upstream tracker: %v", err), http.StatusInternalServerError)
 			return
 		}
@@ -138,6 +252,26 @@ func (s *Server) handleApproveDraft(w http.ResponseWriter, r *http.Request) {
 	if _, err := s.draftStore.Save(draft); err != nil {
 		http.Error(w, fmt.Sprintf("save updated draft %s: %v", id, err), http.StatusInternalServerError)
 		return
+	}
+
+	ev := AuditEvent{
+		Timestamp: time.Now().UTC(),
+		Action:    "draft.approved",
+		DraftID:   id,
+		Target:    draft.Target.CanonicalName,
+		Protocol:  draft.Target.Tracker.Protocol,
+		IssueURL:  issueURL,
+		RemoteIP:  remoteIP,
+	}
+	if s.auditLogger != nil {
+		if logErr := s.auditLogger.Record(ev); logErr != nil {
+			fmt.Fprintf(os.Stderr, "audit log record error: %v\n", logErr)
+		}
+	}
+	if s.webhookNotifier != nil {
+		if notifyErr := s.webhookNotifier.Notify(r.Context(), ev); notifyErr != nil {
+			fmt.Fprintf(os.Stderr, "webhook notify error: %v\n", notifyErr)
+		}
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -168,10 +302,34 @@ func (s *Server) handleDiscardDraft(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	remoteIP, _, ipErr := net.SplitHostPort(r.RemoteAddr)
+	if ipErr != nil {
+		remoteIP = r.RemoteAddr
+	}
+
 	draft.Status = "discarded"
 	if _, err := s.draftStore.Save(draft); err != nil {
 		http.Error(w, fmt.Sprintf("save discarded draft %s: %v", id, err), http.StatusInternalServerError)
 		return
+	}
+
+	ev := AuditEvent{
+		Timestamp: time.Now().UTC(),
+		Action:    "draft.discarded",
+		DraftID:   id,
+		Target:    draft.Target.CanonicalName,
+		Protocol:  draft.Target.Tracker.Protocol,
+		RemoteIP:  remoteIP,
+	}
+	if s.auditLogger != nil {
+		if logErr := s.auditLogger.Record(ev); logErr != nil {
+			fmt.Fprintf(os.Stderr, "audit log record error: %v\n", logErr)
+		}
+	}
+	if s.webhookNotifier != nil {
+		if notifyErr := s.webhookNotifier.Notify(r.Context(), ev); notifyErr != nil {
+			fmt.Fprintf(os.Stderr, "webhook notify error: %v\n", notifyErr)
+		}
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -179,6 +337,25 @@ func (s *Server) handleDiscardDraft(w http.ResponseWriter, r *http.Request) {
 		"status": "discarded",
 		"id":     id,
 	}); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+}
+
+func (s *Server) handleAuditLog(w http.ResponseWriter, r *http.Request) {
+	var events []AuditEvent
+	var err error
+	if s.auditLogger != nil {
+		events, err = s.auditLogger.ListRecent(50)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("list audit log: %v", err), http.StatusInternalServerError)
+			return
+		}
+	} else {
+		events = []AuditEvent{}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(events); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
 }
@@ -202,7 +379,7 @@ func (s *Server) Start() error {
 		return fmt.Errorf("listen on %s: %w", s.addr, err)
 	}
 	s.httpServer = &http.Server{
-		Handler:           s.mux,
+		Handler:           s.Handler(),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      15 * time.Second,
@@ -365,7 +542,8 @@ const indexHTML = `<!DOCTYPE html>
 <body>
   <header>
     <h1>bugrouter <span>Cloud Control Plane</span> <span class="badge">CalVer 2026.10.0</span></h1>
-    <div>
+    <div style="display: flex; gap: 8px; align-items: center;">
+      <input type="password" id="auth-token" placeholder="Auth Token" style="padding: 6px 10px; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; color: var(--text); font-size: 0.85rem;" onchange="saveToken(this.value)">
       <button class="btn btn-inspect" onclick="fetchDrafts()">Refresh Queue</button>
     </div>
   </header>
@@ -404,9 +582,32 @@ const indexHTML = `<!DOCTYPE html>
   <script>
     let currentDrafts = [];
 
+    function getToken() {
+      return sessionStorage.getItem('bugrouter_token') || '';
+    }
+
+    function saveToken(val) {
+      sessionStorage.setItem('bugrouter_token', val.trim());
+    }
+
+    const storedToken = getToken();
+    if (storedToken) {
+      const tokenInput = document.getElementById('auth-token');
+      if (tokenInput) tokenInput.value = storedToken;
+    }
+
+    function getHeaders() {
+      const headers = { 'X-Bugrouter-Request': '1' };
+      const tok = getToken();
+      if (tok) {
+        headers['Authorization'] = 'Bearer ' + tok;
+      }
+      return headers;
+    }
+
     async function fetchDrafts() {
       try {
-        const res = await fetch('/api/v1/drafts');
+        const res = await fetch('/api/v1/drafts', { headers: getHeaders() });
         currentDrafts = await res.json();
         renderTable();
       } catch (err) {
@@ -481,7 +682,10 @@ const indexHTML = `<!DOCTYPE html>
     async function approveDraft(id) {
       if (!confirm('Approve and submit draft ' + id + ' to upstream tracker?')) return;
       try {
-        const res = await fetch('/api/v1/drafts/' + id + '/approve', { method: 'POST' });
+        const res = await fetch('/api/v1/drafts/' + id + '/approve', {
+          method: 'POST',
+          headers: getHeaders()
+        });
         if (!res.ok) {
           const errText = await res.text();
           alert('Approval failed: ' + errText);
@@ -496,7 +700,10 @@ const indexHTML = `<!DOCTYPE html>
     async function discardDraft(id) {
       if (!confirm('Discard staged draft ' + id + '?')) return;
       try {
-        const res = await fetch('/api/v1/drafts/' + id + '/discard', { method: 'POST' });
+        const res = await fetch('/api/v1/drafts/' + id + '/discard', {
+          method: 'POST',
+          headers: getHeaders()
+        });
         if (!res.ok) {
           const errText = await res.text();
           alert('Discard failed: ' + errText);
