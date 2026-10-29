@@ -23,23 +23,31 @@ func TestParseMarkdownBodyFileHeadings(t *testing.T) {
 	raw := `## Summary
 Payment gateway timed out unexpectedly.
 
+### Environment Details
+Region: us-east-1
+Cluster: prod-checkout
+
 ## Steps to Reproduce
 1. Navigate to /checkout
 2. Submit valid payment info
 3. Observe 504 Gateway Timeout
 
 ## Logs & Output
+### Stack Trace
 [error] dial tcp 10.0.0.1:443: i/o timeout
 `
 	summary, steps, logs := parseMarkdownBodyFile(raw)
-	if summary != "Payment gateway timed out unexpectedly." {
+	if !strings.Contains(summary, "Payment gateway timed out unexpectedly.") {
 		t.Errorf("summary = %q, want expected summary", summary)
+	}
+	if !strings.Contains(summary, "### Environment Details") || !strings.Contains(summary, "prod-checkout") {
+		t.Errorf("summary = %q, missing ### Environment Details or body content", summary)
 	}
 	if !strings.Contains(steps, "504 Gateway Timeout") {
 		t.Errorf("steps = %q, want steps text", steps)
 	}
-	if !strings.Contains(logs, "i/o timeout") {
-		t.Errorf("logs = %q, want logs text", logs)
+	if !strings.Contains(logs, "### Stack Trace") || !strings.Contains(logs, "i/o timeout") {
+		t.Errorf("logs = %q, missing ### Stack Trace or log output", logs)
 	}
 }
 
@@ -58,8 +66,6 @@ func TestParseMarkdownBodyFileNoHeadings(t *testing.T) {
 }
 
 func TestGoldenPathDraftAndBodyFile(t *testing.T) {
-	t.Setenv("BUGROUTER_ALLOW_PRIVATE_HOSTS", "1")
-
 	tempDir := t.TempDir()
 	dataHome := filepath.Join(tempDir, "data")
 	cacheHome := filepath.Join(tempDir, "cache")
@@ -165,7 +171,8 @@ Fatal error reading config from /home/alice/secret.txt
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	target, err := resolveTarget(ctx, "checkout-api", true)
+	httpClient := httpx.NewTestClient(0)
+	target, err := resolveTarget(ctx, httpClient, "checkout-api", true)
 	if err != nil {
 		t.Fatalf("resolveTarget checkout-api: %v", err)
 	}
@@ -177,7 +184,6 @@ Fatal error reading config from /home/alice/secret.txt
 	}
 
 	// 3. Exercise Template Introspection
-	httpClient := httpx.NewClient(0)
 	intro := introspector.New(httpClient)
 	schema, err := intro.Introspect(ctx, *target)
 	if err != nil {

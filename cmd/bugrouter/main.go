@@ -26,8 +26,10 @@ import (
 	"github.com/riccivr/bugrouter/internal/version"
 )
 
-func resolveTarget(ctx context.Context, query string, noCache bool) (*resolver.Target, error) {
-	httpClient := httpx.NewClient(0)
+func resolveTarget(ctx context.Context, httpClient *httpx.Client, query string, noCache bool) (*resolver.Target, error) {
+	if httpClient == nil {
+		httpClient = httpx.NewClient(0)
+	}
 	wf := resolver.NewWaterfall(
 		0,
 		resolver.NewOrgCloudProbe(),
@@ -58,7 +60,7 @@ func parseMarkdownBodyFile(raw string) (summary, steps, logs string) {
 
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "##") {
+		if strings.HasPrefix(trimmed, "#") {
 			heading := strings.TrimSpace(strings.TrimLeft(trimmed, "#"))
 			lower := strings.ToLower(heading)
 			switch {
@@ -75,8 +77,10 @@ func parseMarkdownBodyFile(raw string) (summary, steps, logs string) {
 				hasAnyRecognizedHeading = true
 				continue
 			default:
-				currentSection = secNone
-				continue
+				if strings.HasPrefix(trimmed, "## ") {
+					currentSection = secNone
+					continue
+				}
 			}
 		}
 
@@ -150,7 +154,8 @@ func main() {
 		ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 		defer cancel()
 
-		target, err := resolveTarget(ctx, args[0], *noCache)
+		httpClient := httpx.NewClient(0)
+		target, err := resolveTarget(ctx, httpClient, args[0], *noCache)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			os.Exit(1)
@@ -237,13 +242,13 @@ func main() {
 		ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 		defer cancel()
 
-		target, err := resolveTarget(ctx, args[0], *noCache)
+		httpClient := httpx.NewClient(0)
+		target, err := resolveTarget(ctx, httpClient, args[0], *noCache)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			os.Exit(1)
 		}
 
-		httpClient := httpx.NewClient(0)
 		intro := introspector.New(httpClient)
 		if !*noCache {
 			intro.WithCache(cache.NewStore("", 0))
