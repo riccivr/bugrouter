@@ -135,8 +135,16 @@ func (intro *Introspector) introspectGitHub(ctx context.Context, target resolver
 	}
 
 	baseURL := intro.endpoints.GitHubAPIBaseURL
-	if baseURL == "" {
-		baseURL = "https://api.github.com"
+	if baseURL == "" || baseURL == "https://api.github.com" {
+		rawURL := target.Tracker.URL
+		if rawURL == "" {
+			rawURL = target.RepositoryURL
+		}
+		if u, parseErr := url.Parse(rawURL); parseErr == nil && u.Host != "" && !strings.EqualFold(u.Host, "github.com") {
+			baseURL = fmt.Sprintf("%s://%s/api/v3", u.Scheme, u.Host)
+		} else if baseURL == "" {
+			baseURL = "https://api.github.com"
+		}
 	}
 	baseURL = strings.TrimRight(baseURL, "/")
 
@@ -248,8 +256,16 @@ func (intro *Introspector) introspectGitLab(ctx context.Context, target resolver
 	encodedPath := url.PathEscape(projectPath)
 
 	baseURL := intro.endpoints.GitLabBaseURL
-	if baseURL == "" {
-		baseURL = "https://gitlab.com"
+	if baseURL == "" || baseURL == "https://gitlab.com" {
+		rawURL := target.Tracker.URL
+		if rawURL == "" {
+			rawURL = target.RepositoryURL
+		}
+		if u, parseErr := url.Parse(rawURL); parseErr == nil && u.Host != "" && !strings.EqualFold(u.Host, "gitlab.com") {
+			baseURL = fmt.Sprintf("%s://%s", u.Scheme, u.Host)
+		} else if baseURL == "" {
+			baseURL = "https://gitlab.com"
+		}
 	}
 	baseURL = strings.TrimRight(baseURL, "/")
 

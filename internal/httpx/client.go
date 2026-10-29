@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -61,7 +62,7 @@ func NewClient(timeout time.Duration) *Client {
 
 	c := &Client{
 		maxBodyBytes:      defaultMaxBodyBytes,
-		allowPrivateHosts: false,
+		allowPrivateHosts: os.Getenv("BUGROUTER_ALLOW_PRIVATE_HOSTS") == "1",
 	}
 
 	dialer := &net.Dialer{
