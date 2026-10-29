@@ -3,6 +3,7 @@ package scrubber
 import (
 	"regexp"
 	"runtime"
+	"strings"
 )
 
 // ScrubbedText represents sanitized text that has passed through credential and PII redaction.
@@ -23,6 +24,18 @@ var (
 
 	// Generic assignment statements in configuration files and command invocations.
 	genericSecretRegex = regexp.MustCompile(`(?i)\b([a-zA-Z0-9_-]*(?:api[_-]?key|secret|password|passwd|token|client[_-]?secret|access[_-]?key))\b(\s*[:=]\s*["']?)([^"'\s,;\[][^"'\s,;]*)`)
+
+	// Common non-secret literals to preserve.
+	nonSecretLiterals = map[string]bool{
+		"true":      true,
+		"false":     true,
+		"null":      true,
+		"nil":       true,
+		"none":      true,
+		"undefined": true,
+		"yes":       true,
+		"no":        true,
+	}
 
 	// Database and service URIs containing inline credentials.
 	connStringRegex = regexp.MustCompile(`([a-zA-Z0-9+.-]+://[^:/\s]+:)([^@\s]+)(@)`)
@@ -48,7 +61,17 @@ func Scrub(raw string) ScrubbedText {
 	s = slackRegex.ReplaceAllString(s, "[REDACTED_SLACK_TOKEN]")
 
 	// 4. Generic key/secret assignments
-	s = genericSecretRegex.ReplaceAllString(s, "${1}${2}[REDACTED_SECRET]")
+	s = genericSecretRegex.ReplaceAllStringFunc(s, func(match string) string {
+		subs := genericSecretRegex.FindStringSubmatch(match)
+		if len(subs) < 4 {
+			return match
+		}
+		val := strings.Trim(strings.TrimSpace(subs[3]), "\"'")
+		if len(val) < 6 || nonSecretLiterals[strings.ToLower(val)] {
+			return match
+		}
+		return subs[1] + subs[2] + "[REDACTED_SECRET]"
+	})
 
 	// 5. Connection string credentials
 	s = connStringRegex.ReplaceAllString(s, "${1}[REDACTED_PASSWORD]${3}")

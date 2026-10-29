@@ -62,6 +62,11 @@ func TestScrub(t *testing.T) {
 			want: "DATABASE_PASSWORD=[REDACTED_SECRET]\nCLIENT_SECRET=\"[REDACTED_SECRET]\"",
 		},
 		{
+			name: "generic secret false positive preservation",
+			in:   "password_auth = false\ntoken_required: true\nsecret_key = null\napi_key: nil\ntoken: short",
+			want: "password_auth = false\ntoken_required: true\nsecret_key = null\napi_key: nil\ntoken: short",
+		},
+		{
 			name: "postgres connection string",
 			in:   "postgres://admin:mypassword123@localhost:5432/mydb",
 			want: "postgres://admin:[REDACTED_PASSWORD]@localhost:5432/mydb",
