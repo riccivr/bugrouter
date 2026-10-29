@@ -1,7 +1,7 @@
 # ARCHITECTURE_STATE.md — bugrouter System Architecture & Handoff
 
 Current CalVer: **2026.10.0**  
-Status: **Milestone 4 Spec 10 Completed** (CLI/README Parity + MCP Audit Trail Integration + Idempotent Approval Guard + Private Repository Auth Headers)
+Status: **Milestone 4 Spec 10.1 Completed** (Post-Spec #10 Red-Team Credential Boundary Remediation + Bugzilla GitLab Token Removal + Cross-Host Redirect Auth Stripping + GitHub Download URL Scoping)
 
 ---
 
@@ -143,3 +143,8 @@ TemplateSchema                             PotentialDuplicates
 - Integrated `AuditLogger` and `WebhookNotifier` into `mcp.Server` in `internal/mcp/server.go`, recording `draft.approved` and `draft.submit_failed` audit events from MCP tool invocations with `RemoteIP: "mcp-stdio"`.
 - Extended `httpx.Client` with `GetBytesWithHeaders` in `internal/httpx/client.go` to support custom authorization headers.
 - Added environment token authentication in `internal/introspector/introspector.go` and `internal/dedup/dedup.go` for GitHub (`GITHUB_TOKEN`, `GH_TOKEN`, `BUGROUTER_GITHUB_TOKEN`) and GitLab (`GITLAB_TOKEN`, `GL_TOKEN`, `BUGROUTER_GITLAB_TOKEN`), resolving access on private enterprise repositories and lifting unauthenticated rate limits.
+
+### Spec #10.1: Post-Spec #10 Red-Team Credential Boundary Remediation (COMPLETED)
+- Remediated cross-protocol credential leak in `internal/dedup/dedup.go` (`findBugzilla`): removed extraneous GitLab token environment lookup loop that was forwarding `PRIVATE-TOKEN` headers to Bugzilla servers.
+- Hardened cross-host redirect security in `internal/httpx/client.go`: added automated stripping of sensitive authentication headers (`Authorization` and `PRIVATE-TOKEN`) whenever `CheckRedirect` detects a transition across different hostnames (`!strings.EqualFold(req.URL.Hostname(), via[0].URL.Hostname())`).
+- Scoped GitHub token forwarding in `internal/introspector/introspector.go`: implemented `shouldSendGitHubAuth` ensuring `gitHubAuthHeader()` is only attached to `best.DownloadURL` if the target hostname matches the configured API base URL, `"github.com"`, or `"raw.githubusercontent.com"`, preventing exfiltration to untrusted external mirrors.
