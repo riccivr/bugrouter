@@ -1,7 +1,7 @@
 # ARCHITECTURE_STATE.md — bugrouter System Architecture & Handoff
 
 Current CalVer: **2026.10.0**  
-Status: **Milestone 4 Spec 09 Completed** (v1.0 Readiness, CLI UX Polish, `--body-file` Stdin Support, Scrubber Precision Hardening, Cloud Web UI Audit Trail, Enterprise Host Derivation, and E2E Golden-Path Integration Tests)
+Status: **Milestone 4 Spec 09.1 Completed** (Post-Spec #09 Red-Team Remediation + v1.0 Release Lock + SSRF Env Bypass Removal + Body File Subheading Preservation + Scrubber Trailing Quote Handling)
 
 ---
 
@@ -128,3 +128,10 @@ TemplateSchema                             PotentialDuplicates
 - Cloud Control Plane audit trail in `internal/cloud`: added "Recent Audit Trail" table to embedded SPA `indexHTML` fetching `/api/v1/audit` with headers, rendering timestamps, actions, draft IDs, targets, protocols, and escaped clickable URLs or errors, refreshing on load, refresh button, approval, and discard.
 - Introspector enterprise API URL derivation: aligned `internal/introspector` with `dedup` and `cloud.ForgeClient` to derive `/api/v3` for GitHub Enterprise and self-managed GitLab hosts.
 - Comprehensive end-to-end golden-path integration tests in `cmd/bugrouter/main_test.go`: verified end-to-end flow from `--body-file` parsing, target resolution, template introspection, duplicate detection, draft generation with scrubber redaction, template field mapping, and draft storage serialization with `0600` permissions.
+
+### Spec #09.1: Post-Milestone 4 Red-Team Remediation (COMPLETED)
+- Removed `BUGROUTER_ALLOW_PRIVATE_HOSTS` environment bypass in `internal/httpx/client.go` to ensure SSRF and loopback network protections remain unconditional in production binaries.
+- Wired shared `*httpx.Client` parameter into `resolveTarget` in `cmd/bugrouter/main.go`, sharing a single bounded HTTP client instance across resolution, introspection, and duplicate detection in `resolve` and `draft` commands.
+- Updated `cmd/bugrouter/main_test.go` to use `httpx.NewTestClient(0)` directly without relying on process-level environment variable overrides.
+- Fixed subheading drop bug in `cmd/bugrouter/main.go` (`parseMarkdownBodyFile`): ensured level-3+ subheadings (`### ...`) inside active sections (`## Summary`, `## Logs`) are preserved as regular section content rather than resetting the active section.
+- Hardened quoted generic secret redaction in `internal/scrubber/scrubber.go`: separated trailing quotes from captured values before evaluating length thresholds and non-secret literals, preserving trailing quotes in redaction replacements (`CLIENT_SECRET="[REDACTED_SECRET]"`) and preventing false-positive redaction on quoted short values (`token="short"`).
