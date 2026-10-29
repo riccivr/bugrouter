@@ -17,6 +17,7 @@ import (
 	"github.com/riccivr/bugrouter/internal/introspector"
 	"github.com/riccivr/bugrouter/internal/resolver"
 	"github.com/riccivr/bugrouter/internal/scrubber"
+	"github.com/riccivr/bugrouter/internal/verifier"
 )
 
 func TestParseMarkdownBodyFileHeadings(t *testing.T) {
@@ -380,5 +381,60 @@ func TestDraftStrictQualityEvaluation(t *testing.T) {
 	}
 	if draftClean.Quality.Score != 100 {
 		t.Errorf("clean draft score = %d, want 100", draftClean.Quality.Score)
+	}
+}
+
+func TestAgentVerifyIntegration(t *testing.T) {
+	proof, err := verifier.Verify(context.Background(), verifier.VerifyOptions{
+		Command: "echo 'error log' && exit 1",
+	})
+	if err != nil {
+		t.Fatalf("verifier.Verify failed: %v", err)
+	}
+	if !proof.Reproduced {
+		t.Errorf("expected Reproduced=true")
+	}
+	if proof.ExitCode != 1 {
+		t.Errorf("expected ExitCode=1, got %d", proof.ExitCode)
+	}
+	if !strings.Contains(string(proof.ScrubbedOutput), "error log") {
+		t.Errorf("expected scrubbed output to contain 'error log', got %s", proof.ScrubbedOutput)
+	}
+}
+
+func TestDraftVerifyCmdIntegration(t *testing.T) {
+	proof, err := verifier.Verify(context.Background(), verifier.VerifyOptions{
+		Command: "echo 'panic: stack trace failure' && exit 1",
+	})
+	if err != nil {
+		t.Fatalf("verifier.Verify failed: %v", err)
+	}
+
+	in := adapter.DraftInput{
+		Target: resolver.Target{
+			CanonicalName: "core-svc",
+		},
+		Title:            "Crash in core service worker",
+		Summary:          "A failure was verified through automated reproduction.",
+		StepsToReproduce: "1. Run verify script\n2. Observe exit code 1",
+		Verification:     proof,
+	}
+
+	draft, err := adapter.BuildDraft(in)
+	if err != nil {
+		t.Fatalf("BuildDraft failed: %v", err)
+	}
+
+	if draft.Verification == nil {
+		t.Fatalf("expected Verification to be set on draft")
+	}
+	if !draft.Verification.Reproduced {
+		t.Errorf("expected draft.Verification.Reproduced = true")
+	}
+	if !strings.Contains(string(draft.MarkdownBody), "## Verified Reproduction") {
+		t.Errorf("expected markdown body to contain verified reproduction section")
+	}
+	if !strings.Contains(string(draft.MarkdownBody), "panic: stack trace failure") {
+		t.Errorf("expected auto-populated logs in markdown body")
 	}
 }

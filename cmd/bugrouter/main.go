@@ -24,6 +24,7 @@ import (
 	"github.com/riccivr/bugrouter/internal/mcp"
 	"github.com/riccivr/bugrouter/internal/resolver"
 	"github.com/riccivr/bugrouter/internal/scrubber"
+	"github.com/riccivr/bugrouter/internal/verifier"
 	"github.com/riccivr/bugrouter/internal/version"
 )
 
@@ -204,6 +205,7 @@ func main() {
 		bodyFile := fs.String("body-file", "", "path to markdown body file or '-' for stdin")
 		timeout := fs.Duration("timeout", 15*time.Second, "request and probe timeout duration")
 		strictQuality := fs.Bool("strict-quality", false, "reject draft if quality checks fail")
+		verifyCmd := fs.String("verify-cmd", "", "run bounded command to verify reproduction and attach proof")
 		jsonOut := fs.Bool("json", false, "output structured JSON")
 		noCache := fs.Bool("no-cache", false, "disable disk cache")
 		if err := fs.Parse(os.Args[2:]); err != nil {
@@ -278,6 +280,22 @@ func main() {
 			dups = nil
 		}
 
+		var proof *verifier.VerificationProof
+		if *verifyCmd != "" {
+			p, err := verifier.Verify(ctx, verifier.VerifyOptions{
+				Command: *verifyCmd,
+				Timeout: *timeout,
+			})
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "error: verify reproduction: %v\n", err)
+				os.Exit(1)
+			}
+			proof = p
+			if *logs == "" && proof.ScrubbedOutput != "" {
+				*logs = string(proof.ScrubbedOutput)
+			}
+		}
+
 		draft, err := adapter.BuildDraft(adapter.DraftInput{
 			Target:           *target,
 			Title:            *title,
@@ -286,6 +304,7 @@ func main() {
 			Logs:             *logs,
 			Template:         schema,
 			Duplicates:       dups,
+			Verification:     proof,
 		})
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: build draft: %v\n", err)
@@ -296,7 +315,9 @@ func main() {
 			if *jsonOut {
 				enc := json.NewEncoder(os.Stdout)
 				enc.SetIndent("", "  ")
-				_ = enc.Encode(draft.Quality)
+				if err := enc.Encode(draft.Quality); err != nil {
+					fmt.Fprintf(os.Stderr, "encode json: %v\n", err)
+				}
 			} else {
 				fmt.Fprintf(os.Stderr, "error: strict quality gate failed (Score: %d/100, Grade: %s):\n", draft.Quality.Score, draft.Quality.Grade)
 				for _, issue := range draft.Quality.Issues {
@@ -341,13 +362,54 @@ func main() {
 		}
 
 	case "agent":
+		if len(os.Args) < 3 {
+			fmt.Fprintln(os.Stderr, "Usage: bugrouter agent <triage|verify> [arguments]")
+			os.Exit(1)
+		}
+
+		if os.Args[2] == "verify" {
+			fs := flag.NewFlagSet("agent verify", flag.ContinueOnError)
+			cmd := fs.String("cmd", "", "reproduction command to execute")
+			timeout := fs.Duration("timeout", 15*time.Second, "execution timeout duration")
+			expectExit := fs.Int("expect-exit", 0, "expected exit code (0 means any non-zero exit code is considered reproduced)")
+			workDir := fs.String("work-dir", "", "working directory for reproduction command")
+			if err := fs.Parse(os.Args[3:]); err != nil {
+				os.Exit(1)
+			}
+
+			if strings.TrimSpace(*cmd) == "" {
+				fmt.Fprintln(os.Stderr, "error: --cmd is required")
+				os.Exit(1)
+			}
+
+			ctx := context.Background()
+			proof, err := verifier.Verify(ctx, verifier.VerifyOptions{
+				Command:    *cmd,
+				Timeout:    *timeout,
+				ExpectExit: *expectExit,
+				WorkDir:    *workDir,
+			})
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "error: verify: %v\n", err)
+				os.Exit(1)
+			}
+
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			if err := enc.Encode(proof); err != nil {
+				fmt.Fprintf(os.Stderr, "error: encode json: %v\n", err)
+				os.Exit(1)
+			}
+			return
+		}
+
 		var agentArgs []string
-		if len(os.Args) > 2 && os.Args[2] == "triage" {
+		if os.Args[2] == "triage" {
 			agentArgs = os.Args[3:]
-		} else if len(os.Args) > 2 && strings.HasPrefix(os.Args[2], "-") {
+		} else if strings.HasPrefix(os.Args[2], "-") {
 			agentArgs = os.Args[2:]
 		} else {
-			fmt.Fprintln(os.Stderr, "Usage: bugrouter agent triage [--log-file <path>] [--query <target>] [--title <t>] [--timeout <dur>]")
+			fmt.Fprintln(os.Stderr, "Usage: bugrouter agent <triage|verify> [arguments]")
 			os.Exit(1)
 		}
 
@@ -532,10 +594,12 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "  resolve [--json] [--no-cache] [--timeout <dur>] <q>")
 	fmt.Fprintln(os.Stderr, "                              Resolve software target to bug tracker")
 	fmt.Fprintln(os.Stderr, "  draft [--title <t>] [--summary <s>] [--steps <st>] [--logs <l>]")
-	fmt.Fprintln(os.Stderr, "        [--body-file <path>] [--strict-quality] [--timeout <dur>] [--json] [--no-cache] <q>")
+	fmt.Fprintln(os.Stderr, "        [--verify-cmd <cmd>] [--body-file <path>] [--strict-quality] [--timeout <dur>] [--json] [--no-cache] <q>")
 	fmt.Fprintln(os.Stderr, "                              Stage bug report draft and generate submission URLs")
 	fmt.Fprintln(os.Stderr, "  agent triage [--log-file <path>] [--query <target>] [--title <t>] [--timeout <dur>]")
 	fmt.Fprintln(os.Stderr, "                              Autonomous triage of crash logs outputting machine-parseable JSON")
+	fmt.Fprintln(os.Stderr, "  agent verify --cmd <command> [--timeout <dur>] [--expect-exit <code>] [--work-dir <dir>]")
+	fmt.Fprintln(os.Stderr, "                              Bounded reproduction execution and deterministic proof generation")
 	fmt.Fprintln(os.Stderr, "  serve [--addr <addr>] [--drafts-dir <dir>] [--auth-token <tok>] [--audit-log <path>] [--webhook-url <url>] [--webhook-secret <sec>]")
 	fmt.Fprintln(os.Stderr, "                              Start Cloud Control Plane HTTP daemon and Web UI")
 	fmt.Fprintln(os.Stderr, "  mcp                         Start Model Context Protocol (MCP) stdio server")

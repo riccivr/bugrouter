@@ -126,8 +126,8 @@ body:
 	}
 	res3 := resp3.Result.(map[string]any)
 	tools := res3["tools"].([]any)
-	if len(tools) != 8 {
-		t.Errorf("expected 8 tools, got %d", len(tools))
+	if len(tools) != 9 {
+		t.Errorf("expected 9 tools, got %d", len(tools))
 	}
 
 	// Response 4: tools/call scrub_text
@@ -315,7 +315,10 @@ github.com/example/worker.ProcessItems(0xc000088000)
 			},
 		},
 	}
-	reqBytes, _ := json.Marshal(reqPayload)
+	reqBytes, err := json.Marshal(reqPayload)
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
 	in.Write(append(reqBytes, '\n'))
 
 	if err := server.Run(context.Background(), &in, &out); err != nil {
@@ -335,5 +338,111 @@ github.com/example/worker.ProcessItems(0xc000088000)
 	rawText := resMap["content"].([]any)[0].(map[string]any)["text"].(string)
 	if !strings.Contains(rawText, "github.com/example/worker") || !strings.Contains(rawText, "candidates") {
 		t.Errorf("triage result missing expected tokens: %s", rawText)
+	}
+}
+
+func TestVerifyReproductionTool(t *testing.T) {
+	tempDir := t.TempDir()
+	store := adapter.NewDraftStore(tempDir)
+	wf := resolver.NewWaterfall(time.Second, resolver.NewDirectProbe())
+	server := NewServer(wf, store)
+
+	var in, out bytes.Buffer
+	reqPayload := map[string]any{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"method":  "tools/call",
+		"params": map[string]any{
+			"name": "verify_reproduction",
+			"arguments": map[string]any{
+				"command": "echo reproduced-output",
+			},
+		},
+	}
+	reqBytes, err := json.Marshal(reqPayload)
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	in.Write(append(reqBytes, '\n'))
+
+	if err := server.Run(context.Background(), &in, &out); err != nil {
+		t.Fatalf("server.Run failed: %v", err)
+	}
+
+	var resp jsonrpcResponse
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out.String())), &resp); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+
+	resMap, ok := resp.Result.(map[string]any)
+	if !ok {
+		t.Fatalf("expected result map, got: %v", resp.Result)
+	}
+	if resMap["isError"] != false {
+		t.Fatalf("verify_reproduction isError = true: %v", resMap)
+	}
+
+	rawText := resMap["content"].([]any)[0].(map[string]any)["text"].(string)
+	if !strings.Contains(rawText, "reproduced-output") || !strings.Contains(rawText, "proof_digest") {
+		t.Errorf("verify result missing expected content: %s", rawText)
+	}
+}
+
+func TestDraftBugReportStrictQualityRejection(t *testing.T) {
+	tempDir := t.TempDir()
+	store := adapter.NewDraftStore(tempDir)
+	wf := resolver.NewWaterfall(time.Second, resolver.NewDirectProbe())
+	server := NewServer(wf, store)
+
+	var in, out bytes.Buffer
+	reqPayload := map[string]any{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"method":  "tools/call",
+		"params": map[string]any{
+			"name": "draft_bug_report",
+			"arguments": map[string]any{
+				"query":          "https://github.com/expressjs/express",
+				"title":          "bug",
+				"summary":        "As an AI, I noticed that express crashed.",
+				"strict_quality": true,
+			},
+		},
+	}
+	reqBytes, err := json.Marshal(reqPayload)
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	in.Write(append(reqBytes, '\n'))
+
+	if err := server.Run(context.Background(), &in, &out); err != nil {
+		t.Fatalf("server.Run failed: %v", err)
+	}
+
+	var resp jsonrpcResponse
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out.String())), &resp); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+
+	resMap, ok := resp.Result.(map[string]any)
+	if !ok {
+		t.Fatalf("expected result map, got: %v", resp.Result)
+	}
+	if resMap["isError"] != true {
+		t.Fatalf("expected isError = true for strict quality failure, got: %v", resMap)
+	}
+
+	rawText := resMap["content"].([]any)[0].(map[string]any)["text"].(string)
+	if !strings.Contains(rawText, "passed") || !strings.Contains(rawText, "false") {
+		t.Errorf("expected quality report in rejection output: %s", rawText)
+	}
+
+	// Verify no draft was staged in store
+	drafts, err := store.List()
+	if err != nil {
+		t.Fatalf("list drafts: %v", err)
+	}
+	if len(drafts) != 0 {
+		t.Errorf("expected 0 drafts staged after rejection, got %d", len(drafts))
 	}
 }

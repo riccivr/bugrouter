@@ -11,6 +11,7 @@ import (
 	"github.com/riccivr/bugrouter/internal/dedup"
 	"github.com/riccivr/bugrouter/internal/introspector"
 	"github.com/riccivr/bugrouter/internal/resolver"
+	"github.com/riccivr/bugrouter/internal/verifier"
 )
 
 func TestBuildDraftSecretRedaction(t *testing.T) {
@@ -544,5 +545,60 @@ func TestBuildDraftQualityReport(t *testing.T) {
 	}
 	if draft.Quality.Score != 100 {
 		t.Errorf("expected Score=100, got %d", draft.Quality.Score)
+	}
+}
+
+func TestBuildDraftWithVerificationProof(t *testing.T) {
+	proof := &verifier.VerificationProof{
+		Command:        "go test -run TestCrash ./...",
+		Reproduced:     true,
+		ExitCode:       1,
+		DurationMs:     42,
+		ScrubbedOutput: "--- FAIL: TestCrash (0.01s)\npanic: nil pointer [REDACTED_PASSWORD]",
+		ProofDigest:    "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+	}
+
+	in := DraftInput{
+		Target: resolver.Target{
+			CanonicalName: "core-worker",
+			Tracker: resolver.TrackerInfo{
+				Protocol: resolver.ProtocolGitHub,
+				URL:      "https://github.com/org/core-worker/issues",
+			},
+		},
+		Title:            "Panic in crash handler during test execution",
+		Summary:          "A nil pointer dereference is triggered when running the test suite.",
+		StepsToReproduce: "1. Run go test -run TestCrash\n2. Observe panic output",
+		Verification:     proof,
+	}
+
+	draft, err := BuildDraft(in)
+	if err != nil {
+		t.Fatalf("BuildDraft failed: %v", err)
+	}
+
+	if draft.Verification == nil {
+		t.Fatalf("expected Verification to be attached to staged draft")
+	}
+	if !draft.Verification.Reproduced {
+		t.Errorf("expected Reproduced=true")
+	}
+
+	body := string(draft.MarkdownBody)
+	if !strings.Contains(body, "## Verified Reproduction") {
+		t.Errorf("expected '## Verified Reproduction' header in markdown body: %s", body)
+	}
+	if !strings.Contains(body, "- **Reproduced:** true (exit code 1, 42ms)") {
+		t.Errorf("expected reproduced status line in body: %s", body)
+	}
+	if !strings.Contains(body, "- **Command:** `go test -run TestCrash ./...`") {
+		t.Errorf("expected command in body: %s", body)
+	}
+	if !strings.Contains(body, "- **Proof Digest:** `sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`") {
+		t.Errorf("expected proof digest in body: %s", body)
+	}
+	// Verify that verified logs populated the logs section when in.Logs was empty
+	if !strings.Contains(body, "panic: nil pointer [REDACTED_PASSWORD]") {
+		t.Errorf("expected verification scrubbed output to populate logs section: %s", body)
 	}
 }

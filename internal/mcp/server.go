@@ -17,6 +17,7 @@ import (
 	"github.com/riccivr/bugrouter/internal/introspector"
 	"github.com/riccivr/bugrouter/internal/resolver"
 	"github.com/riccivr/bugrouter/internal/scrubber"
+	"github.com/riccivr/bugrouter/internal/verifier"
 	"github.com/riccivr/bugrouter/internal/version"
 )
 
@@ -294,6 +295,14 @@ func (s *Server) toolDefinitions() []map[string]any {
 						"type":        "string",
 						"description": "Console logs, terminal output, or stack traces",
 					},
+					"strict_quality": map[string]any{
+						"type":        "boolean",
+						"description": "Reject draft if quality score < 70 or AI slop is detected",
+					},
+					"verify_cmd": map[string]any{
+						"type":        "string",
+						"description": "Optional shell command to run and attach a verified reproduction proof",
+					},
 				},
 				"required": []string{"query", "title"},
 			},
@@ -357,8 +366,34 @@ func (s *Server) toolDefinitions() []map[string]any {
 						"type":        "string",
 						"description": "Optional bug report title or problem description override",
 					},
+					"query": map[string]any{
+						"type":        "string",
+						"description": "Optional target package or repo override",
+					},
 				},
 				"required": []string{"log"},
+			},
+		},
+		{
+			"name":        "verify_reproduction",
+			"description": "Executes a bounded reproduction command, captures and scrubs stdout/stderr, extracts faulting package candidates, and returns a deterministic VerificationProof.",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"command": map[string]any{
+						"type":        "string",
+						"description": "Reproduction shell command string to execute",
+					},
+					"timeout_seconds": map[string]any{
+						"type":        "integer",
+						"description": "Execution timeout in seconds (default: 15)",
+					},
+					"expect_exit": map[string]any{
+						"type":        "integer",
+						"description": "Optional expected non-zero exit code to confirm reproduction",
+					},
+				},
+				"required": []string{"command"},
 			},
 		},
 	}
@@ -471,6 +506,8 @@ func (s *Server) handleToolCall(ctx context.Context, params toolCallParams) tool
 			Summary          string `json:"summary"`
 			StepsToReproduce string `json:"steps_to_reproduce"`
 			Logs             string `json:"logs"`
+			StrictQuality    bool   `json:"strict_quality"`
+			VerifyCmd        string `json:"verify_cmd"`
 		}
 		if err := json.Unmarshal(params.Arguments, &args); err != nil {
 			return toolCallResult{
@@ -482,6 +519,21 @@ func (s *Server) handleToolCall(ctx context.Context, params toolCallParams) tool
 			return toolCallResult{
 				Content: []toolContent{{Type: "text", Text: "query and title parameters are required"}},
 				IsError: true,
+			}
+		}
+
+		var proof *verifier.VerificationProof
+		if strings.TrimSpace(args.VerifyCmd) != "" {
+			p, err := verifier.Verify(ctx, verifier.VerifyOptions{Command: args.VerifyCmd})
+			if err != nil {
+				return toolCallResult{
+					Content: []toolContent{{Type: "text", Text: fmt.Sprintf("verify reproduction command: %v", err)}},
+					IsError: true,
+				}
+			}
+			proof = p
+			if strings.TrimSpace(args.Logs) == "" && proof.ScrubbedOutput != "" {
+				args.Logs = string(proof.ScrubbedOutput)
 			}
 		}
 
@@ -513,10 +565,25 @@ func (s *Server) handleToolCall(ctx context.Context, params toolCallParams) tool
 			Logs:             args.Logs,
 			Template:         schema,
 			Duplicates:       dups,
+			Verification:     proof,
 		})
 		if err != nil {
 			return toolCallResult{
 				Content: []toolContent{{Type: "text", Text: fmt.Sprintf("build draft: %v", err)}},
+				IsError: true,
+			}
+		}
+
+		if args.StrictQuality && !draft.Quality.Passed {
+			qData, err := json.MarshalIndent(draft.Quality, "", "  ")
+			if err != nil {
+				return toolCallResult{
+					Content: []toolContent{{Type: "text", Text: fmt.Sprintf("marshal quality report: %v", err)}},
+					IsError: true,
+				}
+			}
+			return toolCallResult{
+				Content: []toolContent{{Type: "text", Text: string(qData)}},
 				IsError: true,
 			}
 		}
@@ -767,6 +834,7 @@ func (s *Server) handleToolCall(ctx context.Context, params toolCallParams) tool
 		var args struct {
 			Log   string `json:"log"`
 			Title string `json:"title"`
+			Query string `json:"query"`
 		}
 		if err := json.Unmarshal(params.Arguments, &args); err != nil {
 			return toolCallResult{
@@ -784,11 +852,20 @@ func (s *Server) handleToolCall(ctx context.Context, params toolCallParams) tool
 		candidates := resolver.ExtractTargetsFromLog(args.Log)
 		var resolvedTarget *resolver.Target
 
-		for _, c := range candidates {
-			t, err := s.resolver.Resolve(ctx, c.Query)
+		if strings.TrimSpace(args.Query) != "" {
+			t, err := s.resolver.Resolve(ctx, strings.TrimSpace(args.Query))
 			if err == nil && t != nil {
 				resolvedTarget = t
-				break
+			}
+		}
+
+		if resolvedTarget == nil {
+			for _, c := range candidates {
+				t, err := s.resolver.Resolve(ctx, c.Query)
+				if err == nil && t != nil {
+					resolvedTarget = t
+					break
+				}
 			}
 		}
 
@@ -846,6 +923,54 @@ func (s *Server) handleToolCall(ctx context.Context, params toolCallParams) tool
 		if err != nil {
 			return toolCallResult{
 				Content: []toolContent{{Type: "text", Text: fmt.Sprintf("marshal triage result: %v", err)}},
+				IsError: true,
+			}
+		}
+		return toolCallResult{
+			Content: []toolContent{{Type: "text", Text: string(data)}},
+			IsError: false,
+		}
+
+	case "verify_reproduction":
+		var args struct {
+			Command        string `json:"command"`
+			TimeoutSeconds int    `json:"timeout_seconds"`
+			ExpectExit     int    `json:"expect_exit"`
+		}
+		if err := json.Unmarshal(params.Arguments, &args); err != nil {
+			return toolCallResult{
+				Content: []toolContent{{Type: "text", Text: fmt.Sprintf("parse arguments: %v", err)}},
+				IsError: true,
+			}
+		}
+		if strings.TrimSpace(args.Command) == "" {
+			return toolCallResult{
+				Content: []toolContent{{Type: "text", Text: "command parameter cannot be empty"}},
+				IsError: true,
+			}
+		}
+
+		timeout := 15 * time.Second
+		if args.TimeoutSeconds > 0 {
+			timeout = time.Duration(args.TimeoutSeconds) * time.Second
+		}
+
+		proof, err := verifier.Verify(ctx, verifier.VerifyOptions{
+			Command:    args.Command,
+			Timeout:    timeout,
+			ExpectExit: args.ExpectExit,
+		})
+		if err != nil {
+			return toolCallResult{
+				Content: []toolContent{{Type: "text", Text: fmt.Sprintf("verify reproduction: %v", err)}},
+				IsError: true,
+			}
+		}
+
+		data, err := json.MarshalIndent(proof, "", "  ")
+		if err != nil {
+			return toolCallResult{
+				Content: []toolContent{{Type: "text", Text: fmt.Sprintf("marshal proof: %v", err)}},
 				IsError: true,
 			}
 		}

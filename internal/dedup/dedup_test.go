@@ -323,3 +323,39 @@ func TestFindDuplicatesBugzillaDoesNotLeakGitLabToken(t *testing.T) {
 		t.Errorf("leaked Authorization to Bugzilla: %q", leakedAuth)
 	}
 }
+
+func TestFindDuplicatesGitLabAuthHeader(t *testing.T) {
+	t.Setenv("GITLAB_TOKEN", "glpat-test-secret-123456")
+	authHeaderReceived := false
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("PRIVATE-TOKEN") == "glpat-test-secret-123456" {
+			authHeaderReceived = true
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `[]`)
+	}))
+	defer ts.Close()
+
+	client := httpx.NewTestClient(time.Second)
+	finder := NewFinder(client).WithEndpoints(Endpoints{
+		GitLabBaseURL: ts.URL,
+	})
+
+	target := resolver.Target{
+		CanonicalName: "repo",
+		RepositoryURL: "https://gitlab.com/myorg/repo",
+		Tracker: resolver.TrackerInfo{
+			Protocol: resolver.ProtocolGitLab,
+			URL:      "https://gitlab.com/myorg/repo/-/issues",
+		},
+	}
+
+	_, err := finder.FindDuplicates(context.Background(), target, scrubber.ScrubbedText("Crash on launch"))
+	if err != nil {
+		t.Fatalf("FindDuplicates failed: %v", err)
+	}
+	if !authHeaderReceived {
+		t.Error("expected PRIVATE-TOKEN: glpat-test-secret-123456 header to be sent")
+	}
+}

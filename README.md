@@ -35,10 +35,11 @@ Dependencies: **Standard Library Only (Zero Third-Party Dependencies)**
 - **Upstream Issue Template Introspection**: Discovers and maps GitHub YAML Issue Forms (`body` textareas/inputs), GitLab markdown templates (`issuable_template`), and Bugzilla product schemas.
 - **Upstream Duplicate Detection**: Searches GitHub, GitLab, and Bugzilla trackers using title keyword extraction and stop word filtering, calculating scored token overlap.
 - **Deterministic Crash & Stack Trace Attribution**: Parses raw crash logs and stack traces across Go, Python, Node.js, Rust, and native binaries to identify culprit files, line numbers, and candidate upstream dependencies.
+- **Reproduction Verifier & Proof Engine**: Runs bounded reproduction commands under isolated contexts with 256 KiB output caps, timeout handling, exit code matching, candidate extraction, and SHA-256 cryptographic proof digests.
 - **Anti-Slop Quality Gate**: Evaluates draft quality against AI buzzwords, conversational chatbot filler, em dashes, typographic curly quotes, decorative emojis, and placeholders with strict gating (`--strict-quality`).
 - **Human-in-the-Loop Review Queue**: Embedded Web UI and REST API (`/api/v1/drafts`) for manual triage, review, and one-click dispatch via OAuth/PAT connectors.
 - **Hardened Cloud Security**: SHA-256 pre-hashed constant-time Bearer auth (`crypto/subtle.ConstantTimeCompare`), CSRF origin guards, append-only audit trail (`audit.log`), and HMAC-SHA256 signed webhooks (`X-Bugrouter-Signature`).
-- **Model Context Protocol (MCP)**: Native stdio JSON-RPC 2.0 server (spec `2024-11-05`) exposing 8 specialized agent tools.
+- **Model Context Protocol (MCP)**: Native stdio JSON-RPC 2.0 server (spec `2024-11-05`) exposing 9 specialized agent tools.
 
 ---
 
@@ -100,10 +101,20 @@ bugrouter draft requests \
 
 # Draft using a Markdown body file with strict quality enforcement
 cat error.log | bugrouter draft payment-service --body-file - --strict-quality
+
+# Draft with automated reproduction verification command
+bugrouter draft my-app \
+  --title "Buffer overflow in request parser" \
+  --summary "Request parser aborts with non-zero exit code on large payload" \
+  --steps "1. Send 10MB chunked POST payload\n2. Observe panic" \
+  --verify-cmd "./test/repro.sh"
 ```
 
-### Autonomous Agent Mode (`bugrouter agent triage`)
-Run autonomous, single-shot triage of raw crash logs or stack traces to extract candidates, resolve trackers, introspect schemas, and detect duplicates:
+### Autonomous Agent Mode (`bugrouter agent`)
+Autonomous tooling and subcommands designed specifically for AI coding agents and CI runners:
+
+#### 1. Crash Log Triage (`bugrouter agent triage`)
+Single-shot triage of raw crash logs or stack traces to extract candidates, resolve trackers, introspect schemas, and detect duplicates:
 ```bash
 # Triage a crash log file and output structured JSON envelope
 bugrouter agent triage --log-file ./panic.log
@@ -113,6 +124,16 @@ npm test 2>&1 | bugrouter agent triage --log-file -
 
 # Triage with explicit target override
 bugrouter agent triage --log-file ./traceback.log --query "requests"
+```
+
+#### 2. Agentic Self-Verification (`bugrouter agent verify`)
+Executes a bounded reproduction command, captures and scrubs output, matches exit codes, and returns deterministic cryptographic verification evidence:
+```bash
+# Verify reproduction command and print JSON proof
+bugrouter agent verify --cmd "npm test"
+
+# Verify command with specific expected exit code and custom timeout
+bugrouter agent verify --cmd "python -m pytest tests/test_crash.py" --expect-exit 1 --timeout 30s
 ```
 
 ### Serve Cloud Control Plane
@@ -153,7 +174,7 @@ Add `bugrouter` to your MCP client configuration (e.g., `claude_desktop_config.j
 }
 ```
 
-### Available MCP Tools (8 Total)
+### Available MCP Tools (9 Total)
 
 | Tool Name | Parameters | Description |
 | :--- | :--- | :--- |
@@ -161,10 +182,11 @@ Add `bugrouter` to your MCP client configuration (e.g., `claude_desktop_config.j
 | `scrub_text` | `text` (string) | Deterministically redacts secrets, tokens, connection strings, and local username paths. |
 | `introspect_template` | `query` (string) | Discovers and parses upstream bug tracker issue templates or schemas for a target. |
 | `search_duplicates` | `query` (string), `title` (string) | Searches upstream issue tracker (GitHub, GitLab, Bugzilla) for existing duplicate bug reports. |
-| `draft_bug_report` | `query` (string), `title` (string), `summary` (string), `steps_to_reproduce` (string), `logs` (string) | Resolves target, scrubs credentials, introspects template, finds duplicates, stages draft to disk, and returns structured ticket with pre-filled submission URLs. |
+| `draft_bug_report` | `query` (string), `title` (string), `summary` (string, optional), `steps_to_reproduce` (string, optional), `logs` (string, optional), `strict_quality` (bool, optional), `verify_cmd` (string, optional) | Resolves target, scrubs credentials, introspects template, finds duplicates, runs optional self-verification, stages draft to disk, and returns structured ticket. |
 | `list_staged_drafts` | `status` (string, optional) | Lists all staged bug drafts pending review or approval (`pending_review`, `submitted`, `discarded`). |
 | `approve_draft` | `id` (string) | Approves and submits a staged draft to its upstream tracker via authenticated OAuth connectors. |
-| `triage_crash_log` | `log` (string), `target` (string, optional), `title` (string, optional), `strict_quality` (bool, optional) | Analyzes raw crash logs or stack traces, deterministically attributes failures to upstream dependencies, scrubs credentials, checks duplicates, and stages a quality-gated draft. |
+| `triage_crash_log` | `log` (string), `title` (string, optional), `query` (string, optional) | Analyzes raw crash logs or stack traces, deterministically attributes failures to upstream dependencies, introspects templates, checks duplicates, and returns structured agent triage envelopes. |
+| `verify_reproduction` | `command` (string), `timeout_seconds` (integer, optional), `expect_exit` (integer, optional) | Executes a bounded reproduction command, captures and scrubs stdout/stderr, extracts faulting package candidates, and returns a deterministic VerificationProof. |
 
 ---
 

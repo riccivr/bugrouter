@@ -356,7 +356,14 @@ func (f *Finder) findGitLab(ctx context.Context, target resolver.Target, terms [
 	searchParam := strings.Join(terms, " ")
 	reqURL := fmt.Sprintf("%s/api/v4/projects/%s/issues?search=%s&per_page=5", baseURL, encodedPath, url.QueryEscape(searchParam))
 
-	data, err := f.client.GetBytes(ctx, reqURL, "application/json")
+	var headers map[string]string
+	for _, env := range []string{"GITLAB_TOKEN", "GL_TOKEN", "BUGROUTER_GITLAB_TOKEN"} {
+		if tok := os.Getenv(env); tok != "" {
+			headers = map[string]string{"PRIVATE-TOKEN": tok}
+			break
+		}
+	}
+	data, err := f.client.GetBytesWithHeaders(ctx, reqURL, "application/json", headers)
 	if err != nil {
 		return nil, fmt.Errorf("gitlab search: %w", err)
 	}

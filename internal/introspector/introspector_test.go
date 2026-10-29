@@ -2,6 +2,7 @@ package introspector
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -265,8 +266,7 @@ func TestIntrospectGitHubAuthHeader(t *testing.T) {
 		if r.Header.Get("Authorization") == "Bearer ghp_test_secret_abc123" {
 			authHeaderReceived = true
 		}
-		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `[]`)
+		http.NotFound(w, r)
 	}))
 	defer ts.Close()
 
@@ -284,7 +284,10 @@ func TestIntrospectGitHubAuthHeader(t *testing.T) {
 		},
 	}
 
-	_, _ = intro.Introspect(context.Background(), target)
+	_, err := intro.Introspect(context.Background(), target)
+	if !errors.Is(err, ErrNoTemplateFound) {
+		t.Fatalf("expected ErrNoTemplateFound, got: %v", err)
+	}
 	if !authHeaderReceived {
 		t.Error("expected Authorization: Bearer ghp_test_secret_abc123 header to be sent")
 	}

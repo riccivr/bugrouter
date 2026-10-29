@@ -19,6 +19,7 @@ import (
 	"github.com/riccivr/bugrouter/internal/introspector"
 	"github.com/riccivr/bugrouter/internal/resolver"
 	"github.com/riccivr/bugrouter/internal/scrubber"
+	"github.com/riccivr/bugrouter/internal/verifier"
 	"github.com/riccivr/bugrouter/internal/version"
 )
 
@@ -34,6 +35,7 @@ type DraftInput struct {
 	Severity         string
 	Template         *introspector.TemplateSchema
 	Duplicates       []dedup.ExistingIssue
+	Verification     *verifier.VerificationProof
 }
 
 // StagedDraft represents a redacted and formatted issue ready for review or submission.
@@ -49,6 +51,7 @@ type StagedDraft struct {
 	Template            *introspector.TemplateSchema `json:"template,omitempty"`
 	PotentialDuplicates []dedup.ExistingIssue        `json:"potential_duplicates,omitempty"`
 	Quality             QualityReport                `json:"quality"`
+	Verification        *verifier.VerificationProof  `json:"verification,omitempty"`
 }
 
 func generateDraftID() (string, error) {
@@ -144,7 +147,13 @@ func BuildDraft(in DraftInput) (*StagedDraft, error) {
 	scrubbedSteps := scrubber.Scrub(strings.TrimSpace(in.StepsToReproduce))
 	scrubbedExpected := scrubber.Scrub(strings.TrimSpace(in.ExpectedBehavior))
 	scrubbedActual := scrubber.Scrub(strings.TrimSpace(in.ActualBehavior))
-	scrubbedLogs := scrubber.Scrub(strings.TrimSpace(in.Logs))
+
+	rawLogs := strings.TrimSpace(in.Logs)
+	if rawLogs == "" && in.Verification != nil && in.Verification.ScrubbedOutput != "" {
+		rawLogs = string(in.Verification.ScrubbedOutput)
+		in.Logs = rawLogs
+	}
+	scrubbedLogs := scrubber.Scrub(rawLogs)
 
 	localVersion := in.Target.LocalVersion
 	if localVersion == "" {
@@ -172,6 +181,10 @@ func BuildDraft(in DraftInput) (*StagedDraft, error) {
 				val = "_No response_"
 			}
 			sb.WriteString(fmt.Sprintf("### %s\n\n%s\n\n", f.Label, val))
+		}
+		if in.Verification != nil {
+			sb.WriteString(fmt.Sprintf("## Verified Reproduction\n\n- **Reproduced:** %t (exit code %d, %dms)\n- **Command:** `%s`\n- **Proof Digest:** `sha256:%s`\n\n",
+				in.Verification.Reproduced, in.Verification.ExitCode, in.Verification.DurationMs, in.Verification.Command, in.Verification.ProofDigest))
 		}
 		sb.WriteString(fmt.Sprintf("*Staged via bugrouter/%s*\n", version.Version))
 		markdownBody = scrubber.ScrubbedText(sb.String())
@@ -215,6 +228,10 @@ func BuildDraft(in DraftInput) (*StagedDraft, error) {
 		sb.WriteString(fmt.Sprintf("- **Target:** %s\n", canonicalName))
 		sb.WriteString(fmt.Sprintf("- **Version:** %s\n", localVersion))
 		sb.WriteString(fmt.Sprintf("- **Platform:** %s/%s\n\n", runtime.GOOS, runtime.GOARCH))
+		if in.Verification != nil {
+			sb.WriteString(fmt.Sprintf("## Verified Reproduction\n\n- **Reproduced:** %t (exit code %d, %dms)\n- **Command:** `%s`\n- **Proof Digest:** `sha256:%s`\n\n",
+				in.Verification.Reproduced, in.Verification.ExitCode, in.Verification.DurationMs, in.Verification.Command, in.Verification.ProofDigest))
+		}
 		sb.WriteString(fmt.Sprintf("*Staged via bugrouter/%s*\n", version.Version))
 
 		markdownBody = scrubber.ScrubbedText(sb.String())
@@ -329,6 +346,7 @@ func BuildDraft(in DraftInput) (*StagedDraft, error) {
 		Template:            in.Template,
 		PotentialDuplicates: in.Duplicates,
 		Quality:             LintDraft(in),
+		Verification:        in.Verification,
 	}
 	return draft, nil
 }

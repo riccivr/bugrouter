@@ -56,24 +56,27 @@ All milestones and specs below have been fully implemented, verified with race-d
 
 ## 3. Active & Upcoming Milestones
 
-### Milestone 5: CLI Agentic Mode & Anti-Slop Gate (Active)
+### Milestone 5: CLI Agentic Mode & Anti-Slop Gate (Completed)
 Focuses on autonomous, zero-friction developer and agent triage from terminal errors.
 
-- **Spec #11: Crash Log Auto-Attribution, Anti-Slop Gate & Agent CLI [ACTIVE]**
+- **Spec #11: Crash Log Auto-Attribution, Anti-Slop Gate & Agent CLI [COMPLETED]**
   - `ROADMAP.md` master plan.
   - Deterministic Crash and Stack Trace Attribution Engine (`internal/resolver/trace.go`): extracts `TraceCandidate` slices from Node.js, Go, Python, Rust, and Unix CLI error logs.
   - Deterministic Anti-Slop Quality Linter (`internal/adapter/linter.go`): calculates a 0 to 100 quality score, checks for AI conversational filler, vague titles, and missing steps, and gates drafts via `--strict-quality`.
   - CLI Agentic Mode (`bugrouter agent triage`): single-shot crash triage command outputting structured JSON envelopes for autonomous calling agents.
   - MCP Tool `triage_crash_log`: exposes autonomous crash attribution and draft triage to MCP agent workflows.
-- **Spec #12: Agentic Self-Verification & Reproduction Script Validator [PLANNED]**
-  - Introduce `bugrouter agent verify`: executes bounded reproduction commands in isolated subshells, records deterministic exit codes and stderr captures, and embeds cryptographic proof-of-reproduction into staged drafts.
+- **Spec #12: Agentic Self-Verification & Reproduction Script Validator [COMPLETED]**
+  - Bounded reproduction validator (`internal/verifier/verifier.go`): executes shell commands under isolated subshells with 256 KiB output caps, timeout handling, secret redaction, and SHA-256 proof digests.
+  - Integrated `VerificationProof` into `adapter.DraftInput`, `adapter.StagedDraft`, `adapter.BuildDraft`, and `adapter.LintDraft` (+10 quality bonus, automatic logs attachment).
+  - CLI subcommand `bugrouter agent verify` and `--verify-cmd` on `bugrouter draft`.
+  - Exposed 9th MCP tool `verify_reproduction` and added `strict_quality` and `verify_cmd` to `draft_bug_report`.
 
 ---
 
-### Milestone 6: Tech Stack Explorer & Downstream Bug Radar (Planned)
+### Milestone 6: Tech Stack Explorer & Downstream Bug Radar (Active)
 Shifts bugrouter from reactive ticket routing to proactive dependency health and upstream tracking.
 
-- **Spec #13: Workspace Stack Scanner & Downstream Radar [PLANNED]**
+- **Spec #13: Workspace Stack Scanner & Downstream Radar [ACTIVE]**
   - Command `bugrouter stack [--json] [--check-upstream]`: recursively catalogs all dependencies across `package.json`, `go.mod`, `Cargo.toml`, and `pyproject.toml`.
   - Maps each dependency to its upstream tracker and queries trackers for active bugs matching the local installed version.
   - Adds "Connected Tech Stack & Downstream Bugs" dashboard tab to the embedded Cloud Control Plane Web UI.

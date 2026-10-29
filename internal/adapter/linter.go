@@ -64,9 +64,15 @@ func LintDraft(in DraftInput) QualityReport {
 	}
 
 	// 5. Missing Diagnostic Evidence (-15 pts)
-	if strings.TrimSpace(in.Logs) == "" && strings.TrimSpace(in.ActualBehavior) == "" {
+	hasDiag := strings.TrimSpace(in.Logs) != "" || strings.TrimSpace(in.ActualBehavior) != "" || (in.Verification != nil && in.Verification.Reproduced)
+	if !hasDiag {
 		score -= 15
 		issues = append(issues, "include error logs, stack traces, or actual_behavior output")
+	}
+
+	// Reproduction Verification Bonus (+10 pts)
+	if in.Verification != nil && in.Verification.Reproduced {
+		score += 10
 	}
 
 	// Clamp Score to [0, 100]

@@ -3,6 +3,8 @@ package adapter
 import (
 	"strings"
 	"testing"
+
+	"github.com/riccivr/bugrouter/internal/verifier"
 )
 
 func TestLintDraftHighSignal(t *testing.T) {
@@ -133,5 +135,36 @@ func TestLintDraftIncomplete(t *testing.T) {
 	}
 	if rep5.Passed {
 		t.Errorf("expected Passed=false for low-signal draft, got true")
+	}
+}
+
+func TestLintDraftWithVerifiedReproduction(t *testing.T) {
+	// A draft without logs or actual_behavior, but with verified reproduction proof:
+	// Missing logs (-15) should NOT be deducted because proof.Reproduced is true.
+	// Furthermore, +10 verification bonus is awarded.
+	// Title: valid (100)
+	// Summary: short (<20 chars, -15)
+	// StepsToReproduce: valid
+	// Expected score: 100 - 15 (short summary) + 10 (reproduction bonus) = 95
+	proof := &verifier.VerificationProof{
+		Command:    "npm test",
+		Reproduced: true,
+		ExitCode:   1,
+		DurationMs: 45,
+	}
+
+	in := DraftInput{
+		Title:            "Segmentation fault in json parser",
+		Summary:          "short summary", // -15
+		StepsToReproduce: "1. Run parser with malformed payload\n2. Observe crash",
+		Verification:     proof,
+	}
+
+	rep := LintDraft(in)
+	if rep.Score != 95 {
+		t.Errorf("expected Score=95, got %d", rep.Score)
+	}
+	if !rep.Passed {
+		t.Errorf("expected Passed=true with reproduction bonus, got issues: %v", rep.Issues)
 	}
 }
