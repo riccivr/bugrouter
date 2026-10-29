@@ -129,6 +129,25 @@ func extractGitHubOwnerRepo(target resolver.Target) (string, string, error) {
 	return owner, repo, nil
 }
 
+// shouldSendGitHubAuth determines if the download URL belongs to GitHub or the configured API host.
+func shouldSendGitHubAuth(downloadURL, apiBaseURL string) bool {
+	uDown, err := url.Parse(downloadURL)
+	if err != nil || uDown.Hostname() == "" {
+		return false
+	}
+	downHost := strings.ToLower(uDown.Hostname())
+	if downHost == "github.com" || downHost == "raw.githubusercontent.com" {
+		return true
+	}
+	if apiBaseURL != "" {
+		uAPI, err := url.Parse(apiBaseURL)
+		if err == nil && uAPI.Hostname() != "" && strings.EqualFold(downHost, uAPI.Hostname()) {
+			return true
+		}
+	}
+	return false
+}
+
 func gitHubAuthHeader() map[string]string {
 	for _, env := range []string{"GITHUB_TOKEN", "GH_TOKEN", "BUGROUTER_GITHUB_TOKEN"} {
 		if tok := os.Getenv(env); tok != "" {
@@ -228,7 +247,11 @@ func (intro *Introspector) introspectGitHub(ctx context.Context, target resolver
 	best := candidates[0]
 	var rawData []byte
 	if best.DownloadURL != "" {
-		rawData, err = intro.client.GetBytesWithHeaders(ctx, best.DownloadURL, "text/plain", gitHubAuthHeader())
+		var headers map[string]string
+		if shouldSendGitHubAuth(best.DownloadURL, baseURL) {
+			headers = gitHubAuthHeader()
+		}
+		rawData, err = intro.client.GetBytesWithHeaders(ctx, best.DownloadURL, "text/plain", headers)
 		if err != nil {
 			return nil, fmt.Errorf("fetch raw template %s: %w", best.DownloadURL, err)
 		}

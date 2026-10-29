@@ -289,3 +289,58 @@ func TestIntrospectGitHubAuthHeader(t *testing.T) {
 		t.Error("expected Authorization: Bearer ghp_test_secret_abc123 header to be sent")
 	}
 }
+
+func TestShouldSendGitHubAuth(t *testing.T) {
+	cases := []struct {
+		name        string
+		downloadURL string
+		apiBaseURL  string
+		want        bool
+	}{
+		{
+			name:        "raw.githubusercontent.com public",
+			downloadURL: "https://raw.githubusercontent.com/owner/repo/main/.github/ISSUE_TEMPLATE/bug.yml",
+			apiBaseURL:  "https://api.github.com",
+			want:        true,
+		},
+		{
+			name:        "github.com domain",
+			downloadURL: "https://github.com/owner/repo/raw/main/.github/ISSUE_TEMPLATE/bug.yml",
+			apiBaseURL:  "https://api.github.com",
+			want:        true,
+		},
+		{
+			name:        "matching enterprise host",
+			downloadURL: "https://github.enterprise.corp/raw/bug.yml",
+			apiBaseURL:  "https://github.enterprise.corp/api/v3",
+			want:        true,
+		},
+		{
+			name:        "untrusted third party domain",
+			downloadURL: "https://evil.example.com/template.yml",
+			apiBaseURL:  "https://api.github.com",
+			want:        false,
+		},
+		{
+			name:        "untrusted third party domain on enterprise",
+			downloadURL: "https://evil.example.com/template.yml",
+			apiBaseURL:  "https://github.enterprise.corp/api/v3",
+			want:        false,
+		},
+		{
+			name:        "malformed url",
+			downloadURL: "::not-a-url::",
+			apiBaseURL:  "https://api.github.com",
+			want:        false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := shouldSendGitHubAuth(tc.downloadURL, tc.apiBaseURL)
+			if got != tc.want {
+				t.Errorf("shouldSendGitHubAuth(%q, %q) = %v, want %v", tc.downloadURL, tc.apiBaseURL, got, tc.want)
+			}
+		})
+	}
+}
