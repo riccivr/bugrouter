@@ -544,7 +544,7 @@ const indexHTML = `<!DOCTYPE html>
     <h1>bugrouter <span>Cloud Control Plane</span> <span class="badge">CalVer 2026.10.0</span></h1>
     <div style="display: flex; gap: 8px; align-items: center;">
       <input type="password" id="auth-token" placeholder="Auth Token" style="padding: 6px 10px; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; color: var(--text); font-size: 0.85rem;" onchange="saveToken(this.value)">
-      <button class="btn btn-inspect" onclick="fetchDrafts()">Refresh Queue</button>
+      <button class="btn btn-inspect" onclick="refreshQueue()">Refresh Queue</button>
     </div>
   </header>
   <main>
@@ -564,6 +564,25 @@ const indexHTML = `<!DOCTYPE html>
         </thead>
         <tbody id="drafts-table">
           <tr><td colspan="7" style="text-align:center; color: var(--muted);">Loading staged drafts...</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h2>Recent Audit Trail</h2>
+    <div class="card" id="audit-container">
+      <table>
+        <thead>
+          <tr>
+            <th>Timestamp</th>
+            <th>Action</th>
+            <th>Draft ID</th>
+            <th>Target</th>
+            <th>Protocol</th>
+            <th>Details</th>
+          </tr>
+        </thead>
+        <tbody id="audit-table">
+          <tr><td colspan="6" style="text-align:center; color: var(--muted);">Loading audit log...</td></tr>
         </tbody>
       </table>
     </div>
@@ -679,6 +698,51 @@ const indexHTML = `<!DOCTYPE html>
       document.getElementById('modal').style.display = 'none';
     }
 
+    function refreshQueue() {
+      fetchDrafts();
+      fetchAudit();
+    }
+
+    async function fetchAudit() {
+      try {
+        const res = await fetch('/api/v1/audit', { headers: getHeaders() });
+        const events = await res.json();
+        renderAudit(events);
+      } catch (err) {
+        document.getElementById('audit-table').innerHTML =
+          '<tr><td colspan="6" style="color:var(--danger); text-align:center;">Failed to load audit log: ' + err.message + '</td></tr>';
+      }
+    }
+
+    function renderAudit(events) {
+      const tbody = document.getElementById('audit-table');
+      if (!events || events.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="6" style="text-align:center; color: var(--muted);">No recent audit events recorded.</td></tr>';
+        return;
+      }
+      tbody.innerHTML = events.map(e => {
+        let details = '-';
+        if (e.issue_url) {
+          const u = e.issue_url;
+          if (u.startsWith('https://') || u.startsWith('http://')) {
+            details = '<a href="' + escapeHTML(u) + '" target="_blank" style="color:var(--accent);">' + escapeHTML(u) + '</a>';
+          } else {
+            details = escapeHTML(u);
+          }
+        } else if (e.error) {
+          details = '<span style="color:var(--danger);">' + escapeHTML(e.error) + '</span>';
+        }
+        return '<tr>' +
+          '<td>' + new Date(e.timestamp).toLocaleString() + '</td>' +
+          '<td><span class="badge">' + escapeHTML(e.action || '') + '</span></td>' +
+          '<td><code>' + escapeHTML(e.draft_id || '') + '</code></td>' +
+          '<td>' + escapeHTML(e.target || '') + '</td>' +
+          '<td>' + escapeHTML(e.protocol || '') + '</td>' +
+          '<td>' + details + '</td>' +
+        '</tr>';
+      }).join('');
+    }
+
     async function approveDraft(id) {
       if (!confirm('Approve and submit draft ' + id + ' to upstream tracker?')) return;
       try {
@@ -691,6 +755,7 @@ const indexHTML = `<!DOCTYPE html>
           alert('Approval failed: ' + errText);
         } else {
           await fetchDrafts();
+          await fetchAudit();
         }
       } catch (err) {
         alert('Network error: ' + err.message);
@@ -709,6 +774,7 @@ const indexHTML = `<!DOCTYPE html>
           alert('Discard failed: ' + errText);
         } else {
           await fetchDrafts();
+          await fetchAudit();
         }
       } catch (err) {
         alert('Network error: ' + err.message);
@@ -722,6 +788,7 @@ const indexHTML = `<!DOCTYPE html>
     }
 
     fetchDrafts();
+    fetchAudit();
   </script>
 </body>
 </html>

@@ -231,6 +231,9 @@ func TestServerIndexHTML(t *testing.T) {
 	if !strings.Contains(html, "bugrouter") || !strings.Contains(html, "Cloud Control Plane") {
 		t.Errorf("index HTML missing expected title markers: %s", html)
 	}
+	if !strings.Contains(html, "audit-container") || !strings.Contains(html, "/api/v1/audit") {
+		t.Errorf("index HTML missing audit table container or audit fetch endpoint")
+	}
 }
 
 func TestServerPathTraversalRejected(t *testing.T) {
