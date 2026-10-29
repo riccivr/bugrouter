@@ -84,7 +84,7 @@ Shifts bugrouter from reactive ticket routing to proactive dependency health and
 
 ---
 
-### Milestone 7: Desktop/PC User Mode & Hardware Telemetry (Active)
+### Milestone 7: Desktop/PC User Mode & Hardware Telemetry (Completed)
 Brings zero-dependency bug routing to desktop operating systems and everyday GUI applications.
 
 - **Spec #14: Desktop App Resolver, Gitea/Forgejo Support & Hardware Telemetry Collector [COMPLETED]**
@@ -93,16 +93,17 @@ Brings zero-dependency bug routing to desktop operating systems and everyday GUI
   - Zero-dependency native hardware and OS telemetry collector (`internal/telemetry`) gathering GPU model, CPU architecture, OS kernel, desktop environment, and display server with type-safe scrubbing.
   - CLI integration via `bugrouter telemetry [--json]`, `bugrouter agent telemetry`, and `bugrouter draft --with-telemetry`.
   - MCP integration exposing `collect_system_telemetry` as the 11th tool and adding `include_telemetry` to `draft_bug_report`.
-- **Spec #15: Guided Human Bug Wizard [ACTIVE]**
-  - Interactive terminal wizard (`bugrouter report <app>`) prompting users for symptoms and reproducing steps with real-time anti-slop suggestions.
-  - Web UI guided composer providing step-by-step assistance for non-technical users.
+- **Spec #15: Guided Human Bug Wizard & Web UI Guided Composer [COMPLETED]**
+  - Spec #14.1 red-team constitutional remediation: zero `_ =` assignments in `internal/dedup`, Gitea/Codeberg token support in `introspectGitea` and `ForgeClient`, removal of dead branches, and em dash, emoji, and placeholder quality lint checks.
+  - Interactive terminal wizard (`bugrouter report <query>`) prompting users line-by-line for bug details with real-time Anti-Slop quality scoring, duplicate checking, and automatic hardware/OS telemetry attachment.
+  - Cloud Control Plane Guided Draft Composer API (`POST /api/v1/drafts`) supporting telemetry attachment and strict quality gates (422 Unprocessable Entity), plus interactive Web UI composer modal.
 
 ---
 
-### Milestone 8: GitHub Actions, CI/CD Matrix & Release Automation (Planned — Post-Stabilization)
+### Milestone 8: GitHub Actions, CI/CD Matrix & Release Automation (Active)
 Automates testing, cross-compilation, and autonomous upstream triage inside GitHub Actions pipelines.
 
-- **Spec #16: GitHub Actions CI/CD & CalVer Release Pipeline [PLANNED]**
+- **Spec #16: GitHub Actions CI/CD & CalVer Release Pipeline [ACTIVE]**
   - `.github/workflows/ci.yml`: Zero-dependency `go fmt`, `go vet`, commit-msg lint, and `go test -race ./...` matrix across `ubuntu-latest`, `windows-latest`, and `macos-latest`.
   - `.github/workflows/release.yml`: Reproducible `CGO_ENABLED=0` static binary cross-compilation (`linux/amd64`, `linux/arm64`, `windows/amd64`, `darwin/arm64`) triggered on CalVer tags (`YYYY.0M.MICRO`) with `SHA256SUMS` provenance.
   - Composite GitHub Action (`action.yml`): Turnkey CI step allowing any GitHub Actions workflow to pipe failing test logs into `bugrouter agent triage` and stage anti-slop gated tickets automatically.

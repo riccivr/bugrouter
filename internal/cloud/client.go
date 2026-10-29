@@ -83,6 +83,12 @@ func (c *ForgeClient) getToken(protocol resolver.Protocol) string {
 				return v
 			}
 		}
+	case resolver.ProtocolGitea, resolver.ProtocolCodeberg:
+		for _, k := range []string{"GITEA_TOKEN", "BUGROUTER_GITEA_TOKEN", "CODEBERG_TOKEN"} {
+			if v := os.Getenv(k); v != "" {
+				return v
+			}
+		}
 	}
 	return ""
 }
@@ -103,6 +109,8 @@ func (c *ForgeClient) Submit(ctx context.Context, draft *adapter.StagedDraft) (s
 		return c.submitJira(ctx, draft)
 	case resolver.ProtocolLinear:
 		return c.submitLinear(ctx, draft)
+	case resolver.ProtocolGitea, resolver.ProtocolCodeberg:
+		return c.submitGitea(ctx, draft)
 	default:
 		return "", fmt.Errorf("no authenticated connector for protocol %s", protocol)
 	}
@@ -428,6 +436,72 @@ func (c *ForgeClient) submitLinear(ctx context.Context, draft *adapter.StagedDra
 	}
 
 	return res.Data.IssueCreate.Issue.URL, nil
+}
+
+func (c *ForgeClient) submitGitea(ctx context.Context, draft *adapter.StagedDraft) (string, error) {
+	token := c.getToken(draft.Target.Tracker.Protocol)
+	if token == "" {
+		token = c.getToken(resolver.ProtocolGitea)
+	}
+	if token == "" {
+		token = c.getToken(resolver.ProtocolCodeberg)
+	}
+	if token == "" {
+		return "", errors.New("missing gitea authentication token")
+	}
+
+	owner, repo, err := extractOwnerRepo(draft)
+	if err != nil {
+		return "", err
+	}
+
+	apiBase := c.baseURLs[draft.Target.Tracker.Protocol]
+	if apiBase == "" {
+		rawURL := draft.Target.Tracker.URL
+		if rawURL == "" {
+			rawURL = draft.Target.RepositoryURL
+		}
+		u, parseErr := url.Parse(rawURL)
+		if parseErr == nil && u.Host != "" {
+			apiBase = fmt.Sprintf("%s://%s", u.Scheme, u.Host)
+		} else {
+			apiBase = "https://codeberg.org"
+		}
+	}
+	apiBase = strings.TrimRight(apiBase, "/")
+
+	issueURL := fmt.Sprintf("%s/api/v1/repos/%s/%s/issues", apiBase, owner, repo)
+
+	reqPayload := map[string]any{
+		"title": string(draft.Title),
+		"body":  string(draft.MarkdownBody),
+	}
+
+	data, err := json.Marshal(reqPayload)
+	if err != nil {
+		return "", fmt.Errorf("marshal gitea issue payload: %w", err)
+	}
+
+	respBody, err := c.postJSON(ctx, issueURL, data, map[string]string{
+		"Authorization": "token " + token,
+		"Accept":        "application/json",
+	})
+	if err != nil {
+		return "", fmt.Errorf("gitea api: %w", err)
+	}
+
+	var res struct {
+		HTMLURL string `json:"html_url"`
+		URL     string `json:"url"`
+	}
+	if unmarshalErr := json.Unmarshal(respBody, &res); unmarshalErr != nil {
+		return "", fmt.Errorf("unmarshal gitea response: %w", unmarshalErr)
+	}
+
+	if res.HTMLURL != "" {
+		return res.HTMLURL, nil
+	}
+	return res.URL, nil
 }
 
 func (c *ForgeClient) postJSON(ctx context.Context, targetURL string, body []byte, headers map[string]string) ([]byte, error) {

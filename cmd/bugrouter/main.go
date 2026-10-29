@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -115,6 +116,186 @@ func parseMarkdownBodyFile(raw string) (summary, steps, logs string) {
 	steps = strings.TrimSpace(strings.Join(stepsLines, "\n"))
 	logs = strings.TrimSpace(strings.Join(logsLines, "\n"))
 	return summary, steps, logs
+}
+
+// ReportOptions contains configuration flags for the interactive guided bug report wizard.
+type ReportOptions struct {
+	Query            string
+	Title            string
+	Summary          string
+	StepsToReproduce string
+	ExpectedBehavior string
+	ActualBehavior   string
+	Logs             string
+	WithTelemetry    bool
+	NoTelemetry      bool
+	JSON             bool
+	NoCache          bool
+	Timeout          time.Duration
+}
+
+func runGuidedReport(ctx context.Context, in io.Reader, out io.Writer, httpClient *httpx.Client, opts ReportOptions) (*adapter.StagedDraft, string, error) {
+	if httpClient == nil {
+		httpClient = httpx.NewClient(0)
+	}
+
+	if opts.Query == "" {
+		return nil, "", errors.New("report requires a target query")
+	}
+
+	// Step 1: Resolve target via resolveTarget
+	if !opts.JSON {
+		fmt.Fprintf(out, "==> Resolving software target %q...\n", opts.Query)
+	}
+	target, err := resolveTarget(ctx, httpClient, opts.Query, opts.NoCache)
+	if err != nil {
+		return nil, "", fmt.Errorf("resolve target %q: %w", opts.Query, err)
+	}
+	if !opts.JSON {
+		fmt.Fprintf(out, "    Resolved: %s (tracker: %s [%s])\n", target.CanonicalName, target.Tracker.URL, target.Tracker.Protocol)
+	}
+
+	// Step 2: Introspect upstream issue template (non-fatal fallback)
+	intro := introspector.New(httpClient)
+	if !opts.NoCache {
+		intro = intro.WithCache(cache.NewStore("", 0))
+	}
+	schema, introErr := intro.Introspect(ctx, *target)
+	if introErr != nil {
+		schema = nil
+	}
+
+	// Step 3: Collect hardware/OS telemetry by default (unless --no-telemetry is set)
+	var sysTelemetry *telemetry.SystemTelemetry
+	if !opts.NoTelemetry {
+		if !opts.JSON {
+			fmt.Fprintf(out, "==> Collecting hardware and OS telemetry...\n")
+		}
+		t := telemetry.Collect(ctx)
+		sysTelemetry = &t
+	}
+
+	// Step 4: For any core field not supplied via flags, prompt interactively line-by-line
+	scanner := bufio.NewScanner(in)
+
+	if strings.TrimSpace(opts.Title) == "" {
+		if !opts.JSON {
+			fmt.Fprintf(out, "\nEnter bug report title: ")
+		}
+		if scanner.Scan() {
+			opts.Title = strings.TrimSpace(scanner.Text())
+		}
+	}
+
+	if strings.TrimSpace(opts.Summary) == "" {
+		if !opts.JSON {
+			fmt.Fprintf(out, "Enter summary (describe the issue): ")
+		}
+		if scanner.Scan() {
+			opts.Summary = strings.TrimSpace(scanner.Text())
+		}
+	}
+
+	if strings.TrimSpace(opts.StepsToReproduce) == "" {
+		if !opts.JSON {
+			fmt.Fprintf(out, "Enter steps to reproduce: ")
+		}
+		if scanner.Scan() {
+			opts.StepsToReproduce = strings.TrimSpace(scanner.Text())
+		}
+	}
+
+	if strings.TrimSpace(opts.ExpectedBehavior) == "" {
+		if !opts.JSON {
+			fmt.Fprintf(out, "Enter expected behavior (optional, press Enter to skip): ")
+		}
+		if scanner.Scan() {
+			opts.ExpectedBehavior = strings.TrimSpace(scanner.Text())
+		}
+	}
+
+	if strings.TrimSpace(opts.ActualBehavior) == "" {
+		if !opts.JSON {
+			fmt.Fprintf(out, "Enter actual behavior (optional, press Enter to skip): ")
+		}
+		if scanner.Scan() {
+			opts.ActualBehavior = strings.TrimSpace(scanner.Text())
+		}
+	}
+
+	if strings.TrimSpace(opts.Logs) == "" {
+		if !opts.JSON {
+			fmt.Fprintf(out, "Enter error logs or console output (optional, press Enter to skip): ")
+		}
+		if scanner.Scan() {
+			opts.Logs = strings.TrimSpace(scanner.Text())
+		}
+	}
+
+	if scanErr := scanner.Err(); scanErr != nil {
+		return nil, "", fmt.Errorf("read interactive input: %w", scanErr)
+	}
+
+	if strings.TrimSpace(opts.Title) == "" {
+		return nil, "", errors.New("report title cannot be empty")
+	}
+
+	// Step 5: Check upstream duplicates via dedup.NewFinder(httpClient).FindDuplicates
+	finder := dedup.NewFinder(httpClient)
+	var dups []dedup.ExistingIssue
+	if d, dupErr := finder.FindDuplicates(ctx, *target, scrubber.Scrub(opts.Title)); dupErr == nil {
+		dups = d
+	}
+	if !opts.JSON && len(dups) > 0 {
+		fmt.Fprintf(out, "\nPotential Upstream Duplicates (%d found):\n", len(dups))
+		for _, d := range dups {
+			fmt.Fprintf(out, "  - [%s] (%.0f%% match) %s\n    %s\n", d.State, d.Score*100, d.Title, d.URL)
+		}
+	}
+
+	// Step 6: Build draft via adapter.BuildDraft and display QualityReport + SubmissionURL + staged file path
+	draft, err := adapter.BuildDraft(adapter.DraftInput{
+		Target:           *target,
+		Title:            opts.Title,
+		Summary:          opts.Summary,
+		StepsToReproduce: opts.StepsToReproduce,
+		ExpectedBehavior: opts.ExpectedBehavior,
+		ActualBehavior:   opts.ActualBehavior,
+		Logs:             opts.Logs,
+		Template:         schema,
+		Duplicates:       dups,
+		Telemetry:        sysTelemetry,
+	})
+	if err != nil {
+		return nil, "", fmt.Errorf("build draft: %w", err)
+	}
+
+	store := adapter.NewDraftStore("")
+	stagedPath, err := store.Save(draft)
+	if err != nil {
+		return nil, "", fmt.Errorf("stage draft: %w", err)
+	}
+
+	if !opts.JSON {
+		fmt.Fprintf(out, "\n--- Bug Report Staged ---\n")
+		fmt.Fprintf(out, "Draft ID:       %s\n", draft.ID)
+		fmt.Fprintf(out, "Staged File:    %s\n", stagedPath)
+		fmt.Fprintf(out, "Canonical Name: %s\n", target.CanonicalName)
+		fmt.Fprintf(out, "Tracker:        %s (%s)\n", target.Tracker.URL, target.Tracker.Protocol)
+		if draft.SubmissionURL != "" {
+			fmt.Fprintf(out, "Submission URL: %s\n", draft.SubmissionURL)
+		}
+		fmt.Fprintf(out, "\nQuality Assessment:\n")
+		fmt.Fprintf(out, "  Score: %d/100 (Grade: %s, Passed: %t)\n", draft.Quality.Score, draft.Quality.Grade, draft.Quality.Passed)
+		if len(draft.Quality.Issues) > 0 {
+			fmt.Fprintf(out, "  Suggestions:\n")
+			for _, issue := range draft.Quality.Issues {
+				fmt.Fprintf(out, "    - %s\n", issue)
+			}
+		}
+	}
+
+	return draft, stagedPath, nil
 }
 
 func main() {
@@ -370,6 +551,66 @@ func main() {
 			fmt.Printf("\n--- Debbugs Email ---\n%s\n", draft.DebbugsEmail)
 		}
 
+	case "report":
+		fs := flag.NewFlagSet("report", flag.ContinueOnError)
+		title := fs.String("title", "", "bug report title")
+		summary := fs.String("summary", "", "summary of the issue")
+		steps := fs.String("steps", "", "steps to reproduce")
+		expected := fs.String("expected", "", "expected behavior")
+		actual := fs.String("actual", "", "actual behavior")
+		logs := fs.String("logs", "", "error logs or console output")
+		withTelemetry := fs.Bool("with-telemetry", false, "collect hardware/OS telemetry (default enabled)")
+		noTelemetry := fs.Bool("no-telemetry", false, "disable hardware/OS telemetry collection")
+		jsonOut := fs.Bool("json", false, "output structured JSON")
+		noCache := fs.Bool("no-cache", false, "disable disk cache")
+		timeout := fs.Duration("timeout", 20*time.Second, "request and probe timeout duration")
+		if err := fs.Parse(os.Args[2:]); err != nil {
+			os.Exit(1)
+		}
+
+		args := fs.Args()
+		if len(args) < 1 {
+			fmt.Fprintln(os.Stderr, "error: report requires a target query")
+			os.Exit(1)
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+		defer cancel()
+
+		opts := ReportOptions{
+			Query:            args[0],
+			Title:            *title,
+			Summary:          *summary,
+			StepsToReproduce: *steps,
+			ExpectedBehavior: *expected,
+			ActualBehavior:   *actual,
+			Logs:             *logs,
+			WithTelemetry:    *withTelemetry,
+			NoTelemetry:      *noTelemetry,
+			JSON:             *jsonOut,
+			NoCache:          *noCache,
+			Timeout:          *timeout,
+		}
+
+		draft, stagedPath, err := runGuidedReport(ctx, os.Stdin, os.Stdout, nil, opts)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+
+		if *jsonOut {
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			if encErr := enc.Encode(map[string]any{
+				"draft":       draft,
+				"staged_path": stagedPath,
+			}); encErr != nil {
+				fmt.Fprintf(os.Stderr, "error: encode json: %v\n", encErr)
+				os.Exit(1)
+			}
+		}
+		return
+
 	case "agent":
 		if len(os.Args) < 3 {
 			fmt.Fprintln(os.Stderr, "Usage: bugrouter agent <triage|verify|telemetry> [arguments]")
@@ -378,7 +619,7 @@ func main() {
 
 		if os.Args[2] == "telemetry" {
 			fs := flag.NewFlagSet("agent telemetry", flag.ContinueOnError)
-			jsonOut := fs.Bool("json", false, "output structured JSON")
+			fs.Bool("json", false, "output structured JSON")
 			timeout := fs.Duration("timeout", 5*time.Second, "telemetry collection timeout duration")
 			if err := fs.Parse(os.Args[3:]); err != nil {
 				os.Exit(1)
@@ -388,10 +629,6 @@ func main() {
 			defer cancel()
 
 			t := telemetry.Collect(ctx)
-			if !*jsonOut && os.Args[2] != "telemetry" {
-				fmt.Println(telemetry.FormatMarkdown(t))
-				return
-			}
 			enc := json.NewEncoder(os.Stdout)
 			enc.SetIndent("", "  ")
 			if err := enc.Encode(t); err != nil {
@@ -744,6 +981,9 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "  draft [--title <t>] [--summary <s>] [--steps <st>] [--logs <l>]")
 	fmt.Fprintln(os.Stderr, "        [--verify-cmd <cmd>] [--with-telemetry] [--body-file <path>] [--strict-quality] [--timeout <dur>] [--json] [--no-cache] <q>")
 	fmt.Fprintln(os.Stderr, "                              Stage bug report draft and generate submission URLs")
+	fmt.Fprintln(os.Stderr, "  report [--title <t>] [--summary <s>] [--steps <st>] [--expected <ex>] [--actual <ac>] [--logs <l>]")
+	fmt.Fprintln(os.Stderr, "         [--with-telemetry] [--no-telemetry] [--json] [--no-cache] [--timeout <dur>] <q>")
+	fmt.Fprintln(os.Stderr, "                              Interactive guided bug reporting wizard with live anti-slop quality linting")
 	fmt.Fprintln(os.Stderr, "  telemetry [--json] [--timeout <dur>]")
 	fmt.Fprintln(os.Stderr, "                              Inspect local operating system and hardware telemetry")
 	fmt.Fprintln(os.Stderr, "  agent triage [--log-file <path>] [--query <target>] [--title <t>] [--timeout <dur>]")

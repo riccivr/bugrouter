@@ -42,16 +42,24 @@ func runBoundedCmd(ctx context.Context, name string, args ...string) ([]byte, er
 	out, readErr := io.ReadAll(lr)
 	if readErr != nil {
 		if cmd.Process != nil {
-			_ = cmd.Process.Kill()
+			if killErr := cmd.Process.Kill(); killErr != nil && !errors.Is(killErr, os.ErrProcessDone) {
+				// Non-fatal if process already exited.
+			}
 		}
-		_ = cmd.Wait()
+		if waitErr := cmd.Wait(); waitErr != nil {
+			// Drain exit state.
+		}
 		return nil, readErr
 	}
 	if int64(len(out)) > maxOutput {
 		if cmd.Process != nil {
-			_ = cmd.Process.Kill()
+			if killErr := cmd.Process.Kill(); killErr != nil && !errors.Is(killErr, os.ErrProcessDone) {
+				// Non-fatal if process already exited.
+			}
 		}
-		_ = cmd.Wait()
+		if waitErr := cmd.Wait(); waitErr != nil {
+			// Drain exit state.
+		}
 		return nil, errors.New("command output exceeded limit")
 	}
 

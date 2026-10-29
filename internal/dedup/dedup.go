@@ -625,7 +625,9 @@ func (f *Finder) listActiveGitHub(ctx context.Context, target resolver.Target, v
 	var results []ExistingIssue
 	if version != "" {
 		q := fmt.Sprintf("repo:%s/%s is:issue is:open %s", owner, repo, version)
-		results, _ = fetchGH(q)
+		if verResults, verErr := fetchGH(q); verErr == nil {
+			results = verResults
+		}
 	}
 	if len(results) == 0 {
 		q := fmt.Sprintf("repo:%s/%s is:issue is:open", owner, repo)
@@ -705,7 +707,9 @@ func (f *Finder) listActiveGitLab(ctx context.Context, target resolver.Target, v
 
 	var results []ExistingIssue
 	if version != "" {
-		results, _ = fetchGL(version)
+		if verResults, verErr := fetchGL(version); verErr == nil {
+			results = verResults
+		}
 	}
 	if len(results) == 0 {
 		r, err := fetchGL("")
@@ -769,7 +773,9 @@ func (f *Finder) listActiveBugzilla(ctx context.Context, target resolver.Target,
 
 	var results []ExistingIssue
 	if version != "" {
-		results, _ = fetchBZ(version)
+		if verResults, verErr := fetchBZ(version); verErr == nil {
+			results = verResults
+		}
 	}
 	if len(results) == 0 {
 		r, err := fetchBZ("")
@@ -848,7 +854,9 @@ func (f *Finder) listActiveGitea(ctx context.Context, target resolver.Target, ve
 
 	var results []ExistingIssue
 	if version != "" {
-		results, _ = fetchGitea(version)
+		if verResults, verErr := fetchGitea(version); verErr == nil {
+			results = verResults
+		}
 	}
 	if len(results) == 0 {
 		r, err := fetchGitea("")

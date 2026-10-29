@@ -185,3 +185,18 @@ TemplateSchema                             PotentialDuplicates
 - Created zero-dependency hardware and OS telemetry collector in `internal/telemetry/telemetry.go` (`Collect`, `SystemTelemetry`, `FormatMarkdown`), probing OS, CPU model, core counts, kernel version, GPUs, desktop environment, and display servers on Linux, macOS, and Windows with type-safe credential and path scrubbing.
 - Integrated telemetry into `adapter.DraftInput` and `adapter.StagedDraft`, automatically rendering hardware diagnostic lists under the `## Environment` section of generated bug drafts.
 - Added `--with-telemetry` flag to `bugrouter draft`, added `bugrouter telemetry [--json]` subcommand, added `bugrouter agent telemetry`, and exposed `collect_system_telemetry` as the 11th tool in `internal/mcp/server.go` while adding `include_telemetry` to `draft_bug_report`.
+
+### Spec #14.1: Red-Team Security & Constitutional Remediation (COMPLETED)
+- Remediated blank identifier assignments (`_ = ...`) across `internal/dedup/dedup.go` (`listActiveGitHub`, `listActiveGitLab`, `listActiveBugzilla`, `listActiveGitea`) and `internal/telemetry/telemetry.go`, ensuring 100% adherence to AGENTS.md explicit error handling standards.
+- Added Gitea/Codeberg authentication header support to `introspectGitea` in `internal/introspector/introspector.go` (`giteaAuthHeader`) checking `GITEA_TOKEN`, `BUGROUTER_GITEA_TOKEN`, and `CODEBERG_TOKEN`.
+- Added Gitea/Codeberg authenticated issue submission connector in `internal/cloud/client.go` (`ForgeClient.getToken`, `ForgeClient.Submit`, `ForgeClient.submitGitea`) and added unit test coverage in `internal/cloud/client_test.go` (`TestForgeClientGitea`).
+- Removed unreachable dead conditional branch under `agent telemetry` in `cmd/bugrouter/main.go`.
+- Strengthened Anti-Slop Quality Linter in `internal/adapter/linter.go` (`LintDraft`), adding 15-point deduction and slop flag for em dashes (`—`) and decorative emojis, plus 20-point deduction for unfilled placeholders (`<insert`, `[insert`, `todo:`, `fixme:`), with unit tests in `internal/adapter/linter_test.go`.
+
+### Spec #15: Interactive Guided Human Bug Wizard & Web UI Guided Composer (COMPLETED)
+- Implemented `bugrouter report` subcommand and `runGuidedReport(ctx, in, out, httpClient, opts)` in `cmd/bugrouter/main.go`, providing a human-friendly interactive CLI wizard that resolves applications, introspects templates, automatically attaches hardware and OS telemetry by default (unless `--no-telemetry`), prompts line-by-line for missing fields via a single `bufio.Scanner`, checks upstream duplicates, runs real-time anti-slop quality linting, and stages the draft with clickable submission deep links.
+- Added deterministic unit tests in `cmd/bugrouter/main_test.go` (`TestGuidedReportWizard`) verifying interactive scanning and staging.
+- Added Guided Draft Composer API (`POST /api/v1/drafts`) to `internal/cloud/server.go` (`handleCreateDraft`, `CreateDraftRequest`), protected by Bearer auth and CSRF guard, supporting query resolution, hardware telemetry attachment, duplicate checking, draft staging, audit trail recording (`draft.created`), webhook notification, and strict quality enforcement (returning 422 Unprocessable Entity with `QualityReport`).
+- Added "New Guided Report" button and interactive composer modal with hardware telemetry and strict quality options to the Cloud Control Plane Web UI (`indexHTML`).
+- Added unit tests in `internal/cloud/server_test.go` (`TestServerCreateDraftEndpoint`) verifying 201 Created staging, 422 Unprocessable Entity rejection, draft store persistence, and audit logging.
+- Updated `ROADMAP.md` completing Milestone 7 (Spec #15) and activating Milestone 8 (Spec #16: GitHub Actions CI/CD & CalVer Release Pipeline).

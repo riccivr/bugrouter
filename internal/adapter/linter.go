@@ -44,6 +44,34 @@ func LintDraft(in DraftInput) QualityReport {
 		}
 	}
 
+	// Em Dashes & Decorative Emojis (-15 pts, forces Passed = false)
+	combinedRaw := in.Title + " " + in.Summary + " " + in.StepsToReproduce
+	hasEmDashOrEmoji := false
+	if strings.Contains(combinedRaw, "—") { // \u2014 em-dash
+		hasEmDashOrEmoji = true
+	} else {
+		for _, r := range combinedRaw {
+			if (r >= 0x1F300 && r <= 0x1F9FF) || (r >= 0x2600 && r <= 0x27BF) {
+				hasEmDashOrEmoji = true
+				break
+			}
+		}
+	}
+	if hasEmDashOrEmoji {
+		hasAISlop = true
+		score -= 15
+		issues = append(issues, "contains em dashes or decorative emojis; use plain ASCII punctuation")
+	}
+
+	// Unfilled Placeholders (-20 pts)
+	for _, ph := range []string{"<insert", "[insert", "todo:", "fixme:"} {
+		if strings.Contains(lowerFields, ph) {
+			score -= 20
+			issues = append(issues, "contains unfilled placeholder text (TODO/FIXME/insert)")
+			break
+		}
+	}
+
 	// 2. Vague or Ultra-Short Title (-25 pts)
 	cleanTitle := sanitizeTitle(in.Title)
 	if len(strings.Fields(cleanTitle)) < 3 {

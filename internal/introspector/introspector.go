@@ -168,6 +168,15 @@ func gitLabAuthHeader() map[string]string {
 	return nil
 }
 
+func giteaAuthHeader() map[string]string {
+	for _, env := range []string{"GITEA_TOKEN", "BUGROUTER_GITEA_TOKEN", "CODEBERG_TOKEN"} {
+		if tok := os.Getenv(env); tok != "" {
+			return map[string]string{"Authorization": "token " + tok}
+		}
+	}
+	return nil
+}
+
 func (intro *Introspector) introspectGitHub(ctx context.Context, target resolver.Target) (*TemplateSchema, error) {
 	owner, repo, err := extractGitHubOwnerRepo(target)
 	if err != nil {
@@ -410,7 +419,7 @@ func (intro *Introspector) introspectGitea(ctx context.Context, target resolver.
 	baseURL := fmt.Sprintf("%s://%s", u.Scheme, u.Host)
 
 	apiURL := fmt.Sprintf("%s/api/v1/repos/%s/%s/issue_templates", baseURL, owner, repo)
-	data, err := intro.client.GetBytes(ctx, apiURL, "application/json")
+	data, err := intro.client.GetBytesWithHeaders(ctx, apiURL, "application/json", giteaAuthHeader())
 	if err == nil {
 		var templates []struct {
 			Name    string `json:"name"`

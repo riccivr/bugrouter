@@ -168,3 +168,68 @@ func TestLintDraftWithVerifiedReproduction(t *testing.T) {
 		t.Errorf("expected Passed=true with reproduction bonus, got issues: %v", rep.Issues)
 	}
 }
+
+func TestLintDraftEmDashAndEmoji(t *testing.T) {
+	// Test em dash
+	inEmDash := DraftInput{
+		Title:            "Null pointer dereference — crash in worker pool initialization",
+		Summary:          "When initializing the connection pool with zero max connections, a panic occurs.",
+		StepsToReproduce: "1. Instantiate pool with MaxConns=0\n2. Call pool.Acquire()\n3. Observe panic",
+		Logs:             "panic: runtime error",
+	}
+	rep1 := LintDraft(inEmDash)
+	if rep1.Passed {
+		t.Errorf("expected Passed=false for em dash, got true")
+	}
+	if rep1.Score != 85 {
+		t.Errorf("expected Score=85 (-15 for em dash), got %d", rep1.Score)
+	}
+	hasEmDashIssue := false
+	for _, issue := range rep1.Issues {
+		if strings.Contains(issue, "em dashes or decorative emojis") {
+			hasEmDashIssue = true
+			break
+		}
+	}
+	if !hasEmDashIssue {
+		t.Errorf("expected em dash issue, got %v", rep1.Issues)
+	}
+
+	// Test decorative emoji
+	inEmoji := DraftInput{
+		Title:            "Null pointer dereference 🐛 in worker pool initialization",
+		Summary:          "When initializing the connection pool with zero max connections, a panic occurs.",
+		StepsToReproduce: "1. Instantiate pool with MaxConns=0\n2. Call pool.Acquire()\n3. Observe panic",
+		Logs:             "panic: runtime error",
+	}
+	rep2 := LintDraft(inEmoji)
+	if rep2.Passed {
+		t.Errorf("expected Passed=false for emoji, got true")
+	}
+	if rep2.Score != 85 {
+		t.Errorf("expected Score=85 (-15 for emoji), got %d", rep2.Score)
+	}
+}
+
+func TestLintDraftPlaceholders(t *testing.T) {
+	inPlaceholder := DraftInput{
+		Title:            "Null pointer dereference during connection pool initialization",
+		Summary:          "When initializing the connection pool, TODO: add details later.",
+		StepsToReproduce: "1. Instantiate pool with MaxConns=0\n2. Call pool.Acquire()\n3. Observe panic",
+		Logs:             "panic: runtime error",
+	}
+	rep := LintDraft(inPlaceholder)
+	if rep.Score != 80 {
+		t.Errorf("expected Score=80 (-20 for placeholder), got %d", rep.Score)
+	}
+	hasPlaceholderIssue := false
+	for _, issue := range rep.Issues {
+		if strings.Contains(issue, "unfilled placeholder") {
+			hasPlaceholderIssue = true
+			break
+		}
+	}
+	if !hasPlaceholderIssue {
+		t.Errorf("expected placeholder issue, got %v", rep.Issues)
+	}
+}

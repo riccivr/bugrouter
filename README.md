@@ -112,6 +112,19 @@ bugrouter draft my-app \
   --verify-cmd "./test/repro.sh"
 ```
 
+### Interactive Guided Human Bug Wizard (`bugrouter report`)
+Everyday developers and desktop users can use the interactive wizard to report bugs step-by-step with real-time Anti-Slop quality evaluation, automatic hardware/OS telemetry collection, duplicate detection, and pre-filled submission links:
+```bash
+# Launch interactive wizard
+bugrouter report blender
+
+# Pre-fill specific fields via flags and prompt for the remainder
+bugrouter report https://github.com/myorg/myapp --title "Memory leak in worker connection pool"
+
+# Generate structured JSON for scripting
+bugrouter report --json --title "Crash on launch" --summary "Process aborts immediately" --steps "Launch app" myapp
+```
+
 ### Autonomous Agent Mode (`bugrouter agent`)
 Autonomous tooling and subcommands designed specifically for AI coding agents and CI runners:
 
@@ -179,7 +192,7 @@ bugrouter serve \
   --webhook-secret "hmac-signing-secret"
 ```
 
-Open `http://localhost:8080` in your browser to access the Human-in-the-Loop review dashboard, the "Connected Tech Stack & Downstream Radar" panel, and recent audit trail.
+Open `http://localhost:8080` in your browser to access the Human-in-the-Loop review dashboard, the "New Guided Report" composer modal (with hardware telemetry attachment and strict anti-slop gating), the "Connected Tech Stack & Downstream Radar" panel, and recent audit trail. Programmatic draft staging is also exposed via `POST /api/v1/drafts`.
 
 ---
 

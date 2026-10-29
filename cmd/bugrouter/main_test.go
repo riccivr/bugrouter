@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"net/http"
@@ -509,5 +510,82 @@ func TestTelemetryCommandIntegration(t *testing.T) {
 	body := string(draft.MarkdownBody)
 	if !strings.Contains(body, "- **OS**:") {
 		t.Errorf("expected - **OS**: in draft markdown body: %s", body)
+	}
+}
+
+func TestGuidedReportWizard(t *testing.T) {
+	tempDir := t.TempDir()
+	dataHome := filepath.Join(tempDir, "data")
+	cacheHome := filepath.Join(tempDir, "cache")
+	configHome := filepath.Join(tempDir, "config")
+	t.Setenv("XDG_DATA_HOME", dataHome)
+	t.Setenv("XDG_CACHE_HOME", cacheHome)
+	t.Setenv("XDG_CONFIG_HOME", configHome)
+
+	// Simulated user typing interactively:
+	// 1. Title
+	// 2. Summary
+	// 3. Steps to reproduce
+	// 4. Expected behavior
+	// 5. Actual behavior
+	// 6. Logs / output
+	userInput := strings.Join([]string{
+		"Null pointer dereference during connection pool initialization",
+		"When initializing the connection pool with zero max connections, a panic occurs.",
+		"1. Instantiate pool with MaxConns=0\n2. Call pool.Acquire()\n3. Observe panic",
+		"Clean error returned indicating invalid MaxConns",
+		"SIGSEGV panic terminating process immediately",
+		"panic: runtime error: invalid memory address or nil pointer dereference",
+	}, "\n") + "\n"
+
+	in := strings.NewReader(userInput)
+	out := &bytes.Buffer{}
+
+	client := httpx.NewTestClient(2 * time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	opts := ReportOptions{
+		Query:   "https://github.com/myorg/myapp",
+		NoCache: true,
+	}
+
+	draft, stagedPath, err := runGuidedReport(ctx, in, out, client, opts)
+	if err != nil {
+		t.Fatalf("runGuidedReport failed: %v", err)
+	}
+
+	if draft == nil {
+		t.Fatal("expected non-nil staged draft")
+	}
+	if draft.Title != "Null pointer dereference during connection pool initialization" {
+		t.Errorf("title = %q, want expected title", draft.Title)
+	}
+	if draft.Quality.Score < 80 {
+		t.Errorf("expected quality score >= 80, got %d", draft.Quality.Score)
+	}
+	if !draft.Quality.Passed {
+		t.Errorf("expected quality passed=true, got false (issues: %v)", draft.Quality.Issues)
+	}
+	if draft.Telemetry == nil {
+		t.Error("expected telemetry attached by default")
+	}
+
+	if stagedPath == "" {
+		t.Fatal("expected non-empty stagedPath")
+	}
+	if _, statErr := os.Stat(stagedPath); statErr != nil {
+		t.Fatalf("staged file does not exist at %s: %v", stagedPath, statErr)
+	}
+
+	output := out.String()
+	if !strings.Contains(output, "--- Bug Report Staged ---") {
+		t.Errorf("output missing staging banner: %s", output)
+	}
+	if !strings.Contains(output, "Quality Assessment:") {
+		t.Errorf("output missing quality assessment: %s", output)
+	}
+	if !strings.Contains(output, "Score:") {
+		t.Errorf("output missing score: %s", output)
 	}
 }

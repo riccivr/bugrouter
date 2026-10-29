@@ -233,3 +233,46 @@ func TestForgeClientMissingToken(t *testing.T) {
 		t.Errorf("expected error containing 'missing', got: %v", err)
 	}
 }
+
+func TestForgeClientGitea(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "token test-gitea-token" {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		if r.URL.Path != "/api/v1/repos/blender/blender/issues" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		fmt.Fprint(w, `{"html_url": "https://projects.blender.org/blender/blender/issues/404"}`)
+	}))
+	defer ts.Close()
+
+	client := NewForgeClient(httpx.NewTestClient(time.Second)).
+		WithToken(resolver.ProtocolGitea, "test-gitea-token").
+		WithBaseURL(resolver.ProtocolGitea, ts.URL)
+
+	draft := &adapter.StagedDraft{
+		Target: resolver.Target{
+			CanonicalName: "blender",
+			RepositoryURL: "https://projects.blender.org/blender/blender",
+			Tracker: resolver.TrackerInfo{
+				Protocol: resolver.ProtocolGitea,
+				URL:      "https://projects.blender.org/blender/blender/issues",
+			},
+		},
+		Title:        "Viewport crash in render mode",
+		MarkdownBody: "## Summary\nCrash when switching to cycles viewport",
+	}
+
+	issueURL, err := client.Submit(context.Background(), draft)
+	if err != nil {
+		t.Fatalf("Submit Gitea failed: %v", err)
+	}
+	expectedURL := "https://projects.blender.org/blender/blender/issues/404"
+	if issueURL != expectedURL {
+		t.Errorf("url = %q, want %q", issueURL, expectedURL)
+	}
+}

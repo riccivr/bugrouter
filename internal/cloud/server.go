@@ -16,6 +16,8 @@ import (
 	"github.com/riccivr/bugrouter/internal/adapter"
 	"github.com/riccivr/bugrouter/internal/dedup"
 	"github.com/riccivr/bugrouter/internal/resolver"
+	"github.com/riccivr/bugrouter/internal/scrubber"
+	"github.com/riccivr/bugrouter/internal/telemetry"
 	"github.com/riccivr/bugrouter/internal/version"
 )
 
@@ -155,6 +157,7 @@ func (s *Server) securityMiddleware(next http.Handler) http.Handler {
 func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/v1/health", s.handleHealth)
 	s.mux.HandleFunc("GET /api/v1/drafts", s.handleListDrafts)
+	s.mux.HandleFunc("POST /api/v1/drafts", s.handleCreateDraft)
 	s.mux.HandleFunc("POST /api/v1/drafts/{id}/approve", s.handleApproveDraft)
 	s.mux.HandleFunc("POST /api/v1/drafts/{id}/discard", s.handleDiscardDraft)
 	s.mux.HandleFunc("GET /api/v1/audit", s.handleAuditLog)
@@ -223,6 +226,146 @@ func (s *Server) handleListDrafts(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(drafts); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+}
+
+// CreateDraftRequest defines the payload for creating a staged bug report draft.
+type CreateDraftRequest struct {
+	Query            string `json:"query"`
+	Title            string `json:"title"`
+	Summary          string `json:"summary"`
+	StepsToReproduce string `json:"steps_to_reproduce"`
+	ExpectedBehavior string `json:"expected_behavior,omitempty"`
+	ActualBehavior   string `json:"actual_behavior,omitempty"`
+	Logs             string `json:"logs,omitempty"`
+	IncludeTelemetry bool   `json:"include_telemetry"`
+	StrictQuality    bool   `json:"strict_quality"`
+}
+
+func (s *Server) handleCreateDraft(w http.ResponseWriter, r *http.Request) {
+	var req CreateDraftRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1024*1024)).Decode(&req); err != nil {
+		http.Error(w, fmt.Sprintf("invalid json payload: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	req.Query = strings.TrimSpace(req.Query)
+	req.Title = strings.TrimSpace(req.Title)
+	if req.Query == "" {
+		http.Error(w, "query is required", http.StatusBadRequest)
+		return
+	}
+	if req.Title == "" {
+		http.Error(w, "title is required", http.StatusBadRequest)
+		return
+	}
+
+	// Resolve target
+	var target *resolver.Target
+	if s.resolver != nil {
+		t, err := s.resolver.Resolve(r.Context(), req.Query)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("resolve query %q: %v", req.Query, err), http.StatusBadRequest)
+			return
+		}
+		target = t
+	} else {
+		directProbe := resolver.NewDirectProbe()
+		t, probeErr := directProbe.Resolve(r.Context(), req.Query)
+		if probeErr == nil && t != nil {
+			target = t
+		} else {
+			target = &resolver.Target{
+				CanonicalName: req.Query,
+				RepositoryURL: req.Query,
+				Tracker: resolver.TrackerInfo{
+					Protocol: resolver.ProtocolGitHub,
+					URL:      req.Query,
+				},
+			}
+		}
+	}
+
+	// Collect hardware telemetry if requested
+	var sysTelemetry *telemetry.SystemTelemetry
+	if req.IncludeTelemetry {
+		telem := telemetry.Collect(r.Context())
+		sysTelemetry = &telem
+	}
+
+	// Query potential duplicates
+	var dups []dedup.ExistingIssue
+	if s.dedupFinder != nil && target != nil {
+		if d, dupErr := s.dedupFinder.FindDuplicates(r.Context(), *target, scrubber.Scrub(req.Title)); dupErr == nil {
+			dups = d
+		}
+	}
+
+	// Build staged draft
+	draft, err := adapter.BuildDraft(adapter.DraftInput{
+		Target:           *target,
+		Title:            req.Title,
+		Summary:          req.Summary,
+		StepsToReproduce: req.StepsToReproduce,
+		ExpectedBehavior: req.ExpectedBehavior,
+		ActualBehavior:   req.ActualBehavior,
+		Logs:             req.Logs,
+		Duplicates:       dups,
+		Telemetry:        sysTelemetry,
+	})
+	if err != nil {
+		http.Error(w, fmt.Sprintf("build draft: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	// Strict quality check
+	if req.StrictQuality && !draft.Quality.Passed {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		if encErr := json.NewEncoder(w).Encode(draft.Quality); encErr != nil {
+			http.Error(w, encErr.Error(), http.StatusInternalServerError)
+		}
+		return
+	}
+
+	// Save to draftStore
+	if s.draftStore != nil {
+		if savedPath, saveErr := s.draftStore.Save(draft); saveErr != nil {
+			http.Error(w, fmt.Sprintf("save draft: %v", saveErr), http.StatusInternalServerError)
+			return
+		} else if savedPath == "" {
+			// Non-fatal
+		}
+	}
+
+	// Record audit event
+	remoteIP := r.RemoteAddr
+	if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
+		remoteIP = strings.TrimSpace(strings.Split(fwd, ",")[0])
+	}
+	ev := AuditEvent{
+		Timestamp: time.Now().UTC(),
+		Action:    "draft.created",
+		DraftID:   draft.ID,
+		Target:    draft.Target.CanonicalName,
+		Protocol:  draft.Target.Tracker.Protocol,
+		RemoteIP:  remoteIP,
+	}
+	if s.auditLogger != nil {
+		if logErr := s.auditLogger.Record(ev); logErr != nil {
+			fmt.Fprintf(os.Stderr, "audit log record error: %v\n", logErr)
+		}
+	}
+	if s.webhookNotifier != nil {
+		if notifyErr := s.webhookNotifier.Notify(r.Context(), ev); notifyErr != nil {
+			fmt.Fprintf(os.Stderr, "webhook notify error: %v\n", notifyErr)
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	if encErr := json.NewEncoder(w).Encode(draft); encErr != nil {
+		http.Error(w, encErr.Error(), http.StatusInternalServerError)
 	}
 }
 
@@ -617,6 +760,7 @@ const indexHTML = `<!DOCTYPE html>
     <h1>bugrouter <span>Cloud Control Plane</span> <span class="badge">CalVer 2026.10.0</span></h1>
     <div style="display: flex; gap: 8px; align-items: center;">
       <input type="password" id="auth-token" placeholder="Auth Token" style="padding: 6px 10px; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; color: var(--text); font-size: 0.85rem;" onchange="saveToken(this.value)">
+      <button class="btn btn-approve" onclick="openComposerModal()">New Guided Report</button>
       <button class="btn btn-inspect" onclick="refreshQueue()">Refresh Queue</button>
     </div>
   </header>
@@ -690,6 +834,57 @@ const indexHTML = `<!DOCTYPE html>
       <div id="modal-content"></div>
       <div style="text-align: right; margin-top: 16px;">
         <button class="btn btn-discard" onclick="closeModal()">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="composer-modal" style="display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.7); align-items: center; justify-content: center; z-index: 1000;" onclick="closeComposerModal(event)">
+    <div style="background: var(--card); border: 1px solid var(--border); border-radius: 8px; max-width: 700px; width: 90%; max-height: 85vh; overflow-y: auto; padding: 24px;" onclick="event.stopPropagation()">
+      <h3 style="margin-top:0; color:var(--heading);">New Guided Bug Report</h3>
+      <div id="composer-error" style="display:none; color:var(--danger); margin-bottom:12px; font-size:0.85rem;"></div>
+      <div style="display:flex; flex-direction:column; gap:12px;">
+        <div>
+          <label style="display:block; font-size:0.8rem; color:var(--muted); margin-bottom:4px;">Target Query (e.g. org/repo, command, URL) *</label>
+          <input type="text" id="comp-query" placeholder="github.com/myorg/myapp" style="width:100%; box-sizing:border-box; padding:8px; background:var(--bg); border:1px solid var(--border); border-radius:6px; color:var(--text); font-size:0.85rem;">
+        </div>
+        <div>
+          <label style="display:block; font-size:0.8rem; color:var(--muted); margin-bottom:4px;">Bug Title *</label>
+          <input type="text" id="comp-title" placeholder="Panic during connection initialization" style="width:100%; box-sizing:border-box; padding:8px; background:var(--bg); border:1px solid var(--border); border-radius:6px; color:var(--text); font-size:0.85rem;">
+        </div>
+        <div>
+          <label style="display:block; font-size:0.8rem; color:var(--muted); margin-bottom:4px;">Summary *</label>
+          <textarea id="comp-summary" rows="3" placeholder="Explain the context and failure..." style="width:100%; box-sizing:border-box; padding:8px; background:var(--bg); border:1px solid var(--border); border-radius:6px; color:var(--text); font-size:0.85rem; font-family:inherit;"></textarea>
+        </div>
+        <div>
+          <label style="display:block; font-size:0.8rem; color:var(--muted); margin-bottom:4px;">Steps to Reproduce *</label>
+          <textarea id="comp-steps" rows="3" placeholder="1. Step one&#10;2. Step two" style="width:100%; box-sizing:border-box; padding:8px; background:var(--bg); border:1px solid var(--border); border-radius:6px; color:var(--text); font-size:0.85rem; font-family:inherit;"></textarea>
+        </div>
+        <div style="display:flex; gap:12px;">
+          <div style="flex:1;">
+            <label style="display:block; font-size:0.8rem; color:var(--muted); margin-bottom:4px;">Expected Behavior</label>
+            <input type="text" id="comp-expected" placeholder="Returns clean error" style="width:100%; box-sizing:border-box; padding:8px; background:var(--bg); border:1px solid var(--border); border-radius:6px; color:var(--text); font-size:0.85rem;">
+          </div>
+          <div style="flex:1;">
+            <label style="display:block; font-size:0.8rem; color:var(--muted); margin-bottom:4px;">Actual Behavior</label>
+            <input type="text" id="comp-actual" placeholder="Panics with SIGSEGV" style="width:100%; box-sizing:border-box; padding:8px; background:var(--bg); border:1px solid var(--border); border-radius:6px; color:var(--text); font-size:0.85rem;">
+          </div>
+        </div>
+        <div>
+          <label style="display:block; font-size:0.8rem; color:var(--muted); margin-bottom:4px;">Logs / Stack Trace</label>
+          <textarea id="comp-logs" rows="3" placeholder="Paste error logs here..." style="width:100%; box-sizing:border-box; padding:8px; background:var(--bg); border:1px solid var(--border); border-radius:6px; color:var(--text); font-size:0.85rem; font-family:inherit;"></textarea>
+        </div>
+        <div style="display:flex; align-items:center; gap:8px;">
+          <input type="checkbox" id="comp-telemetry" checked>
+          <label for="comp-telemetry" style="font-size:0.85rem; color:var(--text);">Attach Hardware &amp; OS Telemetry</label>
+        </div>
+        <div style="display:flex; align-items:center; gap:8px;">
+          <input type="checkbox" id="comp-strict">
+          <label for="comp-strict" style="font-size:0.85rem; color:var(--text);">Strict Quality Check (fail on AI slop / low signal)</label>
+        </div>
+      </div>
+      <div style="display:flex; justify-content:flex-end; gap:8px; margin-top:20px;">
+        <button class="btn btn-discard" onclick="closeComposerModal()">Cancel</button>
+        <button class="btn btn-approve" id="btn-submit-draft" onclick="submitGuidedDraft()">Stage Draft</button>
       </div>
     </div>
   </div>
@@ -792,6 +987,88 @@ const indexHTML = `<!DOCTYPE html>
 
     function closeModal() {
       document.getElementById('modal').style.display = 'none';
+    }
+
+    function openComposerModal() {
+      const errEl = document.getElementById('composer-error');
+      if (errEl) errEl.style.display = 'none';
+      document.getElementById('composer-modal').style.display = 'flex';
+    }
+
+    function closeComposerModal(e) {
+      if (e && e.target !== document.getElementById('composer-modal')) return;
+      document.getElementById('composer-modal').style.display = 'none';
+    }
+
+    async function submitGuidedDraft() {
+      const query = document.getElementById('comp-query').value.trim();
+      const title = document.getElementById('comp-title').value.trim();
+      const summary = document.getElementById('comp-summary').value.trim();
+      const steps = document.getElementById('comp-steps').value.trim();
+      const expected = document.getElementById('comp-expected').value.trim();
+      const actual = document.getElementById('comp-actual').value.trim();
+      const logs = document.getElementById('comp-logs').value.trim();
+      const includeTelemetry = document.getElementById('comp-telemetry').checked;
+      const strictQuality = document.getElementById('comp-strict').checked;
+
+      const errEl = document.getElementById('composer-error');
+      if (!query || !title) {
+        errEl.textContent = 'Target query and title are required.';
+        errEl.style.display = 'block';
+        return;
+      }
+
+      const btn = document.getElementById('btn-submit-draft');
+      btn.disabled = true;
+      btn.textContent = 'Staging...';
+      errEl.style.display = 'none';
+
+      try {
+        const res = await fetch('/api/v1/drafts', {
+          method: 'POST',
+          headers: {
+            ...getHeaders(),
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            query: query,
+            title: title,
+            summary: summary,
+            steps_to_reproduce: steps,
+            expected_behavior: expected,
+            actual_behavior: actual,
+            logs: logs,
+            include_telemetry: includeTelemetry,
+            strict_quality: strictQuality
+          })
+        });
+
+        if (!res.ok) {
+          if (res.status === 422) {
+            const quality = await res.json();
+            let msg = 'Strict quality check failed (Score: ' + quality.score + '/100, Grade: ' + quality.grade + '):';
+            if (quality.issues && quality.issues.length > 0) {
+              msg += '\n- ' + quality.issues.join('\n- ');
+            }
+            alert(msg);
+          } else {
+            const errText = await res.text();
+            alert('Failed to stage draft: ' + errText);
+          }
+          return;
+        }
+
+        const createdDraft = await res.json();
+        closeComposerModal();
+        await fetchDrafts();
+        await fetchAudit();
+        inspectDraft(createdDraft.id);
+      } catch (err) {
+        alert('Network error: ' + err.message);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = 'Stage Draft';
+      }
     }
 
     function refreshQueue() {

@@ -1,6 +1,7 @@
 package cloud
 
 import (
+	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
@@ -845,5 +846,151 @@ func TestServerStackEndpoint(t *testing.T) {
 	}
 	if !strings.Contains(htmlStr, "stack-table") || !strings.Contains(htmlStr, "fetchStack") {
 		t.Errorf("expected stack-table and fetchStack in indexHTML")
+	}
+}
+
+func TestServerCreateDraftEndpoint(t *testing.T) {
+	tempDir := t.TempDir()
+	store := adapter.NewDraftStore(tempDir)
+	auditFile := filepath.Join(tempDir, "audit.jsonl")
+	logger := NewAuditLogger(auditFile)
+
+	srv := NewServer(":0", store, nil).WithAuditLogger(logger)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	// 1. Success case: 201 Created with high-quality draft
+	createReq := CreateDraftRequest{
+		Query:            "https://github.com/myorg/myapp",
+		Title:            "Null pointer dereference during connection pool initialization",
+		Summary:          "When initializing the connection pool with zero max connections, a panic occurs.",
+		StepsToReproduce: "1. Instantiate pool with MaxConns=0\n2. Call pool.Acquire()\n3. Observe panic",
+		Logs:             "panic: runtime error: invalid memory address or nil pointer dereference",
+		IncludeTelemetry: true,
+		StrictQuality:    true,
+	}
+	bodyBytes, err := json.Marshal(createReq)
+	if err != nil {
+		t.Fatalf("marshal createReq: %v", err)
+	}
+
+	req, err := http.NewRequest(http.MethodPost, ts.URL+"/api/v1/drafts", bytes.NewReader(bodyBytes))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Bugrouter-Request", "1")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST /api/v1/drafts failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusCreated {
+		respBody, readErr := io.ReadAll(resp.Body)
+		if readErr != nil {
+			// drain
+		}
+		t.Fatalf("expected status 201 Created, got %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var created adapter.StagedDraft
+	if decodeErr := json.NewDecoder(resp.Body).Decode(&created); decodeErr != nil {
+		t.Fatalf("decode created draft: %v", decodeErr)
+	}
+
+	if created.ID == "" {
+		t.Error("expected non-empty draft ID")
+	}
+	if created.Title != "Null pointer dereference during connection pool initialization" {
+		t.Errorf("title = %q, want expected title", created.Title)
+	}
+	if created.Telemetry == nil {
+		t.Error("expected telemetry attached to created draft")
+	}
+	if !created.Quality.Passed {
+		t.Errorf("expected quality passed=true, got false (issues: %v)", created.Quality.Issues)
+	}
+
+	// Verify draft was saved to draftStore
+	saved, getErr := store.Get(created.ID)
+	if getErr != nil || saved == nil {
+		t.Fatalf("store.Get(%s) failed: %v", created.ID, getErr)
+	}
+
+	// Verify audit trail recorded draft.created
+	events, listErr := logger.ListRecent(10)
+	if listErr != nil {
+		t.Fatalf("ListRecent audit failed: %v", listErr)
+	}
+	foundAuditEvent := false
+	for _, ev := range events {
+		if ev.Action == "draft.created" && ev.DraftID == created.ID {
+			foundAuditEvent = true
+			break
+		}
+	}
+	if !foundAuditEvent {
+		t.Errorf("expected draft.created audit event, got: %+v", events)
+	}
+
+	// 2. Strict quality failure case: 422 Unprocessable Entity
+	badReq := CreateDraftRequest{
+		Query:            "https://github.com/myorg/myapp",
+		Title:            "crash",
+		Summary:          "as an ai, i hope this message finds you well",
+		StepsToReproduce: "repro",
+		StrictQuality:    true,
+	}
+	badBytes, err := json.Marshal(badReq)
+	if err != nil {
+		t.Fatalf("marshal badReq: %v", err)
+	}
+
+	reqBad, err := http.NewRequest(http.MethodPost, ts.URL+"/api/v1/drafts", bytes.NewReader(badBytes))
+	if err != nil {
+		t.Fatalf("new bad request: %v", err)
+	}
+	reqBad.Header.Set("Content-Type", "application/json")
+	reqBad.Header.Set("X-Bugrouter-Request", "1")
+
+	respBad, err := http.DefaultClient.Do(reqBad)
+	if err != nil {
+		t.Fatalf("POST /api/v1/drafts bad request failed: %v", err)
+	}
+	defer respBad.Body.Close()
+
+	if respBad.StatusCode != http.StatusUnprocessableEntity {
+		t.Fatalf("expected status 422 Unprocessable Entity, got %d", respBad.StatusCode)
+	}
+
+	var quality adapter.QualityReport
+	if decodeErr := json.NewDecoder(respBad.Body).Decode(&quality); decodeErr != nil {
+		t.Fatalf("decode quality report: %v", decodeErr)
+	}
+	if quality.Passed {
+		t.Error("expected quality.Passed=false")
+	}
+	if len(quality.Issues) == 0 {
+		t.Error("expected quality issues list to be populated")
+	}
+
+	// 3. Verify HTML includes New Guided Report button and modal
+	respHTML, err := http.Get(ts.URL + "/")
+	if err != nil {
+		t.Fatalf("GET / failed: %v", err)
+	}
+	defer respHTML.Body.Close()
+	htmlData, err := io.ReadAll(respHTML.Body)
+	if err != nil {
+		t.Fatalf("read html: %v", err)
+	}
+	htmlStr := string(htmlData)
+	if !strings.Contains(htmlStr, "New Guided Report") {
+		t.Errorf("expected 'New Guided Report' button in indexHTML")
+	}
+	if !strings.Contains(htmlStr, "composer-modal") || !strings.Contains(htmlStr, "submitGuidedDraft") {
+		t.Errorf("expected composer-modal and submitGuidedDraft in indexHTML")
 	}
 }
