@@ -9,13 +9,13 @@ fi
 
 first_line=$(head -n 1 "$msg_file" | tr -d '\r')
 
-pattern='^(feat|fix|perf|refactor|test|docs|build|ci|chore)\((cli|mcp|resolver|introspector|scrubber|adapter|cloud|core)\)!?: [a-z0-9][^\.]*$'
+pattern='^(feat|fix|perf|refactor|test|docs|build|ci|chore)\((cli|mcp|resolver|introspector|scrubber|adapter|cloud|core|dedup)\)!?: [a-z0-9][^\.]*$'
 
 if ! printf "%s" "$first_line" | grep -Eq "$pattern"; then
     echo "commit-msg error: invalid commit message format" >&2
     echo "Expected: <type>(<scope>): <summary>" >&2
     echo "Types:    feat|fix|perf|refactor|test|docs|build|ci|chore" >&2
-    echo "Scopes:   cli|mcp|resolver|introspector|scrubber|adapter|cloud|core" >&2
+    echo "Scopes:   cli|mcp|resolver|introspector|scrubber|adapter|cloud|core|dedup" >&2
     echo "Summary must start with lowercase letter or number, with no trailing period." >&2
     echo "Got: $first_line" >&2
     exit 1
