@@ -26,11 +26,13 @@ Dependencies: **Standard Library Only (Zero Third-Party Dependencies)**
 - **Zero External Dependencies**: Pure Go 1.22+ standard library implementation. No transitive dependency bloat or supply chain exposure.
 - **6-Layer Resolution Waterfall**:
   1. `org-cloud`: Enterprise service catalog and monorepo ownership records (`services.json`).
-  2. `direct-url`: Exact GitHub, GitLab, Codeberg, and SourceHut repository URLs and paths.
+  2. `direct-url`: Exact GitHub, GitLab, Codeberg, Gitea/Forgejo, and SourceHut repository URLs and paths.
   3. `workspace`: Local dependency manifests (`node_modules`, `go.mod`, `Cargo.toml`/`Cargo.lock`, `pyproject.toml`).
-  4. `os-pkg`: Operating system package managers (Debian/Ubuntu `dpkg`/`apt`, Fedora/RHEL `rpm`, Arch `pacman`).
+  4. `os-pkg`: Operating system and desktop package managers (Debian/Ubuntu `dpkg`/`apt`, Fedora/RHEL `rpm`, Arch `pacman`, Linux `flatpak`, `snap`, Windows `winget`).
   5. `registry`: Concurrent queries across ecosystem registries (`npm`, `PyPI`, `Crates.io`).
   6. `web-domain`: RFC 9116 `security.txt` and `.well-known/bug-report` discovery.
+- **Desktop App Resolver & Community Forges**: Resolves desktop GUI applications from Flatpak, Snap, and Winget metadata, and classifies community Gitea/Forgejo trackers (such as `projects.blender.org`) with pre-filled deep links and REST API issue introspection.
+- **Zero-Dependency Hardware Telemetry**: Automatically collects OS kernel, CPU model, core count, GPU models, desktop environments, and display servers with type-safe credential scrubbing and Markdown formatting.
 - **Type-Safe Scrubber**: Produces immutable `scrubber.ScrubbedText`. Redacts AWS keys, GitHub PATs, Slack/Stripe/OpenAI tokens, PEM private keys, URI credentials, and local home directory paths (`/home/*`, `/Users/*`). Preserves short configuration literals (`true`, `false`, `null`, `nil`).
 - **Upstream Issue Template Introspection**: Discovers and maps GitHub YAML Issue Forms (`body` textareas/inputs), GitLab markdown templates (`issuable_template`), and Bugzilla product schemas.
 - **Upstream Duplicate Detection**: Searches GitHub, GitLab, and Bugzilla trackers using title keyword extraction and stop word filtering, calculating scored token overlap.
@@ -39,7 +41,7 @@ Dependencies: **Standard Library Only (Zero Third-Party Dependencies)**
 - **Anti-Slop Quality Gate**: Evaluates draft quality against AI buzzwords, conversational chatbot filler, em dashes, typographic curly quotes, decorative emojis, and placeholders with strict gating (`--strict-quality`).
 - **Human-in-the-Loop Review Queue**: Embedded Web UI and REST API (`/api/v1/drafts`) for manual triage, review, and one-click dispatch via OAuth/PAT connectors.
 - **Hardened Cloud Security**: SHA-256 pre-hashed constant-time Bearer auth (`crypto/subtle.ConstantTimeCompare`), CSRF origin guards, append-only audit trail (`audit.log`), and HMAC-SHA256 signed webhooks (`X-Bugrouter-Signature`).
-- **Model Context Protocol (MCP)**: Native stdio JSON-RPC 2.0 server (spec `2024-11-05`) exposing 9 specialized agent tools.
+- **Model Context Protocol (MCP)**: Native stdio JSON-RPC 2.0 server (spec `2024-11-05`) exposing 11 specialized agent tools.
 
 ---
 
@@ -149,6 +151,19 @@ bugrouter stack --dir ./frontend --json
 bugrouter stack --check-upstream
 ```
 
+### Hardware & OS Telemetry (`bugrouter telemetry`)
+Inspect zero-dependency local operating system and hardware diagnostics:
+```bash
+# Print formatted Markdown telemetry list
+bugrouter telemetry
+
+# Output machine-parseable JSON
+bugrouter telemetry --json
+
+# Stage a draft with attached telemetry
+bugrouter draft blender --title "EEVEE viewport crash on Linux" --with-telemetry
+```
+
 ### Serve Cloud Control Plane
 Start the embedded review queue Web UI and control plane daemon:
 ```bash
@@ -187,7 +202,7 @@ Add `bugrouter` to your MCP client configuration (e.g., `claude_desktop_config.j
 }
 ```
 
-### Available MCP Tools (10 Total)
+### Available MCP Tools (11 Total)
 
 | Tool Name | Parameters | Description |
 | :--- | :--- | :--- |
@@ -195,12 +210,13 @@ Add `bugrouter` to your MCP client configuration (e.g., `claude_desktop_config.j
 | `scrub_text` | `text` (string) | Deterministically redacts secrets, tokens, connection strings, and local username paths. |
 | `introspect_template` | `query` (string) | Discovers and parses upstream bug tracker issue templates or schemas for a target. |
 | `search_duplicates` | `query` (string), `title` (string) | Searches upstream issue tracker (GitHub, GitLab, Bugzilla) for existing duplicate bug reports. |
-| `draft_bug_report` | `query` (string), `title` (string), `summary` (string, optional), `steps_to_reproduce` (string, optional), `logs` (string, optional), `strict_quality` (bool, optional), `verify_cmd` (string, optional) | Resolves target, scrubs credentials, introspects template, finds duplicates, runs optional self-verification, stages draft to disk, and returns structured ticket. |
+| `draft_bug_report` | `query` (string), `title` (string), `summary` (string, optional), `steps_to_reproduce` (string, optional), `logs` (string, optional), `strict_quality` (bool, optional), `verify_cmd` (string, optional), `include_telemetry` (bool, optional) | Resolves target, scrubs credentials, introspects template, finds duplicates, runs optional self-verification, stages draft to disk, and returns structured ticket. |
 | `list_staged_drafts` | `status` (string, optional) | Lists all staged bug drafts pending review or approval (`pending_review`, `submitted`, `discarded`). |
 | `approve_draft` | `id` (string) | Approves and submits a staged draft to its upstream tracker via authenticated OAuth connectors. |
 | `triage_crash_log` | `log` (string), `title` (string, optional), `query` (string, optional) | Analyzes raw crash logs or stack traces, deterministically attributes failures to upstream dependencies, introspects templates, checks duplicates, and returns structured agent triage envelopes. |
 | `verify_reproduction` | `command` (string), `timeout_seconds` (integer, optional), `expect_exit` (integer, optional) | Executes a bounded reproduction command, captures and scrubs stdout/stderr, extracts faulting package candidates, and returns a deterministic VerificationProof. |
 | `scan_workspace_stack` | `dir` (string, optional), `check_upstream` (bool, optional) | Scans workspace dependency manifests (`go.mod`, `package.json`, `Cargo.toml`, `pyproject.toml`, `services.json`), resolves upstream trackers, and optionally queries upstream issues for active bugs. |
+| `collect_system_telemetry` | (none) | Collects zero-dependency local operating system and hardware diagnostics (CPU, GPU, kernel, desktop environment, display server). |
 
 ---
 

@@ -110,6 +110,27 @@ func TestClassifyTracker(t *testing.T) {
 			wantNormRep: "https://codeberg.org/forgejo/forgejo",
 		},
 		{
+			name:        "blender gitea forge",
+			repoURL:     "https://projects.blender.org/blender/blender",
+			wantProto:   ProtocolGitea,
+			wantURL:     "https://projects.blender.org/blender/blender/issues",
+			wantNormRep: "https://projects.blender.org/blender/blender",
+		},
+		{
+			name:        "gitea.com repository",
+			repoURL:     "https://gitea.com/gitea/tea",
+			wantProto:   ProtocolGitea,
+			wantURL:     "https://gitea.com/gitea/tea/issues",
+			wantNormRep: "https://gitea.com/gitea/tea",
+		},
+		{
+			name:        "forgejo custom instance",
+			repoURL:     "https://forgejo.example.org/infra/tools",
+			wantProto:   ProtocolGitea,
+			wantURL:     "https://forgejo.example.org/infra/tools/issues",
+			wantNormRep: "https://forgejo.example.org/infra/tools",
+		},
+		{
 			name:      "bugzilla cgi url",
 			bugsURL:   "https://bugzilla.mozilla.org/enter_bug.cgi",
 			wantProto: ProtocolBugzilla,

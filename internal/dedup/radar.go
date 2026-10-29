@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/riccivr/bugrouter/internal/resolver"
-	"github.com/riccivr/bugrouter/internal/scrubber"
 )
 
 // StackRadarEntry combines a discovered dependency with potential open upstream bugs.
@@ -60,16 +59,7 @@ func BuildStackRadar(ctx context.Context, wf *resolver.Waterfall, finder *Finder
 				sem <- struct{}{}
 				defer func() { <-sem }()
 
-				queryStr := dep.Name
-				if dep.Target.CanonicalName != "" {
-					queryStr = dep.Target.CanonicalName
-				}
-				if dep.Version != "" {
-					queryStr += " " + dep.Version
-				}
-				queryStr += " bug crash regression"
-
-				bugs, findErr := finder.FindDuplicates(ctx, *dep.Target, scrubber.Scrub(queryStr))
+				bugs, findErr := finder.ListActiveIssues(ctx, *dep.Target, dep.Version)
 				if findErr == nil && len(bugs) > 0 {
 					entries[idx].UpstreamBugs = bugs
 				}

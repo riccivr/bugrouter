@@ -44,6 +44,13 @@ func TestDirectProbe(t *testing.T) {
 			wantProtocol:  ProtocolCodeberg,
 			wantURL:       "https://codeberg.org/forgejo/forgejo/issues",
 		},
+		{
+			name:          "blender gitea qualified path",
+			query:         "projects.blender.org/blender/blender",
+			wantCanonical: "blender",
+			wantProtocol:  ProtocolGitea,
+			wantURL:       "https://projects.blender.org/blender/blender/issues",
+		},
 	}
 
 	for _, tc := range tests {

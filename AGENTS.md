@@ -21,7 +21,7 @@ All commit messages MUST follow https://www.conventionalcommits.org/en/v1.0.0/:
 `<type>(<scope>): <imperative summary under 72 chars>`
 
 - **Allowed `<type>`:** `feat`, `fix`, `perf`, `refactor`, `test`, `docs`, `build`, `ci`, `chore`
-- **Allowed `<scope>`:** `cli`, `mcp`, `resolver`, `introspector`, `scrubber`, `adapter`, `cloud`, `core`, `dedup`
+- **Allowed `<scope>`:** `cli`, `mcp`, `resolver`, `introspector`, `scrubber`, `adapter`, `cloud`, `core`, `dedup`, `telemetry`
 - **Rules:** Lowercase summary, imperative mood ("add", not "added"), no trailing period.
 
 ## 5. Pre-Commit Definition of Done

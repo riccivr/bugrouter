@@ -11,6 +11,7 @@ import (
 	"github.com/riccivr/bugrouter/internal/dedup"
 	"github.com/riccivr/bugrouter/internal/introspector"
 	"github.com/riccivr/bugrouter/internal/resolver"
+	"github.com/riccivr/bugrouter/internal/telemetry"
 	"github.com/riccivr/bugrouter/internal/verifier"
 )
 
@@ -600,5 +601,59 @@ func TestBuildDraftWithVerificationProof(t *testing.T) {
 	// Verify that verified logs populated the logs section when in.Logs was empty
 	if !strings.Contains(body, "panic: nil pointer [REDACTED_PASSWORD]") {
 		t.Errorf("expected verification scrubbed output to populate logs section: %s", body)
+	}
+}
+
+func TestBuildDraftWithTelemetry(t *testing.T) {
+	telem := &telemetry.SystemTelemetry{
+		OS:            "linux",
+		Arch:          "amd64",
+		KernelVersion: "6.6.0-generic",
+		CPUModel:      "AMD Ryzen 9 5900X",
+		NumCPU:        12,
+		GPUs:          []string{"NVIDIA GeForce RTX 3080"},
+		DesktopEnv:    "GNOME",
+		DisplayServer: "wayland",
+	}
+
+	in := DraftInput{
+		Target: resolver.Target{
+			CanonicalName: "blender",
+			LocalVersion:  "4.2.0",
+			Tracker: resolver.TrackerInfo{
+				Protocol: resolver.ProtocolGitea,
+				URL:      "https://projects.blender.org/blender/blender/issues",
+			},
+		},
+		Title:            "GPU rendering crash on startup",
+		Summary:          "Blender crashes immediately when switching viewport to rendered mode.",
+		StepsToReproduce: "1. Launch blender\n2. Press Z and select Rendered",
+		Telemetry:        telem,
+	}
+
+	draft, err := BuildDraft(in)
+	if err != nil {
+		t.Fatalf("BuildDraft failed: %v", err)
+	}
+
+	if draft.Telemetry == nil {
+		t.Fatalf("expected Telemetry to be attached to staged draft")
+	}
+	if draft.Telemetry.CPUModel != "AMD Ryzen 9 5900X" {
+		t.Errorf("expected CPUModel %q, got %q", "AMD Ryzen 9 5900X", draft.Telemetry.CPUModel)
+	}
+
+	body := string(draft.MarkdownBody)
+	if !strings.Contains(body, "## Environment") {
+		t.Errorf("expected '## Environment' in markdown body: %s", body)
+	}
+	if !strings.Contains(body, "- **GPU**: NVIDIA GeForce RTX 3080") {
+		t.Errorf("expected GPU line in environment: %s", body)
+	}
+	if !strings.Contains(body, "- **Desktop**: GNOME") {
+		t.Errorf("expected Desktop line in environment: %s", body)
+	}
+	if !strings.Contains(body, "- **Display Server**: wayland") {
+		t.Errorf("expected Display Server line in environment: %s", body)
 	}
 }

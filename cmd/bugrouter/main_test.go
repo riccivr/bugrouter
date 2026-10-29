@@ -17,6 +17,7 @@ import (
 	"github.com/riccivr/bugrouter/internal/introspector"
 	"github.com/riccivr/bugrouter/internal/resolver"
 	"github.com/riccivr/bugrouter/internal/scrubber"
+	"github.com/riccivr/bugrouter/internal/telemetry"
 	"github.com/riccivr/bugrouter/internal/verifier"
 )
 
@@ -475,5 +476,38 @@ require github.com/example/lib v1.2.3
 	}
 	if len(report.Entries) != 2 {
 		t.Fatalf("len(report.Entries) = %d, want 2", len(report.Entries))
+	}
+}
+
+func TestTelemetryCommandIntegration(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	telem := telemetry.Collect(ctx)
+	if telem.OS == "" {
+		t.Fatal("expected non-empty OS from Collect")
+	}
+
+	draft, err := adapter.BuildDraft(adapter.DraftInput{
+		Target: resolver.Target{
+			CanonicalName: "blender",
+			Tracker: resolver.TrackerInfo{
+				Protocol: resolver.ProtocolGitea,
+				URL:      "https://projects.blender.org/blender/blender/issues",
+			},
+		},
+		Title:     "GPU crash on launch",
+		Telemetry: &telem,
+	})
+	if err != nil {
+		t.Fatalf("BuildDraft failed: %v", err)
+	}
+
+	if draft.Telemetry == nil {
+		t.Fatalf("expected Telemetry attached to draft")
+	}
+	body := string(draft.MarkdownBody)
+	if !strings.Contains(body, "- **OS**:") {
+		t.Errorf("expected - **OS**: in draft markdown body: %s", body)
 	}
 }

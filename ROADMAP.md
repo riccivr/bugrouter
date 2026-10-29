@@ -87,11 +87,13 @@ Shifts bugrouter from reactive ticket routing to proactive dependency health and
 ### Milestone 7: Desktop/PC User Mode & Hardware Telemetry (Active)
 Brings zero-dependency bug routing to desktop operating systems and everyday GUI applications.
 
-- **Spec #14: Desktop App Resolver & Hardware Telemetry Collector [ACTIVE]**
-  - Package probes for Windows `winget` and Linux `flatpak`/`snap`.
-  - Support for community forges and custom issue trackers (such as Gitea/Forgejo at `projects.blender.org`).
-  - Native hardware telemetry collector (`internal/telemetry`) gathering GPU model, driver versions, CPU architecture, and OS kernel info without third-party dependencies.
-- **Spec #15: Guided Human Bug Wizard [PLANNED]**
+- **Spec #14: Desktop App Resolver, Gitea/Forgejo Support & Hardware Telemetry Collector [COMPLETED]**
+  - Package probes for Windows `winget` and Linux `flatpak`/`snap` with pure deterministic output parsers.
+  - Support for community forges and custom issue trackers (such as Gitea/Forgejo at `projects.blender.org`, `gitea.com`, and custom hostnames), including REST API search, template introspection, and pre-filled deep links.
+  - Zero-dependency native hardware and OS telemetry collector (`internal/telemetry`) gathering GPU model, CPU architecture, OS kernel, desktop environment, and display server with type-safe scrubbing.
+  - CLI integration via `bugrouter telemetry [--json]`, `bugrouter agent telemetry`, and `bugrouter draft --with-telemetry`.
+  - MCP integration exposing `collect_system_telemetry` as the 11th tool and adding `include_telemetry` to `draft_bug_report`.
+- **Spec #15: Guided Human Bug Wizard [ACTIVE]**
   - Interactive terminal wizard (`bugrouter report <app>`) prompting users for symptoms and reproducing steps with real-time anti-slop suggestions.
   - Web UI guided composer providing step-by-step assistance for non-technical users.
 

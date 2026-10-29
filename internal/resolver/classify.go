@@ -142,6 +142,20 @@ func ClassifyTracker(bugsURL, bugsEmail, repoURL string) (TrackerInfo, string) {
 				}, normRepo
 			}
 
+			isGiteaHost := host == "projects.blender.org" || host == "gitea.com" || strings.Contains(host, "gitea.") || strings.Contains(host, "forgejo.")
+			if isGiteaHost && len(pathSegments) >= 2 {
+				owner := pathSegments[0]
+				repo := strings.TrimSuffix(pathSegments[1], ".git")
+				if normRepo == "" {
+					normRepo = fmt.Sprintf("https://%s/%s/%s", host, owner, repo)
+				}
+				return TrackerInfo{
+					Protocol: ProtocolGitea,
+					URL:      fmt.Sprintf("https://%s/%s/%s/issues", host, owner, repo),
+					Email:    bugsEmail,
+				}, normRepo
+			}
+
 			if host == "sr.ht" || strings.HasSuffix(host, ".sr.ht") {
 				return TrackerInfo{
 					Protocol: ProtocolSourceHut,

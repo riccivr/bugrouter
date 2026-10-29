@@ -31,6 +31,8 @@ func (p *DirectProbe) Resolve(ctx context.Context, query string) (*Target, error
 		strings.HasPrefix(trimmed, "github.com/") ||
 		strings.HasPrefix(trimmed, "gitlab.com/") ||
 		strings.HasPrefix(trimmed, "codeberg.org/") ||
+		strings.HasPrefix(trimmed, "gitea.com/") ||
+		strings.HasPrefix(trimmed, "projects.blender.org/") ||
 		strings.HasPrefix(trimmed, "sr.ht/")
 
 	if !hasPrefix {
@@ -50,6 +52,7 @@ func (p *DirectProbe) Resolve(ctx context.Context, query string) (*Target, error
 		isKnownTracker := tracker.Protocol == ProtocolGitHub ||
 			tracker.Protocol == ProtocolGitLab ||
 			tracker.Protocol == ProtocolCodeberg ||
+			tracker.Protocol == ProtocolGitea ||
 			tracker.Protocol == ProtocolSourceHut ||
 			tracker.Protocol == ProtocolBugzilla ||
 			tracker.Protocol == ProtocolDebbugs ||

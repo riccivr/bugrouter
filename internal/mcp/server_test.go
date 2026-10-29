@@ -127,8 +127,8 @@ body:
 	}
 	res3 := resp3.Result.(map[string]any)
 	tools := res3["tools"].([]any)
-	if len(tools) != 10 {
-		t.Errorf("expected 10 tools, got %d", len(tools))
+	if len(tools) != 11 {
+		t.Errorf("expected 11 tools, got %d", len(tools))
 	}
 
 	// Response 4: tools/call scrub_text
@@ -501,5 +501,48 @@ func TestScanWorkspaceStackTool(t *testing.T) {
 	rawText := resMap["content"].([]any)[0].(map[string]any)["text"].(string)
 	if !strings.Contains(rawText, "component") || !strings.Contains(rawText, "total") {
 		t.Errorf("scan_workspace_stack result missing expected tokens: %s", rawText)
+	}
+}
+
+func TestCollectSystemTelemetryTool(t *testing.T) {
+	wf := resolver.NewWaterfall(time.Second, resolver.NewDirectProbe())
+	server := NewServer(wf, nil)
+
+	var in, out bytes.Buffer
+	reqPayload := map[string]any{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"method":  "tools/call",
+		"params": map[string]any{
+			"name":      "collect_system_telemetry",
+			"arguments": map[string]any{},
+		},
+	}
+	reqBytes, err := json.Marshal(reqPayload)
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	in.Write(append(reqBytes, '\n'))
+
+	if err := server.Run(context.Background(), &in, &out); err != nil {
+		t.Fatalf("server.Run failed: %v", err)
+	}
+
+	var resp jsonrpcResponse
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out.String())), &resp); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+
+	resMap, ok := resp.Result.(map[string]any)
+	if !ok {
+		t.Fatalf("expected result map, got: %v", resp.Result)
+	}
+	if resMap["isError"] != false {
+		t.Fatalf("collect_system_telemetry isError = true: %v", resMap)
+	}
+
+	rawText := resMap["content"].([]any)[0].(map[string]any)["text"].(string)
+	if !strings.Contains(rawText, `"os":`) || !strings.Contains(rawText, `"num_cpu":`) {
+		t.Errorf("collect_system_telemetry result missing os or num_cpu: %s", rawText)
 	}
 }

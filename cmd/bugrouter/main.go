@@ -24,6 +24,7 @@ import (
 	"github.com/riccivr/bugrouter/internal/mcp"
 	"github.com/riccivr/bugrouter/internal/resolver"
 	"github.com/riccivr/bugrouter/internal/scrubber"
+	"github.com/riccivr/bugrouter/internal/telemetry"
 	"github.com/riccivr/bugrouter/internal/verifier"
 	"github.com/riccivr/bugrouter/internal/version"
 )
@@ -206,6 +207,7 @@ func main() {
 		timeout := fs.Duration("timeout", 15*time.Second, "request and probe timeout duration")
 		strictQuality := fs.Bool("strict-quality", false, "reject draft if quality checks fail")
 		verifyCmd := fs.String("verify-cmd", "", "run bounded command to verify reproduction and attach proof")
+		withTelemetry := fs.Bool("with-telemetry", false, "collect and attach local hardware/OS telemetry")
 		jsonOut := fs.Bool("json", false, "output structured JSON")
 		noCache := fs.Bool("no-cache", false, "disable disk cache")
 		if err := fs.Parse(os.Args[2:]); err != nil {
@@ -296,6 +298,12 @@ func main() {
 			}
 		}
 
+		var sysTelemetry *telemetry.SystemTelemetry
+		if *withTelemetry {
+			t := telemetry.Collect(ctx)
+			sysTelemetry = &t
+		}
+
 		draft, err := adapter.BuildDraft(adapter.DraftInput{
 			Target:           *target,
 			Title:            *title,
@@ -305,6 +313,7 @@ func main() {
 			Template:         schema,
 			Duplicates:       dups,
 			Verification:     proof,
+			Telemetry:        sysTelemetry,
 		})
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: build draft: %v\n", err)
@@ -363,8 +372,33 @@ func main() {
 
 	case "agent":
 		if len(os.Args) < 3 {
-			fmt.Fprintln(os.Stderr, "Usage: bugrouter agent <triage|verify> [arguments]")
+			fmt.Fprintln(os.Stderr, "Usage: bugrouter agent <triage|verify|telemetry> [arguments]")
 			os.Exit(1)
+		}
+
+		if os.Args[2] == "telemetry" {
+			fs := flag.NewFlagSet("agent telemetry", flag.ContinueOnError)
+			jsonOut := fs.Bool("json", false, "output structured JSON")
+			timeout := fs.Duration("timeout", 5*time.Second, "telemetry collection timeout duration")
+			if err := fs.Parse(os.Args[3:]); err != nil {
+				os.Exit(1)
+			}
+
+			ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+			defer cancel()
+
+			t := telemetry.Collect(ctx)
+			if !*jsonOut && os.Args[2] != "telemetry" {
+				fmt.Println(telemetry.FormatMarkdown(t))
+				return
+			}
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			if err := enc.Encode(t); err != nil {
+				fmt.Fprintf(os.Stderr, "error: encode json: %v\n", err)
+				os.Exit(1)
+			}
+			return
 		}
 
 		if os.Args[2] == "verify" {
@@ -539,6 +573,31 @@ func main() {
 		}
 		return
 
+	case "telemetry":
+		fs := flag.NewFlagSet("telemetry", flag.ContinueOnError)
+		jsonOut := fs.Bool("json", false, "output structured JSON")
+		timeout := fs.Duration("timeout", 5*time.Second, "telemetry collection timeout duration")
+		if err := fs.Parse(os.Args[2:]); err != nil {
+			os.Exit(1)
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+		defer cancel()
+
+		t := telemetry.Collect(ctx)
+		if *jsonOut {
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			if err := enc.Encode(t); err != nil {
+				fmt.Fprintf(os.Stderr, "error: encode json: %v\n", err)
+				os.Exit(1)
+			}
+			return
+		}
+
+		fmt.Println(telemetry.FormatMarkdown(t))
+		return
+
 	case "stack":
 		fs := flag.NewFlagSet("stack", flag.ContinueOnError)
 		dir := fs.String("dir", ".", "workspace directory to scan")
@@ -683,12 +742,16 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "  resolve [--json] [--no-cache] [--timeout <dur>] <q>")
 	fmt.Fprintln(os.Stderr, "                              Resolve software target to bug tracker")
 	fmt.Fprintln(os.Stderr, "  draft [--title <t>] [--summary <s>] [--steps <st>] [--logs <l>]")
-	fmt.Fprintln(os.Stderr, "        [--verify-cmd <cmd>] [--body-file <path>] [--strict-quality] [--timeout <dur>] [--json] [--no-cache] <q>")
+	fmt.Fprintln(os.Stderr, "        [--verify-cmd <cmd>] [--with-telemetry] [--body-file <path>] [--strict-quality] [--timeout <dur>] [--json] [--no-cache] <q>")
 	fmt.Fprintln(os.Stderr, "                              Stage bug report draft and generate submission URLs")
+	fmt.Fprintln(os.Stderr, "  telemetry [--json] [--timeout <dur>]")
+	fmt.Fprintln(os.Stderr, "                              Inspect local operating system and hardware telemetry")
 	fmt.Fprintln(os.Stderr, "  agent triage [--log-file <path>] [--query <target>] [--title <t>] [--timeout <dur>]")
 	fmt.Fprintln(os.Stderr, "                              Autonomous triage of crash logs outputting machine-parseable JSON")
 	fmt.Fprintln(os.Stderr, "  agent verify --cmd <command> [--timeout <dur>] [--expect-exit <code>] [--work-dir <dir>]")
 	fmt.Fprintln(os.Stderr, "                              Bounded reproduction execution and deterministic proof generation")
+	fmt.Fprintln(os.Stderr, "  agent telemetry [--json] [--timeout <dur>]")
+	fmt.Fprintln(os.Stderr, "                              Inspect local telemetry as machine-parseable JSON")
 	fmt.Fprintln(os.Stderr, "  stack [--dir <dir>] [--check-upstream] [--json] [--no-cache] [--timeout <dur>]")
 	fmt.Fprintln(os.Stderr, "                              Scan workspace dependency manifests and downstream bug radar")
 	fmt.Fprintln(os.Stderr, "  serve [--addr <addr>] [--drafts-dir <dir>] [--auth-token <tok>] [--audit-log <path>] [--webhook-url <url>] [--webhook-secret <sec>]")

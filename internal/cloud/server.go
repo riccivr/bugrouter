@@ -177,12 +177,10 @@ func (s *Server) handleStack(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	stackDir := s.stackDir
-	if dirParam := r.URL.Query().Get("dir"); dirParam != "" {
-		stackDir = dirParam
-	}
+	ctx, cancel := context.WithTimeout(r.Context(), 45*time.Second)
+	defer cancel()
 
-	report, err := dedup.BuildStackRadar(r.Context(), s.resolver, s.dedupFinder, stackDir, checkUpstream)
+	report, err := dedup.BuildStackRadar(ctx, s.resolver, s.dedupFinder, s.stackDir, checkUpstream)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("build stack radar: %v", err), http.StatusInternalServerError)
 		return
@@ -457,7 +455,7 @@ func (s *Server) Start() error {
 		Handler:           s.Handler(),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
-		WriteTimeout:      15 * time.Second,
+		WriteTimeout:      60 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
 	return s.httpServer.Serve(listener)

@@ -79,6 +79,8 @@ func (intro *Introspector) Introspect(ctx context.Context, target resolver.Targe
 		schema, err = intro.introspectGitLab(ctx, target)
 	case resolver.ProtocolBugzilla:
 		schema, err = intro.introspectBugzilla(ctx, target)
+	case resolver.ProtocolGitea, resolver.ProtocolCodeberg:
+		schema, err = intro.introspectGitea(ctx, target)
 	default:
 		return nil, ErrNoTemplateFound
 	}
@@ -385,4 +387,59 @@ func (intro *Introspector) introspectBugzilla(ctx context.Context, target resolv
 	}
 
 	return ParseBugzillaRESTSchema(fieldData)
+}
+
+func (intro *Introspector) introspectGitea(ctx context.Context, target resolver.Target) (*TemplateSchema, error) {
+	raw := target.Tracker.URL
+	if raw == "" {
+		raw = target.RepositoryURL
+	}
+	if raw == "" {
+		return nil, ErrNoTemplateFound
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return nil, ErrNoTemplateFound
+	}
+	parts := strings.Split(strings.Trim(u.Path, "/"), "/")
+	if len(parts) < 2 {
+		return nil, ErrNoTemplateFound
+	}
+	owner := parts[0]
+	repo := strings.TrimSuffix(parts[1], ".git")
+	baseURL := fmt.Sprintf("%s://%s", u.Scheme, u.Host)
+
+	apiURL := fmt.Sprintf("%s/api/v1/repos/%s/%s/issue_templates", baseURL, owner, repo)
+	data, err := intro.client.GetBytes(ctx, apiURL, "application/json")
+	if err == nil {
+		var templates []struct {
+			Name    string `json:"name"`
+			Title   string `json:"title"`
+			Content string `json:"content"`
+		}
+		if json.Unmarshal(data, &templates) == nil && len(templates) > 0 {
+			var best struct {
+				Name    string `json:"name"`
+				Title   string `json:"title"`
+				Content string `json:"content"`
+			}
+			for _, t := range templates {
+				lower := strings.ToLower(t.Name + " " + t.Title)
+				if strings.Contains(lower, "bug") {
+					best = t
+					break
+				}
+			}
+			if best.Name == "" {
+				best = templates[0]
+			}
+			lowerName := strings.ToLower(best.Name)
+			if strings.HasSuffix(lowerName, ".yml") || strings.HasSuffix(lowerName, ".yaml") {
+				return ParseGitHubYAMLForm(best.Name, []byte(best.Content))
+			}
+			return ParseMarkdownTemplate(best.Name, resolver.ProtocolGitea, []byte(best.Content))
+		}
+	}
+
+	return nil, ErrNoTemplateFound
 }

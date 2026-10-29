@@ -359,3 +359,126 @@ func TestFindDuplicatesGitLabAuthHeader(t *testing.T) {
 		t.Error("expected PRIVATE-TOKEN: glpat-test-secret-123456 header to be sent")
 	}
 }
+
+func TestFindDuplicatesGitea(t *testing.T) {
+	t.Setenv("GITEA_TOKEN", "gitea-secret-token-123")
+	authHeaderReceived := false
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") == "token gitea-secret-token-123" {
+			authHeaderReceived = true
+		}
+		if strings.HasPrefix(r.URL.Path, "/api/v1/repos/blender/blender/issues") {
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `[
+				{"number": 42, "title": "Crash when rendering viewport with EEVEE", "html_url": "https://projects.blender.org/blender/blender/issues/42", "state": "open"}
+			]`)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer ts.Close()
+
+	client := httpx.NewTestClient(time.Second)
+	finder := NewFinder(client).WithEndpoints(Endpoints{
+		GiteaBaseURL: ts.URL,
+	})
+
+	target := resolver.Target{
+		CanonicalName: "blender",
+		RepositoryURL: "https://projects.blender.org/blender/blender",
+		Tracker: resolver.TrackerInfo{
+			Protocol: resolver.ProtocolGitea,
+			URL:      "https://projects.blender.org/blender/blender/issues",
+		},
+	}
+
+	dups, err := finder.FindDuplicates(context.Background(), target, scrubber.ScrubbedText("Crash rendering viewport"))
+	if err != nil {
+		t.Fatalf("FindDuplicates Gitea failed: %v", err)
+	}
+	if !authHeaderReceived {
+		t.Error("expected Authorization: token gitea-secret-token-123 header")
+	}
+	if len(dups) != 1 || dups[0].ID != "42" {
+		t.Fatalf("unexpected Gitea dups: %+v", dups)
+	}
+	if dups[0].Score < 0.20 {
+		t.Errorf("expected score >= 0.20, got %f", dups[0].Score)
+	}
+}
+
+func TestListActiveIssues(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.HasPrefix(r.URL.Path, "/search/issues"):
+			// GitHub: return issues with score 1.0 even without token overlap
+			fmt.Fprint(w, `{
+				"items": [
+					{"number": 10, "title": "General UI bug", "html_url": "https://github.com/myorg/pkg/issues/10", "state": "open"},
+					{"number": 11, "title": "Crash in 2.1.0 regression", "html_url": "https://github.com/myorg/pkg/issues/11", "state": "open"}
+				]
+			}`)
+		case strings.HasPrefix(r.URL.Path, "/api/v1/repos/blender/blender/issues"):
+			// Gitea
+			fmt.Fprint(w, `[
+				{"number": 50, "title": "Old bug", "html_url": "https://projects.blender.org/blender/blender/issues/50", "state": "open"},
+				{"number": 51, "title": "Memory leak in v4.2.0 release", "html_url": "https://projects.blender.org/blender/blender/issues/51", "state": "open"}
+			]`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer ts.Close()
+
+	client := httpx.NewTestClient(time.Second)
+	finder := NewFinder(client).WithEndpoints(Endpoints{
+		GitHubAPIBaseURL: ts.URL,
+		GiteaBaseURL:     ts.URL,
+	})
+
+	// 1. GitHub list active issues with version prioritization
+	ghTarget := resolver.Target{
+		CanonicalName: "pkg",
+		RepositoryURL: "https://github.com/myorg/pkg",
+		Tracker: resolver.TrackerInfo{
+			Protocol: resolver.ProtocolGitHub,
+			URL:      "https://github.com/myorg/pkg/issues",
+		},
+	}
+	ghIssues, err := finder.ListActiveIssues(context.Background(), ghTarget, "2.1.0")
+	if err != nil {
+		t.Fatalf("ListActiveIssues GitHub failed: %v", err)
+	}
+	if len(ghIssues) != 2 {
+		t.Fatalf("expected 2 issues, got %d", len(ghIssues))
+	}
+	// Issue #11 mentions 2.1.0 and should be prioritized first
+	if ghIssues[0].ID != "11" {
+		t.Errorf("expected issue #11 prioritized first, got ID %s", ghIssues[0].ID)
+	}
+	if ghIssues[0].Score != 1.0 {
+		t.Errorf("expected Score 1.0, got %f", ghIssues[0].Score)
+	}
+
+	// 2. Gitea list active issues
+	giteaTarget := resolver.Target{
+		CanonicalName: "blender",
+		RepositoryURL: "https://projects.blender.org/blender/blender",
+		Tracker: resolver.TrackerInfo{
+			Protocol: resolver.ProtocolGitea,
+			URL:      "https://projects.blender.org/blender/blender/issues",
+		},
+	}
+	giteaIssues, err := finder.ListActiveIssues(context.Background(), giteaTarget, "4.2.0")
+	if err != nil {
+		t.Fatalf("ListActiveIssues Gitea failed: %v", err)
+	}
+	if len(giteaIssues) != 2 {
+		t.Fatalf("expected 2 issues, got %d", len(giteaIssues))
+	}
+	if giteaIssues[0].ID != "51" {
+		t.Errorf("expected issue #51 prioritized first, got ID %s", giteaIssues[0].ID)
+	}
+}

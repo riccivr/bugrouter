@@ -15,6 +15,7 @@ const (
 	ProtocolGitHub    Protocol = "github"
 	ProtocolGitLab    Protocol = "gitlab"
 	ProtocolCodeberg  Protocol = "codeberg"
+	ProtocolGitea     Protocol = "gitea"
 	ProtocolSourceHut Protocol = "sourcehut"
 	ProtocolDebbugs   Protocol = "debbugs"
 	ProtocolBugzilla  Protocol = "bugzilla"

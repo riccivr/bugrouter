@@ -17,6 +17,7 @@ import (
 	"github.com/riccivr/bugrouter/internal/introspector"
 	"github.com/riccivr/bugrouter/internal/resolver"
 	"github.com/riccivr/bugrouter/internal/scrubber"
+	"github.com/riccivr/bugrouter/internal/telemetry"
 	"github.com/riccivr/bugrouter/internal/verifier"
 	"github.com/riccivr/bugrouter/internal/version"
 )
@@ -303,6 +304,10 @@ func (s *Server) toolDefinitions() []map[string]any {
 						"type":        "string",
 						"description": "Optional shell command to run and attach a verified reproduction proof",
 					},
+					"include_telemetry": map[string]any{
+						"type":        "boolean",
+						"description": "Collect and attach local hardware/OS telemetry (default: false)",
+					},
 				},
 				"required": []string{"query", "title"},
 			},
@@ -411,6 +416,14 @@ func (s *Server) toolDefinitions() []map[string]any {
 						"description": "Whether to query upstream trackers for open bugs affecting matching versions (default: false)",
 					},
 				},
+			},
+		},
+		{
+			"name":        "collect_system_telemetry",
+			"description": "Collects zero-dependency local operating system and hardware telemetry (CPU, GPU, kernel, desktop environment, display server).",
+			"inputSchema": map[string]any{
+				"type":       "object",
+				"properties": map[string]any{},
 			},
 		},
 	}
@@ -525,6 +538,7 @@ func (s *Server) handleToolCall(ctx context.Context, params toolCallParams) tool
 			Logs             string `json:"logs"`
 			StrictQuality    bool   `json:"strict_quality"`
 			VerifyCmd        string `json:"verify_cmd"`
+			IncludeTelemetry bool   `json:"include_telemetry"`
 		}
 		if err := json.Unmarshal(params.Arguments, &args); err != nil {
 			return toolCallResult{
@@ -574,6 +588,12 @@ func (s *Server) handleToolCall(ctx context.Context, params toolCallParams) tool
 			}
 		}
 
+		var sysTelemetry *telemetry.SystemTelemetry
+		if args.IncludeTelemetry {
+			t := telemetry.Collect(ctx)
+			sysTelemetry = &t
+		}
+
 		draft, err := adapter.BuildDraft(adapter.DraftInput{
 			Target:           *target,
 			Title:            args.Title,
@@ -583,6 +603,7 @@ func (s *Server) handleToolCall(ctx context.Context, params toolCallParams) tool
 			Template:         schema,
 			Duplicates:       dups,
 			Verification:     proof,
+			Telemetry:        sysTelemetry,
 		})
 		if err != nil {
 			return toolCallResult{
@@ -1026,6 +1047,20 @@ func (s *Server) handleToolCall(ctx context.Context, params toolCallParams) tool
 		if err != nil {
 			return toolCallResult{
 				Content: []toolContent{{Type: "text", Text: fmt.Sprintf("marshal stack report: %v", err)}},
+				IsError: true,
+			}
+		}
+		return toolCallResult{
+			Content: []toolContent{{Type: "text", Text: string(data)}},
+			IsError: false,
+		}
+
+	case "collect_system_telemetry":
+		t := telemetry.Collect(ctx)
+		data, err := json.MarshalIndent(t, "", "  ")
+		if err != nil {
+			return toolCallResult{
+				Content: []toolContent{{Type: "text", Text: fmt.Sprintf("marshal telemetry: %v", err)}},
 				IsError: true,
 			}
 		}

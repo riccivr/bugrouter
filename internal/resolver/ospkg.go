@@ -241,6 +241,157 @@ func parsePacmanQueryInfo(output string) (*osPkgMeta, error) {
 	return meta, nil
 }
 
+func parseFlatpakInfo(output string) (*osPkgMeta, error) {
+	scanner := bufio.NewScanner(strings.NewReader(output))
+	meta := &osPkgMeta{}
+	found := false
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		key, val, ok := strings.Cut(line, ":")
+		if !ok {
+			continue
+		}
+		key = strings.ToLower(strings.TrimSpace(key))
+		val = strings.TrimSpace(val)
+
+		switch key {
+		case "id":
+			meta.name = val
+			found = true
+		case "version":
+			meta.version = val
+		case "homepage", "website", "url":
+			meta.homepage = val
+		case "bugtracker", "bugs", "contact":
+			meta.bugs = val
+		case "origin":
+			if strings.HasPrefix(val, "http://") || strings.HasPrefix(val, "https://") {
+				if meta.homepage == "" {
+					meta.homepage = val
+				}
+			}
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("scan flatpak output: %w", err)
+	}
+	if !found || meta.name == "" {
+		return nil, ErrNotFound
+	}
+	return meta, nil
+}
+
+func parseSnapInfo(output string) (*osPkgMeta, error) {
+	scanner := bufio.NewScanner(strings.NewReader(output))
+	meta := &osPkgMeta{}
+	found := false
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		key, val, ok := strings.Cut(line, ":")
+		if !ok {
+			continue
+		}
+		key = strings.ToLower(strings.TrimSpace(key))
+		val = strings.TrimSpace(val)
+
+		switch key {
+		case "name":
+			meta.name = val
+			found = true
+		case "contact":
+			meta.bugs = val
+		case "website":
+			meta.homepage = val
+		case "installed":
+			fields := strings.Fields(val)
+			if len(fields) > 0 {
+				meta.version = fields[0]
+			}
+		case "version":
+			if meta.version == "" {
+				meta.version = val
+			}
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("scan snap output: %w", err)
+	}
+	if !found || meta.name == "" {
+		return nil, ErrNotFound
+	}
+	return meta, nil
+}
+
+func parseWingetShow(output string) (*osPkgMeta, error) {
+	scanner := bufio.NewScanner(strings.NewReader(output))
+	meta := &osPkgMeta{}
+	found := false
+
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+
+		if strings.HasPrefix(line, "Found ") {
+			trimmed := strings.TrimPrefix(line, "Found ")
+			if idx := strings.Index(trimmed, " ["); idx != -1 {
+				meta.name = strings.TrimSpace(trimmed[:idx])
+			} else {
+				meta.name = strings.TrimSpace(trimmed)
+			}
+			found = true
+			continue
+		}
+
+		key, val, ok := strings.Cut(line, ":")
+		if !ok {
+			continue
+		}
+		key = strings.ToLower(strings.TrimSpace(key))
+		val = strings.TrimSpace(val)
+
+		switch key {
+		case "name":
+			if meta.name == "" {
+				meta.name = val
+				found = true
+			}
+		case "id":
+			if meta.name == "" {
+				meta.name = val
+				found = true
+			}
+		case "version":
+			meta.version = val
+		case "publisher support url":
+			meta.bugs = val
+		case "package url":
+			meta.homepage = val
+		case "homepage":
+			if meta.homepage == "" {
+				meta.homepage = val
+			}
+		case "publisher url":
+			if meta.homepage == "" {
+				meta.homepage = val
+			}
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("scan winget output: %w", err)
+	}
+	if !found || meta.name == "" {
+		return nil, ErrNotFound
+	}
+	return meta, nil
+}
+
 // Resolve searches system binary paths and dpkg/apt metadata to identify the upstream tracker.
 func (p *OSPackageProbe) Resolve(ctx context.Context, query string) (*Target, error) {
 	if strings.ContainsAny(query, "/\\ \t\r\n") || strings.HasPrefix(query, "-") {
@@ -329,6 +480,39 @@ func (p *OSPackageProbe) Resolve(ctx context.Context, query string) (*Target, er
 		}
 	}
 
+	// 5. Fallback to Linux Flatpak
+	if meta == nil {
+		if flatpakOut, flatpakErr := p.run(ctx, "flatpak", "info", query); flatpakErr == nil {
+			if parsed, parseErr := parseFlatpakInfo(string(flatpakOut)); parseErr == nil {
+				meta = parsed
+			}
+		}
+	}
+
+	// 6. Fallback to Linux Snap
+	if meta == nil {
+		if snapOut, snapErr := p.run(ctx, "snap", "info", query); snapErr == nil {
+			if parsed, parseErr := parseSnapInfo(string(snapOut)); parseErr == nil {
+				meta = parsed
+			}
+		}
+	}
+
+	// 7. Fallback to Windows winget
+	if meta == nil {
+		if wingetOut, wingetErr := p.run(ctx, "winget", "show", "--id", query); wingetErr == nil {
+			if parsed, parseErr := parseWingetShow(string(wingetOut)); parseErr == nil {
+				meta = parsed
+			}
+		} else {
+			if wingetOut2, wingetErr2 := p.run(ctx, "winget", "show", query); wingetErr2 == nil {
+				if parsed, parseErr := parseWingetShow(string(wingetOut2)); parseErr == nil {
+					meta = parsed
+				}
+			}
+		}
+	}
+
 	if meta == nil {
 		return nil, ErrNotFound
 	}
@@ -341,11 +525,17 @@ func (p *OSPackageProbe) Resolve(ctx context.Context, query string) (*Target, er
 	hasUpstreamBugs := strings.Contains(meta.bugs, "github.com") ||
 		strings.Contains(meta.bugs, "gitlab.") ||
 		strings.Contains(meta.bugs, "codeberg.org") ||
+		strings.Contains(meta.bugs, "projects.blender.org") ||
+		strings.Contains(meta.bugs, "gitea.") ||
+		strings.Contains(meta.bugs, "forgejo.") ||
 		strings.Contains(meta.bugs, "sr.ht")
 
 	hasUpstreamHomepage := strings.Contains(meta.homepage, "github.com") ||
 		strings.Contains(meta.homepage, "gitlab.") ||
 		strings.Contains(meta.homepage, "codeberg.org") ||
+		strings.Contains(meta.homepage, "projects.blender.org") ||
+		strings.Contains(meta.homepage, "gitea.") ||
+		strings.Contains(meta.homepage, "forgejo.") ||
 		strings.Contains(meta.homepage, "sr.ht")
 
 	var tracker TrackerInfo

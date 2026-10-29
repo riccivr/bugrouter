@@ -234,3 +234,183 @@ func TestDefaultCmdRunnerPipeDeadlock(t *testing.T) {
 		t.Fatalf("unexpected error message: %v", err)
 	}
 }
+
+func TestParseDesktopPackageOutputs(t *testing.T) {
+	// 1. Flatpak
+	flatpakRaw := `Blender - Very fast and versatile 3D modeller/renderer
+
+          ID: org.blender.Blender
+         Ref: app/org.blender.Blender/x86_64/stable
+        Arch: x86_64
+      Branch: stable
+     Version: 4.2.0
+     License: GPL-2.0+
+      Origin: flathub
+Installation: system
+    Homepage: https://projects.blender.org/blender/blender
+`
+	flatpakMeta, err := parseFlatpakInfo(flatpakRaw)
+	if err != nil {
+		t.Fatalf("parseFlatpakInfo failed: %v", err)
+	}
+	if flatpakMeta.name != "org.blender.Blender" {
+		t.Errorf("name = %q, want org.blender.Blender", flatpakMeta.name)
+	}
+	if flatpakMeta.version != "4.2.0" {
+		t.Errorf("version = %q, want 4.2.0", flatpakMeta.version)
+	}
+	if flatpakMeta.homepage != "https://projects.blender.org/blender/blender" {
+		t.Errorf("homepage = %q, want https://projects.blender.org/blender/blender", flatpakMeta.homepage)
+	}
+
+	// 2. Snap
+	snapRaw := `name:      blender
+summary:   Blender is the free and open source 3D creation suite.
+publisher: Blender Foundation (blenderfoundation✓)
+store-url: https://snapcraft.io/blender
+contact:   https://projects.blender.org/blender/blender/issues
+website:   https://www.blender.org
+license:   GPL-2.0-or-later
+installed: 4.2.0 (5103) 378MB -
+`
+	snapMeta, err := parseSnapInfo(snapRaw)
+	if err != nil {
+		t.Fatalf("parseSnapInfo failed: %v", err)
+	}
+	if snapMeta.name != "blender" {
+		t.Errorf("name = %q, want blender", snapMeta.name)
+	}
+	if snapMeta.version != "4.2.0" {
+		t.Errorf("version = %q, want 4.2.0", snapMeta.version)
+	}
+	if snapMeta.bugs != "https://projects.blender.org/blender/blender/issues" {
+		t.Errorf("bugs = %q, want https://projects.blender.org/blender/blender/issues", snapMeta.bugs)
+	}
+	if snapMeta.homepage != "https://www.blender.org" {
+		t.Errorf("homepage = %q, want https://www.blender.org", snapMeta.homepage)
+	}
+
+	// 3. Winget
+	wingetRaw := `Found Blender [BlenderFoundation.Blender]
+Version: 4.2.0
+Publisher: Blender Foundation
+Publisher Url: https://www.blender.org
+Publisher Support Url: https://projects.blender.org/blender/blender/issues
+Author: Blender Foundation
+Moniker: blender
+Description: Blender is the free and open source 3D creation suite.
+Homepage: https://www.blender.org
+Package Url: https://projects.blender.org/blender/blender
+License: GPL-2.0 or later
+`
+	wingetMeta, err := parseWingetShow(wingetRaw)
+	if err != nil {
+		t.Fatalf("parseWingetShow failed: %v", err)
+	}
+	if wingetMeta.name != "Blender" {
+		t.Errorf("name = %q, want Blender", wingetMeta.name)
+	}
+	if wingetMeta.version != "4.2.0" {
+		t.Errorf("version = %q, want 4.2.0", wingetMeta.version)
+	}
+	if wingetMeta.bugs != "https://projects.blender.org/blender/blender/issues" {
+		t.Errorf("bugs = %q, want https://projects.blender.org/blender/blender/issues", wingetMeta.bugs)
+	}
+	if wingetMeta.homepage != "https://projects.blender.org/blender/blender" {
+		t.Errorf("homepage = %q, want https://projects.blender.org/blender/blender", wingetMeta.homepage)
+	}
+}
+
+func TestOSPackageProbeDesktopProbes(t *testing.T) {
+	fakeLookPath := func(file string) (string, error) {
+		return "", errors.New("not found")
+	}
+
+	// 1. Flatpak resolve
+	fakeRunnerFlatpak := func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		if name == "flatpak" && len(args) >= 2 && args[0] == "info" && args[1] == "org.blender.Blender" {
+			out := `ID: org.blender.Blender
+Version: 4.2.0
+Homepage: https://projects.blender.org/blender/blender
+`
+			return []byte(out), nil
+		}
+		return nil, errors.New("command not found")
+	}
+
+	probeFlatpak := &OSPackageProbe{
+		run:      fakeRunnerFlatpak,
+		lookPath: fakeLookPath,
+	}
+
+	targetF, err := probeFlatpak.Resolve(context.Background(), "org.blender.Blender")
+	if err != nil {
+		t.Fatalf("resolve flatpak org.blender.Blender: %v", err)
+	}
+	if targetF.CanonicalName != "org.blender.Blender" {
+		t.Errorf("CanonicalName = %q, want org.blender.Blender", targetF.CanonicalName)
+	}
+	if targetF.Tracker.Protocol != ProtocolGitea {
+		t.Errorf("Protocol = %q, want gitea", targetF.Tracker.Protocol)
+	}
+	if targetF.Tracker.URL != "https://projects.blender.org/blender/blender/issues" {
+		t.Errorf("URL = %q, want https://projects.blender.org/blender/blender/issues", targetF.Tracker.URL)
+	}
+
+	// 2. Snap resolve
+	fakeRunnerSnap := func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		if name == "snap" && len(args) >= 2 && args[0] == "info" && args[1] == "blender" {
+			out := `name: blender
+contact: https://projects.blender.org/blender/blender/issues
+website: https://www.blender.org
+installed: 4.2.0
+`
+			return []byte(out), nil
+		}
+		return nil, errors.New("command not found")
+	}
+
+	probeSnap := &OSPackageProbe{
+		run:      fakeRunnerSnap,
+		lookPath: fakeLookPath,
+	}
+
+	targetS, err := probeSnap.Resolve(context.Background(), "blender")
+	if err != nil {
+		t.Fatalf("resolve snap blender: %v", err)
+	}
+	if targetS.CanonicalName != "blender" {
+		t.Errorf("CanonicalName = %q, want blender", targetS.CanonicalName)
+	}
+	if targetS.Tracker.Protocol != ProtocolGitea {
+		t.Errorf("Protocol = %q, want gitea", targetS.Tracker.Protocol)
+	}
+
+	// 3. Winget resolve
+	fakeRunnerWinget := func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		if name == "winget" && len(args) >= 3 && args[0] == "show" && args[1] == "--id" && args[2] == "BlenderFoundation.Blender" {
+			out := `Found Blender [BlenderFoundation.Blender]
+Version: 4.2.0
+Publisher Support Url: https://projects.blender.org/blender/blender/issues
+`
+			return []byte(out), nil
+		}
+		return nil, errors.New("command not found")
+	}
+
+	probeWinget := &OSPackageProbe{
+		run:      fakeRunnerWinget,
+		lookPath: fakeLookPath,
+	}
+
+	targetW, err := probeWinget.Resolve(context.Background(), "BlenderFoundation.Blender")
+	if err != nil {
+		t.Fatalf("resolve winget BlenderFoundation.Blender: %v", err)
+	}
+	if targetW.CanonicalName != "Blender" {
+		t.Errorf("CanonicalName = %q, want Blender", targetW.CanonicalName)
+	}
+	if targetW.Tracker.Protocol != ProtocolGitea {
+		t.Errorf("Protocol = %q, want gitea", targetW.Tracker.Protocol)
+	}
+}

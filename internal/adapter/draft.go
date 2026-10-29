@@ -19,6 +19,7 @@ import (
 	"github.com/riccivr/bugrouter/internal/introspector"
 	"github.com/riccivr/bugrouter/internal/resolver"
 	"github.com/riccivr/bugrouter/internal/scrubber"
+	"github.com/riccivr/bugrouter/internal/telemetry"
 	"github.com/riccivr/bugrouter/internal/verifier"
 	"github.com/riccivr/bugrouter/internal/version"
 )
@@ -36,6 +37,7 @@ type DraftInput struct {
 	Template         *introspector.TemplateSchema
 	Duplicates       []dedup.ExistingIssue
 	Verification     *verifier.VerificationProof
+	Telemetry        *telemetry.SystemTelemetry
 }
 
 // StagedDraft represents a redacted and formatted issue ready for review or submission.
@@ -52,6 +54,7 @@ type StagedDraft struct {
 	PotentialDuplicates []dedup.ExistingIssue        `json:"potential_duplicates,omitempty"`
 	Quality             QualityReport                `json:"quality"`
 	Verification        *verifier.VerificationProof  `json:"verification,omitempty"`
+	Telemetry           *telemetry.SystemTelemetry   `json:"telemetry,omitempty"`
 }
 
 func generateDraftID() (string, error) {
@@ -69,7 +72,7 @@ func sanitizeTitle(t string) string {
 	return strings.Join(strings.Fields(t), " ")
 }
 
-func mapFieldToValue(f introspector.FieldSchema, scrubbedSummary, scrubbedSteps, scrubbedExpected, scrubbedActual, scrubbedLogs, canonicalName, localVersion, severity string, format introspector.TemplateFormat) string {
+func mapFieldToValue(f introspector.FieldSchema, scrubbedSummary, scrubbedSteps, scrubbedExpected, scrubbedActual, scrubbedLogs, canonicalName, localVersion, severity string, format introspector.TemplateFormat, telem *telemetry.SystemTelemetry) string {
 	id := strings.ToLower(strings.ReplaceAll(strings.ReplaceAll(f.ID, "-", "_"), " ", "_"))
 	lbl := strings.ToLower(f.Label)
 
@@ -111,7 +114,11 @@ func mapFieldToValue(f introspector.FieldSchema, scrubbedSummary, scrubbedSteps,
 		return localVersion
 	}
 	if has("environment", "os", "platform", "system") {
-		return fmt.Sprintf("%s (%s/%s)", canonicalName, runtime.GOOS, runtime.GOARCH)
+		envStr := fmt.Sprintf("%s (%s/%s)", canonicalName, runtime.GOOS, runtime.GOARCH)
+		if telem != nil {
+			envStr += "\n" + telemetry.FormatMarkdown(*telem)
+		}
+		return envStr
 	}
 	if has("severity") {
 		return severity
@@ -173,7 +180,7 @@ func BuildDraft(in DraftInput) (*StagedDraft, error) {
 	if in.Template != nil && in.Template.Format != introspector.FormatBugzillaSchema && len(in.Template.Fields) > 0 {
 		var sb strings.Builder
 		for _, f := range in.Template.Fields {
-			val := mapFieldToValue(f, string(scrubbedSummary), string(scrubbedSteps), string(scrubbedExpected), string(scrubbedActual), string(scrubbedLogs), canonicalName, localVersion, severity, in.Template.Format)
+			val := mapFieldToValue(f, string(scrubbedSummary), string(scrubbedSteps), string(scrubbedExpected), string(scrubbedActual), string(scrubbedLogs), canonicalName, localVersion, severity, in.Template.Format, in.Telemetry)
 			if val == "" && f.Value != "" {
 				val = f.Value
 			}
@@ -227,7 +234,12 @@ func BuildDraft(in DraftInput) (*StagedDraft, error) {
 		sb.WriteString("## Environment\n\n")
 		sb.WriteString(fmt.Sprintf("- **Target:** %s\n", canonicalName))
 		sb.WriteString(fmt.Sprintf("- **Version:** %s\n", localVersion))
-		sb.WriteString(fmt.Sprintf("- **Platform:** %s/%s\n\n", runtime.GOOS, runtime.GOARCH))
+		sb.WriteString(fmt.Sprintf("- **Platform:** %s/%s\n", runtime.GOOS, runtime.GOARCH))
+		if in.Telemetry != nil {
+			sb.WriteString(telemetry.FormatMarkdown(*in.Telemetry))
+			sb.WriteString("\n")
+		}
+		sb.WriteString("\n")
 		if in.Verification != nil {
 			sb.WriteString(fmt.Sprintf("## Verified Reproduction\n\n- **Reproduced:** %t (exit code %d, %dms)\n- **Command:** `%s`\n- **Proof Digest:** `sha256:%s`\n\n",
 				in.Verification.Reproduced, in.Verification.ExitCode, in.Verification.DurationMs, in.Verification.Command, in.Verification.ProofDigest))
@@ -245,7 +257,7 @@ func BuildDraft(in DraftInput) (*StagedDraft, error) {
 	protocol := in.Target.Tracker.Protocol
 
 	switch protocol {
-	case resolver.ProtocolGitHub, resolver.ProtocolCodeberg:
+	case resolver.ProtocolGitHub, resolver.ProtocolCodeberg, resolver.ProtocolGitea:
 		base := strings.TrimRight(trackerURL, "/")
 		if !strings.HasSuffix(base, "/new") {
 			base = base + "/new"
@@ -260,7 +272,7 @@ func BuildDraft(in DraftInput) (*StagedDraft, error) {
 					if f.ID == "" {
 						continue
 					}
-					val := mapFieldToValue(f, string(scrubbedSummary), string(scrubbedSteps), string(scrubbedExpected), string(scrubbedActual), string(scrubbedLogs), canonicalName, localVersion, severity, in.Template.Format)
+					val := mapFieldToValue(f, string(scrubbedSummary), string(scrubbedSteps), string(scrubbedExpected), string(scrubbedActual), string(scrubbedLogs), canonicalName, localVersion, severity, in.Template.Format, in.Telemetry)
 					if val == "" && f.Value != "" {
 						val = f.Value
 					}
@@ -347,6 +359,7 @@ func BuildDraft(in DraftInput) (*StagedDraft, error) {
 		PotentialDuplicates: in.Duplicates,
 		Quality:             LintDraft(in),
 		Verification:        in.Verification,
+		Telemetry:           in.Telemetry,
 	}
 	return draft, nil
 }
