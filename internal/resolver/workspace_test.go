@@ -178,3 +178,165 @@ func TestWorkspaceProbeSecurityAndNotFound(t *testing.T) {
 		t.Errorf("expected ErrNotFound for nonexistent-pkg, got: %v", err)
 	}
 }
+
+func TestWorkspaceProbeCargoToml(t *testing.T) {
+	tempDir := t.TempDir()
+
+	cargoTomlContent := `[package]
+name = "my-rust-app"
+version = "0.5.0"
+edition = "2021"
+repository = "https://github.com/my-org/my-rust-app"
+
+[dependencies]
+tokio = { version = "1.38", git = "https://github.com/tokio-rs/tokio" }
+regular-crate = "0.1"
+
+[dependencies.serde]
+version = "1.0"
+git = "https://github.com/serde-rs/serde"
+`
+	if err := os.WriteFile(filepath.Join(tempDir, "Cargo.toml"), []byte(cargoTomlContent), 0644); err != nil {
+		t.Fatalf("write Cargo.toml: %v", err)
+	}
+
+	cargoLockContent := `version = 3
+
+[[package]]
+name = "my-rust-app"
+version = "0.5.0"
+dependencies = [
+ "tokio",
+ "locked-crate",
+]
+
+[[package]]
+name = "locked-crate"
+version = "2.1.0"
+source = "git+https://github.com/custom/locked-crate.git#abcdef123456"
+`
+	if err := os.WriteFile(filepath.Join(tempDir, "Cargo.lock"), []byte(cargoLockContent), 0644); err != nil {
+		t.Fatalf("write Cargo.lock: %v", err)
+	}
+
+	probe := NewWorkspaceProbe(tempDir)
+
+	// 1. Resolve local package
+	t1, err := probe.Resolve(context.Background(), "my-rust-app")
+	if err != nil {
+		t.Fatalf("resolve my-rust-app: %v", err)
+	}
+	if t1.CanonicalName != "my-rust-app" {
+		t.Errorf("CanonicalName = %q, want my-rust-app", t1.CanonicalName)
+	}
+	if t1.LocalVersion != "0.5.0" {
+		t.Errorf("LocalVersion = %q, want 0.5.0", t1.LocalVersion)
+	}
+	if t1.Tracker.Protocol != ProtocolGitHub {
+		t.Errorf("Protocol = %q, want github", t1.Tracker.Protocol)
+	}
+
+	// 2. Resolve dependency with inline table git
+	t2, err := probe.Resolve(context.Background(), "tokio")
+	if err != nil {
+		t.Fatalf("resolve tokio: %v", err)
+	}
+	if t2.Tracker.Protocol != ProtocolGitHub {
+		t.Errorf("Protocol = %q, want github", t2.Tracker.Protocol)
+	}
+	if t2.RepositoryURL != "https://github.com/tokio-rs/tokio" {
+		t.Errorf("RepositoryURL = %q, want https://github.com/tokio-rs/tokio", t2.RepositoryURL)
+	}
+
+	// 3. Resolve dependency with section header
+	t3, err := probe.Resolve(context.Background(), "serde")
+	if err != nil {
+		t.Fatalf("resolve serde: %v", err)
+	}
+	if t3.Tracker.Protocol != ProtocolGitHub {
+		t.Errorf("Protocol = %q, want github", t3.Tracker.Protocol)
+	}
+
+	// 4. Resolve dependency with git URL in Cargo.lock
+	t4, err := probe.Resolve(context.Background(), "locked-crate")
+	if err != nil {
+		t.Fatalf("resolve locked-crate: %v", err)
+	}
+	if t4.LocalVersion != "2.1.0" {
+		t.Errorf("LocalVersion = %q, want 2.1.0", t4.LocalVersion)
+	}
+	if t4.RepositoryURL != "https://github.com/custom/locked-crate" {
+		t.Errorf("RepositoryURL = %q, want https://github.com/custom/locked-crate", t4.RepositoryURL)
+	}
+
+	// 5. Regular crate without git falls through with ErrNotFound
+	_, err = probe.Resolve(context.Background(), "regular-crate")
+	if !errors.Is(err, ErrNotFound) {
+		t.Errorf("expected ErrNotFound for regular-crate, got: %v", err)
+	}
+}
+
+func TestWorkspaceProbePyprojectToml(t *testing.T) {
+	tempDir := t.TempDir()
+
+	pyprojectContent := `[project]
+name = "my-python-tool"
+version = "1.2.3"
+dependencies = [
+    "click>=8.0",
+    "requests @ git+https://github.com/psf/requests.git#v2.31.0",
+]
+
+[project.urls]
+Homepage = "https://example.com"
+Repository = "https://github.com/my-org/my-python-tool"
+"Bug Tracker" = "https://github.com/my-org/my-python-tool/issues"
+
+[tool.poetry.dependencies]
+urllib3 = { git = "https://github.com/urllib3/urllib3.git" }
+`
+	if err := os.WriteFile(filepath.Join(tempDir, "pyproject.toml"), []byte(pyprojectContent), 0644); err != nil {
+		t.Fatalf("write pyproject.toml: %v", err)
+	}
+
+	probe := NewWorkspaceProbe(tempDir)
+
+	// 1. Resolve local project via [project.urls]
+	t1, err := probe.Resolve(context.Background(), "my-python-tool")
+	if err != nil {
+		t.Fatalf("resolve my-python-tool: %v", err)
+	}
+	if t1.LocalVersion != "1.2.3" {
+		t.Errorf("LocalVersion = %q, want 1.2.3", t1.LocalVersion)
+	}
+	if t1.Tracker.URL != "https://github.com/my-org/my-python-tool/issues" {
+		t.Errorf("Tracker URL = %q, want issues url", t1.Tracker.URL)
+	}
+
+	// 2. Resolve PEP 508 git dependency
+	t2, err := probe.Resolve(context.Background(), "requests")
+	if err != nil {
+		t.Fatalf("resolve requests: %v", err)
+	}
+	if t2.Tracker.Protocol != ProtocolGitHub {
+		t.Errorf("Protocol = %q, want github", t2.Tracker.Protocol)
+	}
+	if t2.RepositoryURL != "https://github.com/psf/requests" {
+		t.Errorf("RepositoryURL = %q, want https://github.com/psf/requests", t2.RepositoryURL)
+	}
+
+	// 3. Resolve Poetry git dependency
+	t3, err := probe.Resolve(context.Background(), "urllib3")
+	if err != nil {
+		t.Fatalf("resolve urllib3: %v", err)
+	}
+	if t3.Tracker.Protocol != ProtocolGitHub {
+		t.Errorf("Protocol = %q, want github", t3.Tracker.Protocol)
+	}
+
+	// 4. Regular dependency without git returns ErrNotFound
+	_, err = probe.Resolve(context.Background(), "click")
+	if !errors.Is(err, ErrNotFound) {
+		t.Errorf("expected ErrNotFound for click, got: %v", err)
+	}
+}
