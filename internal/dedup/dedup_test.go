@@ -288,3 +288,38 @@ func TestFindDuplicatesGitHubAuthHeader(t *testing.T) {
 		t.Error("expected Authorization: Bearer ghp_dedup_secret_xyz789 header to be sent")
 	}
 }
+
+func TestFindDuplicatesBugzillaDoesNotLeakGitLabToken(t *testing.T) {
+	t.Setenv("GITLAB_TOKEN", "glpat-secret-do-not-leak")
+	var leakedPrivateToken, leakedAuth string
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		leakedPrivateToken = r.Header.Get("PRIVATE-TOKEN")
+		leakedAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"bugs": []}`)
+	}))
+	defer ts.Close()
+
+	client := httpx.NewTestClient(time.Second)
+	finder := NewFinder(client)
+
+	target := resolver.Target{
+		CanonicalName: "firefox",
+		Tracker: resolver.TrackerInfo{
+			Protocol: resolver.ProtocolBugzilla,
+			URL:      ts.URL + "/enter_bug.cgi",
+		},
+	}
+
+	_, err := finder.FindDuplicates(context.Background(), target, scrubber.ScrubbedText("Crash on launch"))
+	if err != nil {
+		t.Fatalf("FindDuplicates failed: %v", err)
+	}
+	if leakedPrivateToken != "" {
+		t.Errorf("leaked PRIVATE-TOKEN to Bugzilla: %q", leakedPrivateToken)
+	}
+	if leakedAuth != "" {
+		t.Errorf("leaked Authorization to Bugzilla: %q", leakedAuth)
+	}
+}
