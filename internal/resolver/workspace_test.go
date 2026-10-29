@@ -190,6 +190,7 @@ repository = "https://github.com/my-org/my-rust-app"
 
 [dependencies]
 tokio = { version = "1.38", git = "https://github.com/tokio-rs/tokio" }
+complex-dep = { rustc-version = "1.70", version = "1.38", git = "https://github.com/rust-lang/complex-dep.git" }
 regular-crate = "0.1"
 
 [dependencies.serde]
@@ -248,6 +249,18 @@ source = "git+https://github.com/custom/locked-crate.git#abcdef123456"
 		t.Errorf("RepositoryURL = %q, want https://github.com/tokio-rs/tokio", t2.RepositoryURL)
 	}
 
+	// 2b. Resolve dependency with rustc-version before version (RT-07.1)
+	t2b, err := probe.Resolve(context.Background(), "complex-dep")
+	if err != nil {
+		t.Fatalf("resolve complex-dep: %v", err)
+	}
+	if t2b.LocalVersion != "1.38" {
+		t.Errorf("complex-dep LocalVersion = %q, want 1.38", t2b.LocalVersion)
+	}
+	if t2b.RepositoryURL != "https://github.com/rust-lang/complex-dep" {
+		t.Errorf("complex-dep RepositoryURL = %q, want https://github.com/rust-lang/complex-dep", t2b.RepositoryURL)
+	}
+
 	// 3. Resolve dependency with section header
 	t3, err := probe.Resolve(context.Background(), "serde")
 	if err != nil {
@@ -282,9 +295,8 @@ func TestWorkspaceProbePyprojectToml(t *testing.T) {
 	pyprojectContent := `[project]
 name = "my-python-tool"
 version = "1.2.3"
-dependencies = [
+dependencies = ["requests[security] @ git+https://github.com/psf/requests.git#v2.31.0",
     "click>=8.0",
-    "requests @ git+https://github.com/psf/requests.git#v2.31.0",
 ]
 
 [project.urls]
@@ -301,10 +313,13 @@ urllib3 = { git = "https://github.com/urllib3/urllib3.git" }
 
 	probe := NewWorkspaceProbe(tempDir)
 
-	// 1. Resolve local project via [project.urls]
-	t1, err := probe.Resolve(context.Background(), "my-python-tool")
+	// 1. Resolve local project via [project.urls] (with PEP 503 normalization: query with underscore)
+	t1, err := probe.Resolve(context.Background(), "my_python_tool")
 	if err != nil {
-		t.Fatalf("resolve my-python-tool: %v", err)
+		t.Fatalf("resolve my_python_tool: %v", err)
+	}
+	if t1.CanonicalName != "my_python_tool" {
+		t.Errorf("CanonicalName = %q, want my_python_tool", t1.CanonicalName)
 	}
 	if t1.LocalVersion != "1.2.3" {
 		t.Errorf("LocalVersion = %q, want 1.2.3", t1.LocalVersion)
@@ -313,7 +328,16 @@ urllib3 = { git = "https://github.com/urllib3/urllib3.git" }
 		t.Errorf("Tracker URL = %q, want issues url", t1.Tracker.URL)
 	}
 
-	// 2. Resolve PEP 508 git dependency
+	// 1b. Resolve with original hyphenated name
+	t1b, err := probe.Resolve(context.Background(), "my-python-tool")
+	if err != nil {
+		t.Fatalf("resolve my-python-tool: %v", err)
+	}
+	if t1b.CanonicalName != "my-python-tool" {
+		t.Errorf("CanonicalName = %q, want my-python-tool", t1b.CanonicalName)
+	}
+
+	// 2. Resolve PEP 508 git dependency with extras on opening array line
 	t2, err := probe.Resolve(context.Background(), "requests")
 	if err != nil {
 		t.Fatalf("resolve requests: %v", err)
@@ -338,5 +362,40 @@ urllib3 = { git = "https://github.com/urllib3/urllib3.git" }
 	_, err = probe.Resolve(context.Background(), "click")
 	if !errors.Is(err, ErrNotFound) {
 		t.Errorf("expected ErrNotFound for click, got: %v", err)
+	}
+}
+
+func TestExtractInlineTableFieldExactMatch(t *testing.T) {
+	table := `{ rustc-version = "1.70", version = "1.38", git = "https://github.com/rust-lang/example.git" }`
+	if got := extractInlineTableField(table, "version"); got != "1.38" {
+		t.Errorf("extractInlineTableField version = %q, want 1.38", got)
+	}
+	if got := extractInlineTableField(table, "rustc-version"); got != "1.70" {
+		t.Errorf("extractInlineTableField rustc-version = %q, want 1.70", got)
+	}
+	if got := extractInlineTableField(table, "git"); got != "https://github.com/rust-lang/example.git" {
+		t.Errorf("extractInlineTableField git = %q, want git url", got)
+	}
+	if got := extractInlineTableField(table, "nonexistent"); got != "" {
+		t.Errorf("extractInlineTableField nonexistent = %q, want empty", got)
+	}
+}
+
+func TestNormalizePyPkgName(t *testing.T) {
+	cases := []struct {
+		input string
+		want  string
+	}{
+		{"requests[security]", "requests"},
+		{"pkg[extra1,extra2]", "pkg"},
+		{"my-python-tool", "my_python_tool"},
+		{"my_python_tool", "my_python_tool"},
+		{"my.python.tool", "my_python_tool"},
+		{"  Requests[ALL]  ", "requests"},
+	}
+	for _, tc := range cases {
+		if got := normalizePyPkgName(tc.input); got != tc.want {
+			t.Errorf("normalizePyPkgName(%q) = %q, want %q", tc.input, got, tc.want)
+		}
 	}
 }

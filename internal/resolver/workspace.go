@@ -271,20 +271,43 @@ func extractTOMLValue(val string) string {
 }
 
 func extractInlineTableField(table, field string) string {
-	idx := strings.Index(table, field)
-	if idx == -1 {
-		return ""
+	content := strings.TrimSpace(table)
+	if strings.HasPrefix(content, "{") && strings.HasSuffix(content, "}") {
+		content = strings.TrimSpace(content[1 : len(content)-1])
 	}
-	rest := strings.TrimSpace(table[idx+len(field):])
-	if !strings.HasPrefix(rest, "=") {
-		return ""
+
+	var entries []string
+	var cur strings.Builder
+	var inQuote rune
+
+	for _, r := range content {
+		switch {
+		case inQuote != 0:
+			if r == inQuote {
+				inQuote = 0
+			}
+			cur.WriteRune(r)
+		case r == '"' || r == '\'':
+			inQuote = r
+			cur.WriteRune(r)
+		case r == ',':
+			entries = append(entries, cur.String())
+			cur.Reset()
+		default:
+			cur.WriteRune(r)
+		}
 	}
-	rest = strings.TrimSpace(strings.TrimPrefix(rest, "="))
-	if len(rest) > 0 && (rest[0] == '"' || rest[0] == '\'') {
-		q := rest[0]
-		end := strings.IndexByte(rest[1:], q)
-		if end != -1 {
-			return rest[1 : end+1]
+	if cur.Len() > 0 {
+		entries = append(entries, cur.String())
+	}
+
+	for _, entry := range entries {
+		k, v, ok := strings.Cut(entry, "=")
+		if !ok {
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(k), field) {
+			return extractTOMLValue(v)
 		}
 	}
 	return ""
@@ -470,6 +493,62 @@ func (w *WorkspaceProbe) resolveCargo(ctx context.Context, query string) (*Targe
 	return nil, ErrNotFound
 }
 
+func normalizePyPkgName(s string) string {
+	s = strings.TrimSpace(s)
+	if idx := strings.Index(s, "["); idx != -1 {
+		s = s[:idx]
+	}
+	s = strings.TrimSpace(strings.ToLower(s))
+	s = strings.ReplaceAll(s, "-", "_")
+	s = strings.ReplaceAll(s, ".", "_")
+	return s
+}
+
+func parsePyDepGitURL(rawItem string, query string) (string, bool) {
+	tok := strings.Trim(rawItem, "[], \t\"'")
+	if idx := strings.Index(tok, "@"); idx != -1 {
+		depName := strings.TrimSpace(tok[:idx])
+		if normalizePyPkgName(depName) == normalizePyPkgName(query) {
+			depURL := strings.TrimSpace(tok[idx+1:])
+			depURL = strings.Trim(depURL, "\",' ")
+			return depURL, true
+		}
+	}
+	return "", false
+}
+
+func parsePyDepSlice(itemsStr string, query string) string {
+	var cur strings.Builder
+	var inQuote rune
+	var elements []string
+	for _, r := range itemsStr {
+		switch {
+		case inQuote != 0:
+			if r == inQuote {
+				inQuote = 0
+			}
+			cur.WriteRune(r)
+		case r == '"' || r == '\'':
+			inQuote = r
+			cur.WriteRune(r)
+		case r == ',':
+			elements = append(elements, cur.String())
+			cur.Reset()
+		default:
+			cur.WriteRune(r)
+		}
+	}
+	if cur.Len() > 0 {
+		elements = append(elements, cur.String())
+	}
+	for _, el := range elements {
+		if gitURL, ok := parsePyDepGitURL(el, query); ok {
+			return gitURL
+		}
+	}
+	return ""
+}
+
 func (w *WorkspaceProbe) resolvePyproject(ctx context.Context, query string) (*Target, error) {
 	pyprojectPath := filepath.Join(w.rootDir, "pyproject.toml")
 	data, err := os.ReadFile(pyprojectPath)
@@ -499,7 +578,7 @@ func (w *WorkspaceProbe) resolvePyproject(ctx context.Context, query string) (*T
 			lowerSec := strings.ToLower(currentSection)
 			if strings.HasPrefix(lowerSec, "tool.poetry.dependencies.") {
 				subName := strings.TrimPrefix(lowerSec, "tool.poetry.dependencies.")
-				if strings.EqualFold(subName, query) {
+				if normalizePyPkgName(subName) == normalizePyPkgName(query) {
 					inMatchingPoetryDep = true
 				}
 			}
@@ -512,13 +591,8 @@ func (w *WorkspaceProbe) resolvePyproject(ctx context.Context, query string) (*T
 			if strings.HasSuffix(line, "]") {
 				inDependenciesArray = false
 			}
-			tok := strings.Trim(line, "[], \t\"'")
-			if idx := strings.Index(tok, "@"); idx != -1 {
-				depName := strings.TrimSpace(tok[:idx])
-				if strings.EqualFold(depName, query) {
-					depGitURL = strings.TrimSpace(tok[idx+1:])
-					depGitURL = strings.Trim(depGitURL, "\",' ")
-				}
+			if u := parsePyDepSlice(line, query); u != "" && depGitURL == "" {
+				depGitURL = u
 			}
 			continue
 		}
@@ -539,18 +613,14 @@ func (w *WorkspaceProbe) resolvePyproject(ctx context.Context, query string) (*T
 			case "dependencies":
 				if strings.HasPrefix(val, "[") && !strings.HasSuffix(val, "]") {
 					inDependenciesArray = true
+					rest := strings.TrimPrefix(val, "[")
+					if u := parsePyDepSlice(rest, query); u != "" && depGitURL == "" {
+						depGitURL = u
+					}
 				} else if strings.HasPrefix(val, "[") && strings.HasSuffix(val, "]") {
 					inner := strings.Trim(val, "[] \t")
-					items := strings.Split(inner, ",")
-					for _, it := range items {
-						tok := strings.Trim(it, " \t\"'")
-						if idx := strings.Index(tok, "@"); idx != -1 {
-							depName := strings.TrimSpace(tok[:idx])
-							if strings.EqualFold(depName, query) {
-								depGitURL = strings.TrimSpace(tok[idx+1:])
-								depGitURL = strings.Trim(depGitURL, "\",' ")
-							}
-						}
+					if u := parsePyDepSlice(inner, query); u != "" && depGitURL == "" {
+						depGitURL = u
 					}
 				}
 			}
@@ -577,7 +647,7 @@ func (w *WorkspaceProbe) resolvePyproject(ctx context.Context, query string) (*T
 		}
 
 		if lowerSec == "tool.poetry.dependencies" {
-			if strings.EqualFold(key, query) {
+			if normalizePyPkgName(key) == normalizePyPkgName(query) {
 				if strings.HasPrefix(val, "{") && strings.HasSuffix(val, "}") {
 					depGitURL = extractInlineTableField(val, "git")
 					if depGitURL == "" {
@@ -597,7 +667,7 @@ func (w *WorkspaceProbe) resolvePyproject(ctx context.Context, query string) (*T
 	}
 
 	// 1. Check if query matched project
-	if strings.EqualFold(projName, query) {
+	if normalizePyPkgName(projName) == normalizePyPkgName(query) {
 		targetURL := issuesURL
 		if targetURL == "" {
 			targetURL = repoURL
