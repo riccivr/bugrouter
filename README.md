@@ -128,7 +128,8 @@ bugrouter serve \
   --addr :8080 \
   --auth-token "super-secret-token-123" \
   --audit-log /var/log/bugrouter/audit.log \
-  --webhook-url https://hooks.slack.com/services/...
+  --webhook-url https://hooks.slack.com/services/... \
+  --webhook-secret "hmac-signing-secret"
 ```
 
 Open `http://localhost:8080` in your browser to access the Human-in-the-Loop review dashboard and recent audit trail.

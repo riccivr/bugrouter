@@ -7,11 +7,13 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/riccivr/bugrouter/internal/adapter"
+	"github.com/riccivr/bugrouter/internal/cloud"
 	"github.com/riccivr/bugrouter/internal/dedup"
 	"github.com/riccivr/bugrouter/internal/httpx"
 	"github.com/riccivr/bugrouter/internal/introspector"
@@ -234,10 +236,13 @@ body:
 		t.Errorf("expected -32601 error for unknown method, got: %+v", resp9.Error)
 	}
 
-	// Test approve_draft separately
+	// Test approve_draft separately with AuditLogger
+	auditLogPath := filepath.Join(tempDir, "audit.log")
+	auditLogger := cloud.NewAuditLogger(auditLogPath)
+
 	var inApprove, outApprove bytes.Buffer
 	inApprove.WriteString(fmt.Sprintf(`{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"approve_draft","arguments":{"id":%q}}}`+"\n", staged.ID))
-	serverApprove := NewServer(wf, store).WithForgeClient(mockSub)
+	serverApprove := NewServer(wf, store).WithForgeClient(mockSub).WithAuditLogger(auditLogger)
 	if err := serverApprove.Run(context.Background(), &inApprove, &outApprove); err != nil {
 		t.Fatalf("serverApprove.Run failed: %v", err)
 	}
@@ -251,5 +256,36 @@ body:
 	contentApprove := respApprove.Result.(map[string]any)["content"].([]any)[0].(map[string]any)["text"].(string)
 	if !strings.Contains(contentApprove, "submitted") || !strings.Contains(contentApprove, mockSub.submittedURL) {
 		t.Errorf("approve_draft result missing expected content: %s", contentApprove)
+	}
+
+	// Verify audit log entry was recorded by MCP approve_draft
+	events, err := auditLogger.ListRecent(10)
+	if err != nil {
+		t.Fatalf("read audit events: %v", err)
+	}
+	if len(events) == 0 {
+		t.Fatal("expected at least 1 audit event from MCP approve_draft, got 0")
+	}
+	if events[0].Action != "draft.approved" || events[0].DraftID != staged.ID || events[0].RemoteIP != "mcp-stdio" {
+		t.Errorf("unexpected audit event recorded: %+v", events[0])
+	}
+
+	// Verify idempotent approval in MCP: approving again returns isError: true stating already submitted
+	var inApproveAgain, outApproveAgain bytes.Buffer
+	inApproveAgain.WriteString(fmt.Sprintf(`{"jsonrpc":"2.0","id":11,"method":"tools/call","params":{"name":"approve_draft","arguments":{"id":%q}}}`+"\n", staged.ID))
+	if err := serverApprove.Run(context.Background(), &inApproveAgain, &outApproveAgain); err != nil {
+		t.Fatalf("serverApprove.Run again failed: %v", err)
+	}
+	var respApproveAgain jsonrpcResponse
+	if err := json.Unmarshal([]byte(strings.TrimSpace(outApproveAgain.String())), &respApproveAgain); err != nil {
+		t.Fatalf("unmarshal second approve response: %v", err)
+	}
+	resApproveAgain := respApproveAgain.Result.(map[string]any)
+	if resApproveAgain["isError"] != true {
+		t.Errorf("second approve_draft isError = false, want true")
+	}
+	contentApproveAgain := resApproveAgain["content"].([]any)[0].(map[string]any)["text"].(string)
+	if !strings.Contains(contentApproveAgain, "draft is already submitted") {
+		t.Errorf("second approve_draft error message = %q, want 'draft is already submitted'", contentApproveAgain)
 	}
 }

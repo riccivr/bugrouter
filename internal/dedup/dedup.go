@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math"
 	"net/url"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -290,7 +291,14 @@ func (f *Finder) findGitHub(ctx context.Context, target resolver.Target, terms [
 	q := fmt.Sprintf("repo:%s/%s is:issue %s", owner, repo, strings.Join(terms, " "))
 	reqURL := fmt.Sprintf("%s/search/issues?q=%s&per_page=5", baseURL, url.QueryEscape(q))
 
-	data, err := f.client.GetBytes(ctx, reqURL, "application/vnd.github.v3+json")
+	var headers map[string]string
+	for _, env := range []string{"GITHUB_TOKEN", "GH_TOKEN", "BUGROUTER_GITHUB_TOKEN"} {
+		if tok := os.Getenv(env); tok != "" {
+			headers = map[string]string{"Authorization": "Bearer " + tok}
+			break
+		}
+	}
+	data, err := f.client.GetBytesWithHeaders(ctx, reqURL, "application/vnd.github.v3+json", headers)
 	if err != nil {
 		return nil, fmt.Errorf("github search: %w", err)
 	}
@@ -348,7 +356,14 @@ func (f *Finder) findGitLab(ctx context.Context, target resolver.Target, terms [
 	searchParam := strings.Join(terms, " ")
 	reqURL := fmt.Sprintf("%s/api/v4/projects/%s/issues?search=%s&per_page=5", baseURL, encodedPath, url.QueryEscape(searchParam))
 
-	data, err := f.client.GetBytes(ctx, reqURL, "application/json")
+	var headers map[string]string
+	for _, env := range []string{"GITLAB_TOKEN", "GL_TOKEN", "BUGROUTER_GITLAB_TOKEN"} {
+		if tok := os.Getenv(env); tok != "" {
+			headers = map[string]string{"PRIVATE-TOKEN": tok}
+			break
+		}
+	}
+	data, err := f.client.GetBytesWithHeaders(ctx, reqURL, "application/json", headers)
 	if err != nil {
 		return nil, fmt.Errorf("gitlab search: %w", err)
 	}
@@ -395,7 +410,14 @@ func (f *Finder) findBugzilla(ctx context.Context, target resolver.Target, terms
 	searchParam := strings.Join(terms, " ")
 	reqURL := fmt.Sprintf("%s/rest/bug?quicksearch=%s&limit=5", baseURL, url.QueryEscape(searchParam))
 
-	data, err := f.client.GetBytes(ctx, reqURL, "application/json")
+	var headers map[string]string
+	for _, env := range []string{"GITLAB_TOKEN", "GL_TOKEN", "BUGROUTER_GITLAB_TOKEN"} {
+		if tok := os.Getenv(env); tok != "" {
+			headers = map[string]string{"PRIVATE-TOKEN": tok}
+			break
+		}
+	}
+	data, err := f.client.GetBytesWithHeaders(ctx, reqURL, "application/json", headers)
 	if err != nil {
 		return nil, fmt.Errorf("bugzilla search: %w", err)
 	}

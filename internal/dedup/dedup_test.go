@@ -251,3 +251,40 @@ func TestFindDuplicatesEnterpriseHostDerivation(t *testing.T) {
 		t.Errorf("unexpected GitLab Self-Managed dups: %+v", glDups)
 	}
 }
+
+func TestFindDuplicatesGitHubAuthHeader(t *testing.T) {
+	t.Setenv("GITHUB_TOKEN", "ghp_dedup_secret_xyz789")
+	authHeaderReceived := false
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") == "Bearer ghp_dedup_secret_xyz789" {
+			authHeaderReceived = true
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"items": []}`)
+	}))
+	defer ts.Close()
+
+	client := httpx.NewTestClient(time.Second)
+	finder := NewFinder(client).WithEndpoints(Endpoints{
+		GitHubAPIBaseURL: ts.URL,
+		GitLabBaseURL:    ts.URL,
+	})
+
+	target := resolver.Target{
+		CanonicalName: "repo",
+		RepositoryURL: "https://github.com/myorg/repo",
+		Tracker: resolver.TrackerInfo{
+			Protocol: resolver.ProtocolGitHub,
+			URL:      "https://github.com/myorg/repo/issues",
+		},
+	}
+
+	_, err := finder.FindDuplicates(context.Background(), target, scrubber.ScrubbedText("Crash on launch"))
+	if err != nil {
+		t.Fatalf("FindDuplicates failed: %v", err)
+	}
+	if !authHeaderReceived {
+		t.Error("expected Authorization: Bearer ghp_dedup_secret_xyz789 header to be sent")
+	}
+}

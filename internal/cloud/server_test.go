@@ -37,9 +37,11 @@ func postWithHeader(url string, headers map[string]string) (*http.Response, erro
 type mockSubmitter struct {
 	submittedURL string
 	err          error
+	calls        int
 }
 
 func (m *mockSubmitter) Submit(ctx context.Context, draft *adapter.StagedDraft) (string, error) {
+	m.calls++
 	if m.err != nil {
 		return "", m.err
 	}
@@ -174,6 +176,30 @@ func TestServerDraftsAndApproval(t *testing.T) {
 	}
 	if updatedDraft.SubmissionURL != submitter.submittedURL {
 		t.Errorf("submission URL = %q, want %s", updatedDraft.SubmissionURL, submitter.submittedURL)
+	}
+
+	// Verify idempotent approval returns 409 Conflict without re-submitting
+	respApproveAgain, err := postWithHeader(approveURL, map[string]string{"X-Bugrouter-Request": "1"})
+	if err != nil {
+		t.Fatalf("POST /approve again failed: %v", err)
+	}
+	defer respApproveAgain.Body.Close()
+
+	if respApproveAgain.StatusCode != http.StatusConflict {
+		t.Errorf("second POST /approve status = %d, want 409 Conflict", respApproveAgain.StatusCode)
+	}
+	var conflictRes map[string]string
+	if err := json.NewDecoder(respApproveAgain.Body).Decode(&conflictRes); err != nil {
+		t.Fatalf("decode conflict response: %v", err)
+	}
+	if conflictRes["error"] != "draft already submitted" {
+		t.Errorf("conflict error = %q, want 'draft already submitted'", conflictRes["error"])
+	}
+	if conflictRes["issue_url"] != submitter.submittedURL {
+		t.Errorf("conflict issue_url = %q, want %s", conflictRes["issue_url"], submitter.submittedURL)
+	}
+	if submitter.calls != 1 {
+		t.Errorf("submitter called %d times, want 1", submitter.calls)
 	}
 
 	// Discard another draft

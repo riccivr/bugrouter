@@ -144,3 +144,27 @@ func TestClientOversizedPayload(t *testing.T) {
 		t.Fatal("expected error on oversized payload, got nil")
 	}
 }
+
+func TestClientGetBytesWithHeaders(t *testing.T) {
+	var capturedAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "text/plain")
+		fmt.Fprint(w, "authenticated")
+	}))
+	defer srv.Close()
+
+	client := NewTestClient(time.Second)
+	data, err := client.GetBytesWithHeaders(context.Background(), srv.URL, "text/plain", map[string]string{
+		"Authorization": "Bearer my-secret-token",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if string(data) != "authenticated" {
+		t.Errorf("body = %q, want authenticated", string(data))
+	}
+	if capturedAuth != "Bearer my-secret-token" {
+		t.Errorf("Authorization = %q, want Bearer my-secret-token", capturedAuth)
+	}
+}

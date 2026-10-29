@@ -162,6 +162,11 @@ func (c *Client) AllowPrivateHosts(allow bool) {
 
 // GetBytes executes a GET request against the target URL and returns the response body bytes.
 func (c *Client) GetBytes(ctx context.Context, url string, accept string) ([]byte, error) {
+	return c.GetBytesWithHeaders(ctx, url, accept, nil)
+}
+
+// GetBytesWithHeaders executes a GET request against the target URL with custom headers and returns response bytes.
+func (c *Client) GetBytesWithHeaders(ctx context.Context, url string, accept string, headers map[string]string) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("create request for %s: %w", url, err)
@@ -169,6 +174,9 @@ func (c *Client) GetBytes(ctx context.Context, url string, accept string) ([]byt
 	req.Header.Set("User-Agent", version.UserAgent())
 	if accept != "" {
 		req.Header.Set("Accept", accept)
+	}
+	for k, v := range headers {
+		req.Header.Set(k, v)
 	}
 
 	resp, err := c.httpClient.Do(req)

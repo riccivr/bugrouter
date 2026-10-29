@@ -256,3 +256,36 @@ func TestIntrospectBugzillaBothEmptyReturnsErrNoTemplate(t *testing.T) {
 		t.Errorf("expected ErrNoTemplateFound, got: %v", err)
 	}
 }
+
+func TestIntrospectGitHubAuthHeader(t *testing.T) {
+	t.Setenv("GITHUB_TOKEN", "ghp_test_secret_abc123")
+	authHeaderReceived := false
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") == "Bearer ghp_test_secret_abc123" {
+			authHeaderReceived = true
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `[]`)
+	}))
+	defer ts.Close()
+
+	client := httpx.NewTestClient(time.Second)
+	intro := New(client).WithEndpoints(Endpoints{
+		GitHubAPIBaseURL: ts.URL,
+	})
+
+	target := resolver.Target{
+		CanonicalName: "repo",
+		RepositoryURL: "https://github.com/myorg/repo",
+		Tracker: resolver.TrackerInfo{
+			Protocol: resolver.ProtocolGitHub,
+			URL:      "https://github.com/myorg/repo/issues",
+		},
+	}
+
+	_, _ = intro.Introspect(context.Background(), target)
+	if !authHeaderReceived {
+		t.Error("expected Authorization: Bearer ghp_test_secret_abc123 header to be sent")
+	}
+}

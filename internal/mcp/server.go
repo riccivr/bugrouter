@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"strings"
+	"time"
 
 	"github.com/riccivr/bugrouter/internal/adapter"
 	"github.com/riccivr/bugrouter/internal/cloud"
@@ -58,23 +60,39 @@ type toolCallParams struct {
 
 // Server exposes bugrouter capabilities via JSON-RPC 2.0 MCP stdio transport.
 type Server struct {
-	resolver     *resolver.Waterfall
-	draftStore   *adapter.DraftStore
-	introspector *introspector.Introspector
-	forgeClient  adapter.ForgeSubmitter
-	dedupFinder  *dedup.Finder
+	resolver        *resolver.Waterfall
+	draftStore      *adapter.DraftStore
+	introspector    *introspector.Introspector
+	forgeClient     adapter.ForgeSubmitter
+	dedupFinder     *dedup.Finder
+	auditLogger     *cloud.AuditLogger
+	webhookNotifier *cloud.WebhookNotifier
 }
 
 // NewServer creates an MCP server backed by the provided waterfall and draft store.
 func NewServer(wf *resolver.Waterfall, store *adapter.DraftStore) *Server {
 	httpClient := httpx.NewClient(0)
 	return &Server{
-		resolver:     wf,
-		draftStore:   store,
-		introspector: introspector.New(httpClient),
-		forgeClient:  cloud.NewForgeClient(httpClient),
-		dedupFinder:  dedup.NewFinder(httpClient),
+		resolver:        wf,
+		draftStore:      store,
+		introspector:    introspector.New(httpClient),
+		forgeClient:     cloud.NewForgeClient(httpClient),
+		dedupFinder:     dedup.NewFinder(httpClient),
+		auditLogger:     cloud.NewAuditLogger(""),
+		webhookNotifier: cloud.NewWebhookNotifier(httpClient, "", ""),
 	}
+}
+
+// WithAuditLogger configures the audit logger for recording MCP actions.
+func (s *Server) WithAuditLogger(logger *cloud.AuditLogger) *Server {
+	s.auditLogger = logger
+	return s
+}
+
+// WithWebhookNotifier configures the webhook notifier for dispatching MCP audit events.
+func (s *Server) WithWebhookNotifier(notifier *cloud.WebhookNotifier) *Server {
+	s.webhookNotifier = notifier
+	return s
 }
 
 // WithIntrospector overrides the introspector client for testing or custom caching.
@@ -639,10 +657,36 @@ func (s *Server) handleToolCall(ctx context.Context, params toolCallParams) tool
 			}
 		}
 
+		if draft.Status == "submitted" {
+			return toolCallResult{
+				Content: []toolContent{{Type: "text", Text: "draft is already submitted"}},
+				IsError: true,
+			}
+		}
+
 		var issueURL string
 		if s.forgeClient != nil {
 			issueURL, err = s.forgeClient.Submit(ctx, draft)
 			if err != nil {
+				if s.auditLogger != nil {
+					failEv := cloud.AuditEvent{
+						Timestamp: time.Now().UTC(),
+						Action:    "draft.submit_failed",
+						DraftID:   args.ID,
+						Target:    draft.Target.CanonicalName,
+						Protocol:  draft.Target.Tracker.Protocol,
+						RemoteIP:  "mcp-stdio",
+						Error:     err.Error(),
+					}
+					if logErr := s.auditLogger.Record(failEv); logErr != nil {
+						fmt.Fprintf(os.Stderr, "audit log record error: %v\n", logErr)
+					}
+					if s.webhookNotifier != nil {
+						if notifyErr := s.webhookNotifier.Notify(ctx, failEv); notifyErr != nil {
+							fmt.Fprintf(os.Stderr, "webhook notify error: %v\n", notifyErr)
+						}
+					}
+				}
 				return toolCallResult{
 					Content: []toolContent{{Type: "text", Text: fmt.Sprintf("submit draft %s: %v", args.ID, err)}},
 					IsError: true,
@@ -661,6 +705,26 @@ func (s *Server) handleToolCall(ctx context.Context, params toolCallParams) tool
 			return toolCallResult{
 				Content: []toolContent{{Type: "text", Text: fmt.Sprintf("save approved draft %s: %v", args.ID, err)}},
 				IsError: true,
+			}
+		}
+
+		if s.auditLogger != nil {
+			ev := cloud.AuditEvent{
+				Timestamp: time.Now().UTC(),
+				Action:    "draft.approved",
+				DraftID:   args.ID,
+				Target:    draft.Target.CanonicalName,
+				Protocol:  draft.Target.Tracker.Protocol,
+				IssueURL:  issueURL,
+				RemoteIP:  "mcp-stdio",
+			}
+			if logErr := s.auditLogger.Record(ev); logErr != nil {
+				fmt.Fprintf(os.Stderr, "audit log record error: %v\n", logErr)
+			}
+			if s.webhookNotifier != nil {
+				if notifyErr := s.webhookNotifier.Notify(ctx, ev); notifyErr != nil {
+					fmt.Fprintf(os.Stderr, "webhook notify error: %v\n", notifyErr)
+				}
 			}
 		}
 

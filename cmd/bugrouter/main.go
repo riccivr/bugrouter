@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -112,7 +113,7 @@ func main() {
 
 	switch os.Args[1] {
 	case "version", "--version", "-version", "-v":
-		fmt.Printf("bugrouter %s\n", version.Version)
+		fmt.Printf("bugrouter %s (%s/%s)\n", version.Version, runtime.GOOS, runtime.GOARCH)
 		return
 
 	case "mcp":
@@ -321,6 +322,7 @@ func main() {
 		authToken := fs.String("auth-token", "", "Bearer auth token (falls back to BUGROUTER_CLOUD_TOKEN)")
 		auditLog := fs.String("audit-log", "", "audit log path (default: XDG state path)")
 		webhookURL := fs.String("webhook-url", "", "webhook delivery URL (falls back to BUGROUTER_WEBHOOK_URL)")
+		webhookSecret := fs.String("webhook-secret", "", "HMAC secret for webhook delivery (falls back to BUGROUTER_WEBHOOK_SECRET)")
 		if err := fs.Parse(os.Args[2:]); err != nil {
 			os.Exit(1)
 		}
@@ -333,7 +335,7 @@ func main() {
 			srv.WithAuthToken(*authToken)
 		}
 		srv.WithAuditLogger(cloud.NewAuditLogger(*auditLog))
-		srv.WithWebhookNotifier(cloud.NewWebhookNotifier(httpClient, *webhookURL, ""))
+		srv.WithWebhookNotifier(cloud.NewWebhookNotifier(httpClient, *webhookURL, *webhookSecret))
 
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
@@ -370,7 +372,7 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "  draft [--title <t>] [--summary <s>] [--steps <st>] [--logs <l>]")
 	fmt.Fprintln(os.Stderr, "        [--body-file <path>] [--timeout <dur>] [--json] [--no-cache] <q>")
 	fmt.Fprintln(os.Stderr, "                              Stage bug report draft and generate submission URLs")
-	fmt.Fprintln(os.Stderr, "  serve [--addr <addr>] [--drafts-dir <dir>] [--auth-token <tok>] [--audit-log <path>] [--webhook-url <url>]")
+	fmt.Fprintln(os.Stderr, "  serve [--addr <addr>] [--drafts-dir <dir>] [--auth-token <tok>] [--audit-log <path>] [--webhook-url <url>] [--webhook-secret <sec>]")
 	fmt.Fprintln(os.Stderr, "                              Start Cloud Control Plane HTTP daemon and Web UI")
 	fmt.Fprintln(os.Stderr, "  mcp                         Start Model Context Protocol (MCP) stdio server")
 }

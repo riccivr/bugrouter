@@ -209,6 +209,18 @@ func (s *Server) handleApproveDraft(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if draft.Status == "submitted" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusConflict)
+		if encErr := json.NewEncoder(w).Encode(map[string]string{
+			"error":     "draft already submitted",
+			"issue_url": draft.SubmissionURL,
+		}); encErr != nil {
+			http.Error(w, fmt.Sprintf("encode json: %v", encErr), http.StatusInternalServerError)
+		}
+		return
+	}
+
 	remoteIP, _, ipErr := net.SplitHostPort(r.RemoteAddr)
 	if ipErr != nil {
 		remoteIP = r.RemoteAddr
@@ -299,6 +311,18 @@ func (s *Server) handleDiscardDraft(w http.ResponseWriter, r *http.Request) {
 	draft, err := s.draftStore.Get(id)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("get draft %s: %v", id, err), http.StatusNotFound)
+		return
+	}
+
+	if draft.Status == "submitted" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusConflict)
+		if encErr := json.NewEncoder(w).Encode(map[string]string{
+			"error":     "draft already submitted",
+			"issue_url": draft.SubmissionURL,
+		}); encErr != nil {
+			http.Error(w, fmt.Sprintf("encode json: %v", encErr), http.StatusInternalServerError)
+		}
 		return
 	}
 

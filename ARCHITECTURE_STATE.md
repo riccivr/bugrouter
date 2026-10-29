@@ -1,7 +1,7 @@
 # ARCHITECTURE_STATE.md — bugrouter System Architecture & Handoff
 
 Current CalVer: **2026.10.0**  
-Status: **Milestone 4 Spec 09.1 Completed** (Post-Spec #09 Red-Team Remediation + v1.0 Release Lock + SSRF Env Bypass Removal + Body File Subheading Preservation + Scrubber Trailing Quote Handling)
+Status: **Milestone 4 Spec 10 Completed** (CLI/README Parity + MCP Audit Trail Integration + Idempotent Approval Guard + Private Repository Auth Headers)
 
 ---
 
@@ -135,3 +135,11 @@ TemplateSchema                             PotentialDuplicates
 - Updated `cmd/bugrouter/main_test.go` to use `httpx.NewTestClient(0)` directly without relying on process-level environment variable overrides.
 - Fixed subheading drop bug in `cmd/bugrouter/main.go` (`parseMarkdownBodyFile`): ensured level-3+ subheadings (`### ...`) inside active sections (`## Summary`, `## Logs`) are preserved as regular section content rather than resetting the active section.
 - Hardened quoted generic secret redaction in `internal/scrubber/scrubber.go`: separated trailing quotes from captured values before evaluating length thresholds and non-secret literals, preserving trailing quotes in redaction replacements (`CLIENT_SECRET="[REDACTED_SECRET]"`) and preventing false-positive redaction on quoted short values (`token="short"`).
+
+### Spec #10: CLI/README Parity, MCP Audit Trail Integration, Idempotent Approval & Private Repo Auth (COMPLETED)
+- Updated `bugrouter version` in `cmd/bugrouter/main.go` to output platform target `(%s/%s)` matching documentation parity with `README.md`.
+- Added `--webhook-secret` flag to `bugrouter serve` in `cmd/bugrouter/main.go` with fallback to `BUGROUTER_WEBHOOK_SECRET`, updating usage help and `README.md`.
+- Implemented idempotent approval guard in `internal/cloud/server.go` (HTTP 409 Conflict with `{"error": "draft already submitted", "issue_url": ...}`) and `internal/mcp/server.go` (`isError: true` stating `"draft is already submitted"`), preventing duplicate ticket submissions.
+- Integrated `AuditLogger` and `WebhookNotifier` into `mcp.Server` in `internal/mcp/server.go`, recording `draft.approved` and `draft.submit_failed` audit events from MCP tool invocations with `RemoteIP: "mcp-stdio"`.
+- Extended `httpx.Client` with `GetBytesWithHeaders` in `internal/httpx/client.go` to support custom authorization headers.
+- Added environment token authentication in `internal/introspector/introspector.go` and `internal/dedup/dedup.go` for GitHub (`GITHUB_TOKEN`, `GH_TOKEN`, `BUGROUTER_GITHUB_TOKEN`) and GitLab (`GITLAB_TOKEN`, `GL_TOKEN`, `BUGROUTER_GITLAB_TOKEN`), resolving access on private enterprise repositories and lifting unauthenticated rate limits.

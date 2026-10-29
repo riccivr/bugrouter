@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"os"
 	"sort"
 	"strings"
 
@@ -128,6 +129,24 @@ func extractGitHubOwnerRepo(target resolver.Target) (string, string, error) {
 	return owner, repo, nil
 }
 
+func gitHubAuthHeader() map[string]string {
+	for _, env := range []string{"GITHUB_TOKEN", "GH_TOKEN", "BUGROUTER_GITHUB_TOKEN"} {
+		if tok := os.Getenv(env); tok != "" {
+			return map[string]string{"Authorization": "Bearer " + tok}
+		}
+	}
+	return nil
+}
+
+func gitLabAuthHeader() map[string]string {
+	for _, env := range []string{"GITLAB_TOKEN", "GL_TOKEN", "BUGROUTER_GITLAB_TOKEN"} {
+		if tok := os.Getenv(env); tok != "" {
+			return map[string]string{"PRIVATE-TOKEN": tok}
+		}
+	}
+	return nil
+}
+
 func (intro *Introspector) introspectGitHub(ctx context.Context, target resolver.Target) (*TemplateSchema, error) {
 	owner, repo, err := extractGitHubOwnerRepo(target)
 	if err != nil {
@@ -151,7 +170,7 @@ func (intro *Introspector) introspectGitHub(ctx context.Context, target resolver
 	dirURL := fmt.Sprintf("%s/repos/%s/%s/contents/.github/ISSUE_TEMPLATE", baseURL, owner, repo)
 
 	var candidates []ghContentItem
-	data, err := intro.client.GetBytes(ctx, dirURL, "application/json")
+	data, err := intro.client.GetBytesWithHeaders(ctx, dirURL, "application/json", gitHubAuthHeader())
 	if err == nil {
 		var items []ghContentItem
 		if unmarshalErr := json.Unmarshal(data, &items); unmarshalErr == nil {
@@ -166,7 +185,7 @@ func (intro *Introspector) introspectGitHub(ctx context.Context, target resolver
 
 	if len(candidates) == 0 {
 		fileURL := fmt.Sprintf("%s/repos/%s/%s/contents/.github/ISSUE_TEMPLATE.md", baseURL, owner, repo)
-		fileData, fileErr := intro.client.GetBytes(ctx, fileURL, "application/json")
+		fileData, fileErr := intro.client.GetBytesWithHeaders(ctx, fileURL, "application/json", gitHubAuthHeader())
 		if fileErr != nil {
 			return nil, ErrNoTemplateFound
 		}
@@ -209,13 +228,13 @@ func (intro *Introspector) introspectGitHub(ctx context.Context, target resolver
 	best := candidates[0]
 	var rawData []byte
 	if best.DownloadURL != "" {
-		rawData, err = intro.client.GetBytes(ctx, best.DownloadURL, "text/plain")
+		rawData, err = intro.client.GetBytesWithHeaders(ctx, best.DownloadURL, "text/plain", gitHubAuthHeader())
 		if err != nil {
 			return nil, fmt.Errorf("fetch raw template %s: %w", best.DownloadURL, err)
 		}
 	} else {
 		rawURL := fmt.Sprintf("%s/repos/%s/%s/contents/.github/ISSUE_TEMPLATE/%s", baseURL, owner, repo, best.Name)
-		rawData, err = intro.client.GetBytes(ctx, rawURL, "application/vnd.github.v3.raw")
+		rawData, err = intro.client.GetBytesWithHeaders(ctx, rawURL, "application/vnd.github.v3.raw", gitHubAuthHeader())
 		if err != nil {
 			return nil, fmt.Errorf("fetch raw template %s: %w", rawURL, err)
 		}
@@ -271,7 +290,7 @@ func (intro *Introspector) introspectGitLab(ctx context.Context, target resolver
 
 	treeURL := fmt.Sprintf("%s/api/v4/projects/%s/repository/tree?path=.gitlab/issue_templates", baseURL, encodedPath)
 
-	data, err := intro.client.GetBytes(ctx, treeURL, "application/json")
+	data, err := intro.client.GetBytesWithHeaders(ctx, treeURL, "application/json", gitLabAuthHeader())
 	if err != nil {
 		return nil, ErrNoTemplateFound
 	}
@@ -309,7 +328,7 @@ func (intro *Introspector) introspectGitLab(ctx context.Context, target resolver
 	encodedFilePath := url.PathEscape(filePath)
 
 	rawURL := fmt.Sprintf("%s/api/v4/projects/%s/repository/files/%s/raw?ref=HEAD", baseURL, encodedPath, encodedFilePath)
-	rawData, err := intro.client.GetBytes(ctx, rawURL, "text/plain")
+	rawData, err := intro.client.GetBytesWithHeaders(ctx, rawURL, "text/plain", gitLabAuthHeader())
 	if err != nil {
 		return nil, fmt.Errorf("fetch gitlab raw template %s: %w", rawURL, err)
 	}
