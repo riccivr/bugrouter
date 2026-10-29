@@ -123,6 +123,104 @@ func TestOSPackageProbeUnknown(t *testing.T) {
 	}
 }
 
+func TestOSPackageProbeRPM(t *testing.T) {
+	fakeLookPath := func(file string) (string, error) {
+		if file == "rg" {
+			return "/usr/bin/rg", nil
+		}
+		return "", errors.New("not found")
+	}
+
+	fakeRunner := func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		if name == "dpkg" || name == "dpkg-query" || name == "apt-cache" {
+			return nil, errors.New("not a debian system")
+		}
+		if name == "rpm" && len(args) >= 4 && args[0] == "-qf" && args[1] == "--qf" && args[3] == "/usr/bin/rg" {
+			return []byte("ripgrep\n"), nil
+		}
+		if name == "rpm" && len(args) >= 2 && args[0] == "-qi" && args[1] == "ripgrep" {
+			out := `Name        : ripgrep
+Version     : 14.1.0
+Release     : 1.fc40
+Architecture: x86_64
+URL         : https://github.com/BurntSushi/ripgrep
+Bug URL     : https://bugz.fedoraproject.org/ripgrep
+Summary     : Fast search tool based on Rust's regex engine
+`
+			return []byte(out), nil
+		}
+		return nil, errors.New("command failed")
+	}
+
+	probe := &OSPackageProbe{
+		run:      fakeRunner,
+		lookPath: fakeLookPath,
+	}
+
+	target, err := probe.Resolve(context.Background(), "rg")
+	if err != nil {
+		t.Fatalf("resolve rg via rpm: %v", err)
+	}
+	if target.CanonicalName != "ripgrep" {
+		t.Errorf("CanonicalName = %q, want ripgrep", target.CanonicalName)
+	}
+	if target.LocalVersion != "14.1.0" {
+		t.Errorf("LocalVersion = %q, want 14.1.0", target.LocalVersion)
+	}
+	if target.Tracker.Protocol != ProtocolGitHub {
+		t.Errorf("Protocol = %q, want github", target.Tracker.Protocol)
+	}
+	if target.Tracker.URL != "https://github.com/BurntSushi/ripgrep/issues" {
+		t.Errorf("URL = %q, want https://github.com/BurntSushi/ripgrep/issues", target.Tracker.URL)
+	}
+}
+
+func TestOSPackageProbePacman(t *testing.T) {
+	fakeLookPath := func(file string) (string, error) {
+		if file == "rg" {
+			return "/usr/bin/rg", nil
+		}
+		return "", errors.New("not found")
+	}
+
+	fakeRunner := func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		if name == "dpkg" || name == "dpkg-query" || name == "apt-cache" || name == "rpm" {
+			return nil, errors.New("not supported")
+		}
+		if name == "pacman" && len(args) >= 2 && args[0] == "-Qoq" && args[1] == "/usr/bin/rg" {
+			return []byte("ripgrep\n"), nil
+		}
+		if name == "pacman" && len(args) >= 2 && args[0] == "-Qi" && args[1] == "ripgrep" {
+			out := `Name            : ripgrep
+Version         : 14.1.0-1
+URL             : https://github.com/BurntSushi/ripgrep
+Packager        : Arch Linux
+`
+			return []byte(out), nil
+		}
+		return nil, errors.New("command failed")
+	}
+
+	probe := &OSPackageProbe{
+		run:      fakeRunner,
+		lookPath: fakeLookPath,
+	}
+
+	target, err := probe.Resolve(context.Background(), "rg")
+	if err != nil {
+		t.Fatalf("resolve rg via pacman: %v", err)
+	}
+	if target.CanonicalName != "ripgrep" {
+		t.Errorf("CanonicalName = %q, want ripgrep", target.CanonicalName)
+	}
+	if target.LocalVersion != "14.1.0-1" {
+		t.Errorf("LocalVersion = %q, want 14.1.0-1", target.LocalVersion)
+	}
+	if target.Tracker.Protocol != ProtocolGitHub {
+		t.Errorf("Protocol = %q, want github", target.Tracker.Protocol)
+	}
+}
+
 func TestDefaultCmdRunnerPipeDeadlock(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()

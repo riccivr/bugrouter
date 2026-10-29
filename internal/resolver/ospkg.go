@@ -165,6 +165,82 @@ func parseAptCacheShow(output string) (*osPkgMeta, error) {
 	return meta, nil
 }
 
+func parseRPMQueryInfo(output string) (*osPkgMeta, error) {
+	scanner := bufio.NewScanner(strings.NewReader(output))
+	meta := &osPkgMeta{}
+	found := false
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		key, val, ok := strings.Cut(line, ":")
+		if !ok {
+			continue
+		}
+		key = strings.TrimSpace(key)
+		val = strings.TrimSpace(val)
+
+		switch key {
+		case "Name":
+			meta.name = val
+			found = true
+		case "Version":
+			meta.version = val
+		case "URL":
+			meta.homepage = val
+		case "Bug URL":
+			meta.bugs = val
+		case "Packager":
+			if meta.maintainer == "" {
+				meta.maintainer = val
+			}
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("scan rpm output: %w", err)
+	}
+	if !found || meta.name == "" {
+		return nil, ErrNotFound
+	}
+	return meta, nil
+}
+
+func parsePacmanQueryInfo(output string) (*osPkgMeta, error) {
+	scanner := bufio.NewScanner(strings.NewReader(output))
+	meta := &osPkgMeta{}
+	found := false
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		key, val, ok := strings.Cut(line, ":")
+		if !ok {
+			continue
+		}
+		key = strings.TrimSpace(key)
+		val = strings.TrimSpace(val)
+
+		switch key {
+		case "Name":
+			meta.name = val
+			found = true
+		case "Version":
+			meta.version = val
+		case "URL":
+			meta.homepage = val
+		case "Packager":
+			meta.maintainer = val
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("scan pacman output: %w", err)
+	}
+	if !found || meta.name == "" {
+		return nil, ErrNotFound
+	}
+	return meta, nil
+}
+
 // Resolve searches system binary paths and dpkg/apt metadata to identify the upstream tracker.
 func (p *OSPackageProbe) Resolve(ctx context.Context, query string) (*Target, error) {
 	if strings.ContainsAny(query, "/\\ \t\r\n") || strings.HasPrefix(query, "-") {
@@ -172,7 +248,9 @@ func (p *OSPackageProbe) Resolve(ctx context.Context, query string) (*Target, er
 	}
 
 	candidatePkg := query
-	if resolvedPath, err := p.lookPath(query); err == nil && resolvedPath != "" {
+	var resolvedPath string
+	if pth, err := p.lookPath(query); err == nil && pth != "" {
+		resolvedPath = pth
 		out, err := p.run(ctx, "dpkg", "-S", resolvedPath)
 		if err != nil && strings.HasPrefix(resolvedPath, "/bin/") {
 			usrPath := "/usr/bin/" + strings.TrimPrefix(resolvedPath, "/bin/")
@@ -208,15 +286,51 @@ func (p *OSPackageProbe) Resolve(ctx context.Context, query string) (*Target, er
 
 	// 2. Fallback to apt-cache show
 	if meta == nil {
-		aptOut, err := p.run(ctx, "apt-cache", "show", candidatePkg)
-		if err != nil {
-			return nil, ErrNotFound
+		if aptOut, aptErr := p.run(ctx, "apt-cache", "show", candidatePkg); aptErr == nil {
+			if parsed, parseErr := parseAptCacheShow(string(aptOut)); parseErr == nil {
+				meta = parsed
+			}
 		}
-		parsed, err := parseAptCacheShow(string(aptOut))
-		if err != nil {
-			return nil, ErrNotFound
+	}
+
+	// 3. Fallback to RPM (Fedora, RHEL, CentOS, openSUSE)
+	if meta == nil {
+		rpmCandidate := query
+		if resolvedPath != "" {
+			if rpmQf, qfErr := p.run(ctx, "rpm", "-qf", "--qf", "%{NAME}\n", resolvedPath); qfErr == nil {
+				lines := strings.Split(strings.TrimSpace(string(rpmQf)), "\n")
+				if len(lines) > 0 && strings.TrimSpace(lines[0]) != "" {
+					rpmCandidate = strings.TrimSpace(lines[0])
+				}
+			}
 		}
-		meta = parsed
+		if rpmOut, rpmErr := p.run(ctx, "rpm", "-qi", rpmCandidate); rpmErr == nil {
+			if parsed, parseErr := parseRPMQueryInfo(string(rpmOut)); parseErr == nil {
+				meta = parsed
+			}
+		}
+	}
+
+	// 4. Fallback to Pacman (Arch Linux)
+	if meta == nil {
+		pacmanCandidate := query
+		if resolvedPath != "" {
+			if pacmanQo, qoErr := p.run(ctx, "pacman", "-Qoq", resolvedPath); qoErr == nil {
+				lines := strings.Split(strings.TrimSpace(string(pacmanQo)), "\n")
+				if len(lines) > 0 && strings.TrimSpace(lines[0]) != "" {
+					pacmanCandidate = strings.TrimSpace(lines[0])
+				}
+			}
+		}
+		if pacmanOut, pacmanErr := p.run(ctx, "pacman", "-Qi", pacmanCandidate); pacmanErr == nil {
+			if parsed, parseErr := parsePacmanQueryInfo(string(pacmanOut)); parseErr == nil {
+				meta = parsed
+			}
+		}
+	}
+
+	if meta == nil {
+		return nil, ErrNotFound
 	}
 
 	canonicalName := meta.name
@@ -224,21 +338,28 @@ func (p *OSPackageProbe) Resolve(ctx context.Context, query string) (*Target, er
 		canonicalName = candidatePkg
 	}
 
-	hasUpstreamGit := strings.Contains(meta.bugs, "github.com") ||
+	hasUpstreamBugs := strings.Contains(meta.bugs, "github.com") ||
 		strings.Contains(meta.bugs, "gitlab.") ||
 		strings.Contains(meta.bugs, "codeberg.org") ||
 		strings.Contains(meta.bugs, "sr.ht")
 
+	hasUpstreamHomepage := strings.Contains(meta.homepage, "github.com") ||
+		strings.Contains(meta.homepage, "gitlab.") ||
+		strings.Contains(meta.homepage, "codeberg.org") ||
+		strings.Contains(meta.homepage, "sr.ht")
+
 	var tracker TrackerInfo
 	var normRepo string
 
-	if !hasUpstreamGit && (strings.Contains(meta.homepage, "gnu.org/software/") || strings.Contains(meta.maintainer, "@gnu.org")) {
+	if !hasUpstreamBugs && (strings.Contains(meta.homepage, "gnu.org/software/") || strings.Contains(meta.maintainer, "@gnu.org")) {
 		tracker = TrackerInfo{
 			Protocol: ProtocolDebbugs,
 			Email:    "bug-" + canonicalName + "@gnu.org",
 			URL:      "https://debbugs.gnu.org/cgi/pkgreport.cgi?package=" + canonicalName,
 		}
 		normRepo = NormalizeRepoURL(meta.homepage)
+	} else if !hasUpstreamBugs && hasUpstreamHomepage {
+		tracker, normRepo = ClassifyTracker("", "", meta.homepage)
 	} else {
 		tracker, normRepo = ClassifyTracker(meta.bugs, "", meta.homepage)
 	}
