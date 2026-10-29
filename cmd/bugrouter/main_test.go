@@ -277,3 +277,112 @@ Fatal error reading config from /home/alice/secret.txt
 		t.Errorf("retrieved target = %q, want checkout-api", retrieved.Target.CanonicalName)
 	}
 }
+
+func TestAgentCrashLogAttributionPipeline(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", filepath.Join(tempDir, "data"))
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(tempDir, "cache"))
+
+	crashLog := `panic: runtime error: slice bounds out of range [:20] with capacity 10
+
+goroutine 1 [running]:
+github.com/example/worker.ProcessItems(0xc000088000)
+	/go/pkg/mod/github.com/example/worker@v1.2.0/process.go:88 +0x34
+main.main()
+	/app/main.go:24 +0x50
+`
+
+	logFile := filepath.Join(tempDir, "crash.log")
+	if err := os.WriteFile(logFile, []byte(crashLog), 0600); err != nil {
+		t.Fatalf("write crash log: %v", err)
+	}
+
+	// 1. Trace Attribution
+	rep := resolver.ParseCrashTrace(crashLog)
+	if rep == nil {
+		t.Fatal("expected non-nil crash report")
+	}
+	if rep.Language != "go" {
+		t.Errorf("rep.Language = %q, want go", rep.Language)
+	}
+	if rep.PrimaryTarget != "github.com/example/worker" {
+		t.Errorf("rep.PrimaryTarget = %q, want github.com/example/worker", rep.PrimaryTarget)
+	}
+	if rep.CulpritLine != 88 {
+		t.Errorf("rep.CulpritLine = %d, want 88", rep.CulpritLine)
+	}
+
+	// 2. Resolve Target
+	httpClient := httpx.NewTestClient(0)
+	target, err := resolveTarget(context.Background(), httpClient, rep.PrimaryTarget, true)
+	if err != nil {
+		t.Fatalf("resolveTarget failed: %v", err)
+	}
+	if target.Tracker.Protocol != resolver.ProtocolGitHub {
+		t.Errorf("target protocol = %s, want github", target.Tracker.Protocol)
+	}
+
+	// 3. Build Draft
+	title := rep.SuggestedTitle()
+	summary := rep.SuggestedSummary()
+	steps := rep.SuggestedSteps()
+	logs := rep.CleanTrace()
+
+	draft, err := adapter.BuildDraft(adapter.DraftInput{
+		Target:           *target,
+		Title:            title,
+		Summary:          summary,
+		StepsToReproduce: steps,
+		Logs:             logs,
+	})
+	if err != nil {
+		t.Fatalf("BuildDraft failed: %v", err)
+	}
+
+	// 4. Quality Verification
+	if draft.Quality == nil {
+		t.Fatal("expected non-nil Quality report")
+	}
+	if !draft.Quality.Passed {
+		t.Errorf("expected auto-generated crash draft to pass quality gate: %v", draft.Quality.Violations)
+	}
+	if draft.Quality.Score != 1.0 {
+		t.Errorf("Score = %.2f, want 1.0", draft.Quality.Score)
+	}
+
+	// 5. Save Draft
+	store := adapter.NewDraftStore("")
+	savedPath, err := store.Save(draft)
+	if err != nil {
+		t.Fatalf("save draft: %v", err)
+	}
+	if _, err := os.Stat(savedPath); err != nil {
+		t.Errorf("saved draft file missing: %v", err)
+	}
+}
+
+func TestAgentStrictQualityRejection(t *testing.T) {
+	badInput := adapter.DraftInput{
+		Target: resolver.Target{
+			CanonicalName: "my-package",
+		},
+		Title:            "Crash when we delve into configuration — critical error 🚀",
+		Summary:          "I hope this helps! We must analyze this landscape.",
+		StepsToReproduce: "1. Run app.",
+	}
+
+	draft, err := adapter.BuildDraft(badInput)
+	if err != nil {
+		t.Fatalf("BuildDraft failed: %v", err)
+	}
+
+	if draft.Quality == nil {
+		t.Fatal("expected Quality report on staged draft")
+	}
+	if draft.Quality.Passed {
+		t.Errorf("expected draft with slop to fail quality check")
+	}
+	if len(draft.Quality.Violations) == 0 {
+		t.Errorf("expected violations in quality report")
+	}
+}

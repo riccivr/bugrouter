@@ -343,6 +343,32 @@ func (s *Server) toolDefinitions() []map[string]any {
 				"required": []string{"id"},
 			},
 		},
+		{
+			"name":        "triage_crash_log",
+			"description": "Analyzes raw crash logs or stack traces, deterministically attributes failures to upstream dependencies, scrubs credentials, checks duplicates, and stages a quality-gated draft.",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"log": map[string]any{
+						"type":        "string",
+						"description": "Raw crash log, stack trace, or panic output to analyze",
+					},
+					"target": map[string]any{
+						"type":        "string",
+						"description": "Optional target package name or repository query to override auto-attribution",
+					},
+					"title": map[string]any{
+						"type":        "string",
+						"description": "Optional bug report title override",
+					},
+					"strict_quality": map[string]any{
+						"type":        "boolean",
+						"description": "If true, enforces strict anti-slop quality gating and rejects drafts with violations",
+					},
+				},
+				"required": []string{"log"},
+			},
+		},
 	}
 }
 
@@ -737,6 +763,127 @@ func (s *Server) handleToolCall(ctx context.Context, params toolCallParams) tool
 		if err != nil {
 			return toolCallResult{
 				Content: []toolContent{{Type: "text", Text: fmt.Sprintf("marshal response: %v", err)}},
+				IsError: true,
+			}
+		}
+		return toolCallResult{
+			Content: []toolContent{{Type: "text", Text: string(data)}},
+			IsError: false,
+		}
+
+	case "triage_crash_log":
+		var args struct {
+			Log           string `json:"log"`
+			Target        string `json:"target"`
+			Title         string `json:"title"`
+			StrictQuality bool   `json:"strict_quality"`
+		}
+		if err := json.Unmarshal(params.Arguments, &args); err != nil {
+			return toolCallResult{
+				Content: []toolContent{{Type: "text", Text: fmt.Sprintf("parse arguments: %v", err)}},
+				IsError: true,
+			}
+		}
+		if strings.TrimSpace(args.Log) == "" {
+			return toolCallResult{
+				Content: []toolContent{{Type: "text", Text: "log parameter cannot be empty"}},
+				IsError: true,
+			}
+		}
+
+		attributor := resolver.NewTraceAttributor(s.resolver)
+		var resolvedTarget *resolver.Target
+		var rep *resolver.CrashReport
+
+		if strings.TrimSpace(args.Target) != "" {
+			var err error
+			resolvedTarget, err = s.resolver.Resolve(ctx, args.Target)
+			if err != nil {
+				return toolCallResult{
+					Content: []toolContent{{Type: "text", Text: fmt.Sprintf("resolve target %s: %v", args.Target, err)}},
+					IsError: true,
+				}
+			}
+			rep = resolver.ParseCrashTrace(args.Log)
+			rep.PrimaryTarget = resolvedTarget.CanonicalName
+		} else {
+			var err error
+			resolvedTarget, rep, err = attributor.AttributeAndResolve(ctx, args.Log)
+			if err != nil && resolvedTarget == nil {
+				if rep != nil && rep.PrimaryTarget != "" {
+					resolvedTarget, err = s.resolver.Resolve(ctx, rep.PrimaryTarget)
+				}
+				if resolvedTarget == nil {
+					return toolCallResult{
+						Content: []toolContent{{Type: "text", Text: fmt.Sprintf("attribute and resolve crash: %v", err)}},
+						IsError: true,
+					}
+				}
+			}
+		}
+
+		title := args.Title
+		if strings.TrimSpace(title) == "" {
+			title = rep.SuggestedTitle()
+		}
+
+		summary := rep.SuggestedSummary()
+		steps := rep.SuggestedSteps()
+		logs := rep.CleanTrace()
+
+		schema, err := s.introspector.Introspect(ctx, *resolvedTarget)
+		if err != nil {
+			schema = nil
+		}
+
+		var dups []dedup.ExistingIssue
+		if s.dedupFinder != nil {
+			if d, err := s.dedupFinder.FindDuplicates(ctx, *resolvedTarget, scrubber.Scrub(title)); err == nil {
+				dups = d
+			}
+		}
+
+		draft, err := adapter.BuildDraft(adapter.DraftInput{
+			Target:           *resolvedTarget,
+			Title:            title,
+			Summary:          summary,
+			StepsToReproduce: steps,
+			Logs:             logs,
+			Template:         schema,
+			Duplicates:       dups,
+		})
+		if err != nil {
+			return toolCallResult{
+				Content: []toolContent{{Type: "text", Text: fmt.Sprintf("build draft: %v", err)}},
+				IsError: true,
+			}
+		}
+
+		if args.StrictQuality && draft.Quality != nil && !draft.Quality.Passed {
+			violMsg := adapter.FormatViolations(draft.Quality)
+			return toolCallResult{
+				Content: []toolContent{{Type: "text", Text: fmt.Sprintf("strict quality gate rejected draft:\n%s", violMsg)}},
+				IsError: true,
+			}
+		}
+
+		if _, err := s.draftStore.Save(draft); err != nil {
+			return toolCallResult{
+				Content: []toolContent{{Type: "text", Text: fmt.Sprintf("save draft: %v", err)}},
+				IsError: true,
+			}
+		}
+
+		resMap := map[string]any{
+			"attribution": rep,
+			"target":      resolvedTarget,
+			"quality":     draft.Quality,
+			"draft":       draft,
+		}
+		data, err := json.MarshalIndent(resMap, "", "  ")
+		if err != nil {
+			return toolCallResult{
+				Content: []toolContent{{Type: "text", Text: fmt.Sprintf("marshal triage result: %v", err)}},
 				IsError: true,
 			}
 		}

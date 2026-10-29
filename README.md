@@ -34,9 +34,11 @@ Dependencies: **Standard Library Only (Zero Third-Party Dependencies)**
 - **Type-Safe Scrubber**: Produces immutable `scrubber.ScrubbedText`. Redacts AWS keys, GitHub PATs, Slack/Stripe/OpenAI tokens, PEM private keys, URI credentials, and local home directory paths (`/home/*`, `/Users/*`). Preserves short configuration literals (`true`, `false`, `null`, `nil`).
 - **Upstream Issue Template Introspection**: Discovers and maps GitHub YAML Issue Forms (`body` textareas/inputs), GitLab markdown templates (`issuable_template`), and Bugzilla product schemas.
 - **Upstream Duplicate Detection**: Searches GitHub, GitLab, and Bugzilla trackers using title keyword extraction and stop word filtering, calculating scored token overlap.
+- **Deterministic Crash & Stack Trace Attribution**: Parses raw crash logs and stack traces across Go, Python, Node.js, Rust, and native binaries to identify culprit files, line numbers, and candidate upstream dependencies.
+- **Anti-Slop Quality Gate**: Evaluates draft quality against AI buzzwords, conversational chatbot filler, em dashes, typographic curly quotes, decorative emojis, and placeholders with strict gating (`--strict-quality`).
 - **Human-in-the-Loop Review Queue**: Embedded Web UI and REST API (`/api/v1/drafts`) for manual triage, review, and one-click dispatch via OAuth/PAT connectors.
 - **Hardened Cloud Security**: SHA-256 pre-hashed constant-time Bearer auth (`crypto/subtle.ConstantTimeCompare`), CSRF origin guards, append-only audit trail (`audit.log`), and HMAC-SHA256 signed webhooks (`X-Bugrouter-Signature`).
-- **Model Context Protocol (MCP)**: Native stdio JSON-RPC 2.0 server (spec `2024-11-05`) exposing 7 specialized agent tools.
+- **Model Context Protocol (MCP)**: Native stdio JSON-RPC 2.0 server (spec `2024-11-05`) exposing 8 specialized agent tools.
 
 ---
 
@@ -117,6 +119,22 @@ Detailed explanation of what failed.
 Console output or stack trace (secrets will be automatically redacted).
 ```
 
+### Autonomous Agent Mode (`bugrouter agent`)
+Run autonomous, headless triage of raw crash logs or stack traces with deterministic attribution and anti-slop gating:
+```bash
+# Triage a crash log from file with strict anti-slop enforcement
+bugrouter agent --log-file ./panic.log --strict-quality
+
+# Triage piped crash log from stdin
+cat server-crash.log | bugrouter agent --log-file - --strict-quality
+
+# Triage with JSON output for programmatic agent loops
+bugrouter agent --log-file ./traceback.log --json
+
+# Triage with explicit target override
+bugrouter agent --log-file ./segfault.log --target "openssl" --strict-quality
+```
+
 ### Serve Cloud Control Plane
 Start the embedded review queue Web UI and control plane daemon:
 ```bash
@@ -155,7 +173,7 @@ Add `bugrouter` to your MCP client configuration (e.g., `claude_desktop_config.j
 }
 ```
 
-### Available MCP Tools (7 Total)
+### Available MCP Tools (8 Total)
 
 | Tool Name | Parameters | Description |
 | :--- | :--- | :--- |
@@ -166,6 +184,7 @@ Add `bugrouter` to your MCP client configuration (e.g., `claude_desktop_config.j
 | `draft_bug_report` | `query` (string), `title` (string), `summary` (string), `steps_to_reproduce` (string), `logs` (string) | Resolves target, scrubs credentials, introspects template, finds duplicates, stages draft to disk, and returns structured ticket with pre-filled submission URLs. |
 | `list_staged_drafts` | `status` (string, optional) | Lists all staged bug drafts pending review or approval (`pending_review`, `submitted`, `discarded`). |
 | `approve_draft` | `id` (string) | Approves and submits a staged draft to its upstream tracker via authenticated OAuth connectors. |
+| `triage_crash_log` | `log` (string), `target` (string, optional), `title` (string, optional), `strict_quality` (bool, optional) | Analyzes raw crash logs or stack traces, deterministically attributes failures to upstream dependencies, scrubs credentials, checks duplicates, and stages a quality-gated draft. |
 
 ---
 

@@ -519,3 +519,29 @@ func TestBuildDraftDuplicates(t *testing.T) {
 		t.Errorf("unexpected duplicate: %+v", dup)
 	}
 }
+
+func TestBuildDraftQualityReport(t *testing.T) {
+	in := DraftInput{
+		Target: resolver.Target{
+			CanonicalName: "my-app",
+			Tracker: resolver.TrackerInfo{
+				Protocol: resolver.ProtocolGitHub,
+				URL:      "https://github.com/org/my-app/issues",
+			},
+		},
+		Title:            "Memory leak in streaming worker",
+		Summary:          "Memory usage grows unbounded during long-lived websocket connections.",
+		StepsToReproduce: "1. Open connection.\n2. Stream 100k messages.\n3. Observe memory growth.",
+	}
+
+	draft, err := BuildDraft(in)
+	if err != nil {
+		t.Fatalf("BuildDraft failed: %v", err)
+	}
+	if draft.Quality == nil {
+		t.Fatalf("expected Quality report on staged draft, got nil")
+	}
+	if !draft.Quality.Passed {
+		t.Errorf("expected clean draft to pass quality check, got violations: %v", draft.Quality.Violations)
+	}
+}

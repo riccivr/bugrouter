@@ -48,6 +48,7 @@ type StagedDraft struct {
 	DebbugsEmail        string                       `json:"debbugs_email,omitempty"`
 	Template            *introspector.TemplateSchema `json:"template,omitempty"`
 	PotentialDuplicates []dedup.ExistingIssue        `json:"potential_duplicates,omitempty"`
+	Quality             *QualityReport               `json:"quality,omitempty"`
 }
 
 func generateDraftID() (string, error) {
@@ -316,7 +317,7 @@ func BuildDraft(in DraftInput) (*StagedDraft, error) {
 		submissionURL = trackerURL
 	}
 
-	return &StagedDraft{
+	draft := &StagedDraft{
 		ID:                  id,
 		CreatedAt:           time.Now().UTC(),
 		Status:              "pending_review",
@@ -327,7 +328,9 @@ func BuildDraft(in DraftInput) (*StagedDraft, error) {
 		DebbugsEmail:        debbugsEmail,
 		Template:            in.Template,
 		PotentialDuplicates: in.Duplicates,
-	}, nil
+	}
+	draft.Quality = LintInput(in)
+	return draft, nil
 }
 
 // ForgeSubmitter represents an authenticated connector for upstream forges.

@@ -126,8 +126,8 @@ body:
 	}
 	res3 := resp3.Result.(map[string]any)
 	tools := res3["tools"].([]any)
-	if len(tools) != 7 {
-		t.Errorf("expected 7 tools, got %d", len(tools))
+	if len(tools) != 8 {
+		t.Errorf("expected 8 tools, got %d", len(tools))
 	}
 
 	// Response 4: tools/call scrub_text
@@ -287,5 +287,97 @@ body:
 	contentApproveAgain := resApproveAgain["content"].([]any)[0].(map[string]any)["text"].(string)
 	if !strings.Contains(contentApproveAgain, "draft is already submitted") {
 		t.Errorf("second approve_draft error message = %q, want 'draft is already submitted'", contentApproveAgain)
+	}
+}
+
+func TestTriageCrashLogTool(t *testing.T) {
+	tempDir := t.TempDir()
+	store := adapter.NewDraftStore(tempDir)
+	wf := resolver.NewWaterfall(0, resolver.NewDirectProbe())
+	server := NewServer(wf, store)
+
+	log := `Traceback (most recent call last):
+  File "/app/main.py", line 45, in <module>
+    fetch_data()
+  File "/app/main.py", line 32, in fetch_data
+    response = requests.get("https://example.com")
+  File "/usr/local/lib/python3.11/site-packages/requests/api.py", line 73, in get
+    return request("get", url, params=params, **kwargs)
+  File "/usr/local/lib/python3.11/site-packages/requests/adapters.py", line 520, in send
+    raise SSLError(e, request=request)
+requests.exceptions.SSLError: HTTPSConnectionPool(host='example.com', port=443): Max retries exceeded
+`
+
+	// 1. Success case with explicit direct target
+	var in, out bytes.Buffer
+	reqPayload := map[string]any{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"method":  "tools/call",
+		"params": map[string]any{
+			"name": "triage_crash_log",
+			"arguments": map[string]any{
+				"log":    log,
+				"target": "https://github.com/psf/requests",
+			},
+		},
+	}
+	reqBytes, _ := json.Marshal(reqPayload)
+	in.Write(append(reqBytes, '\n'))
+
+	if err := server.Run(context.Background(), &in, &out); err != nil {
+		t.Fatalf("server.Run failed: %v", err)
+	}
+
+	var resp jsonrpcResponse
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out.String())), &resp); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+
+	resMap := resp.Result.(map[string]any)
+	if resMap["isError"] != false {
+		t.Fatalf("triage_crash_log isError = true: %v", resMap)
+	}
+
+	rawText := resMap["content"].([]any)[0].(map[string]any)["text"].(string)
+	if !strings.Contains(rawText, "SSLError") || !strings.Contains(rawText, "https://github.com/psf/requests") {
+		t.Errorf("triage result missing expected tokens: %s", rawText)
+	}
+
+	// 2. Strict quality violation test
+	var inStrict, outStrict bytes.Buffer
+	reqStrictPayload := map[string]any{
+		"jsonrpc": "2.0",
+		"id":      2,
+		"method":  "tools/call",
+		"params": map[string]any{
+			"name": "triage_crash_log",
+			"arguments": map[string]any{
+				"log":            log,
+				"target":         "https://github.com/psf/requests",
+				"title":          "Crash when we delve into network requests",
+				"strict_quality": true,
+			},
+		},
+	}
+	reqStrictBytes, _ := json.Marshal(reqStrictPayload)
+	inStrict.Write(append(reqStrictBytes, '\n'))
+
+	if err := server.Run(context.Background(), &inStrict, &outStrict); err != nil {
+		t.Fatalf("server.Run strict failed: %v", err)
+	}
+
+	var respStrict jsonrpcResponse
+	if err := json.Unmarshal([]byte(strings.TrimSpace(outStrict.String())), &respStrict); err != nil {
+		t.Fatalf("unmarshal strict response: %v", err)
+	}
+
+	resStrictMap := respStrict.Result.(map[string]any)
+	if resStrictMap["isError"] != true {
+		t.Errorf("expected isError = true for strict quality violation, got false")
+	}
+	contentStrict := resStrictMap["content"].([]any)[0].(map[string]any)["text"].(string)
+	if !strings.Contains(contentStrict, "strict quality gate rejected draft") || !strings.Contains(contentStrict, "delve") {
+		t.Errorf("expected strict rejection mentioning delve, got: %s", contentStrict)
 	}
 }
