@@ -136,6 +136,19 @@ bugrouter agent verify --cmd "npm test"
 bugrouter agent verify --cmd "python -m pytest tests/test_crash.py" --expect-exit 1 --timeout 30s
 ```
 
+### Workspace Tech Stack & Downstream Radar (`bugrouter stack`)
+Scan workspace dependency manifests (`go.mod`, `package.json`, `Cargo.toml`, `pyproject.toml`, and enterprise `services.json`) to catalog dependencies and detect active upstream bugs:
+```bash
+# Scan workspace dependencies
+bugrouter stack
+
+# Scan specific directory and output JSON
+bugrouter stack --dir ./frontend --json
+
+# Scan workspace and query upstream trackers for active bugs matching dependencies
+bugrouter stack --check-upstream
+```
+
 ### Serve Cloud Control Plane
 Start the embedded review queue Web UI and control plane daemon:
 ```bash
@@ -151,7 +164,7 @@ bugrouter serve \
   --webhook-secret "hmac-signing-secret"
 ```
 
-Open `http://localhost:8080` in your browser to access the Human-in-the-Loop review dashboard and recent audit trail.
+Open `http://localhost:8080` in your browser to access the Human-in-the-Loop review dashboard, the "Connected Tech Stack & Downstream Radar" panel, and recent audit trail.
 
 ---
 
@@ -174,7 +187,7 @@ Add `bugrouter` to your MCP client configuration (e.g., `claude_desktop_config.j
 }
 ```
 
-### Available MCP Tools (9 Total)
+### Available MCP Tools (10 Total)
 
 | Tool Name | Parameters | Description |
 | :--- | :--- | :--- |
@@ -187,6 +200,7 @@ Add `bugrouter` to your MCP client configuration (e.g., `claude_desktop_config.j
 | `approve_draft` | `id` (string) | Approves and submits a staged draft to its upstream tracker via authenticated OAuth connectors. |
 | `triage_crash_log` | `log` (string), `title` (string, optional), `query` (string, optional) | Analyzes raw crash logs or stack traces, deterministically attributes failures to upstream dependencies, introspects templates, checks duplicates, and returns structured agent triage envelopes. |
 | `verify_reproduction` | `command` (string), `timeout_seconds` (integer, optional), `expect_exit` (integer, optional) | Executes a bounded reproduction command, captures and scrubs stdout/stderr, extracts faulting package candidates, and returns a deterministic VerificationProof. |
+| `scan_workspace_stack` | `dir` (string, optional), `check_upstream` (bool, optional) | Scans workspace dependency manifests (`go.mod`, `package.json`, `Cargo.toml`, `pyproject.toml`, `services.json`), resolves upstream trackers, and optionally queries upstream issues for active bugs. |
 
 ---
 

@@ -753,3 +753,97 @@ func TestWebhookNotifierUnit(t *testing.T) {
 		t.Errorf("secret = %q, want env-secret", envNotifier.secret)
 	}
 }
+
+func TestServerStackEndpoint(t *testing.T) {
+	tempDir := t.TempDir()
+	pkgJsonContent := `{
+		"dependencies": {
+			"https://github.com/myorg/worker": "1.0.0"
+		}
+	}`
+	if err := os.WriteFile(filepath.Join(tempDir, "package.json"), []byte(pkgJsonContent), 0600); err != nil {
+		t.Fatalf("write package.json: %v", err)
+	}
+
+	wf := resolver.NewWaterfall(time.Second, resolver.NewDirectProbe())
+	srv := NewServer(":0", nil, nil).WithStackScanner(wf, nil, tempDir)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	// 1. Unauthenticated request to /api/v1/stack (no auth token configured on server)
+	resp, err := http.Get(ts.URL + "/api/v1/stack")
+	if err != nil {
+		t.Fatalf("GET /api/v1/stack failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	var report struct {
+		RootDir  string `json:"root_dir"`
+		Total    int    `json:"total"`
+		Resolved int    `json:"resolved"`
+		Entries  []any  `json:"entries"`
+	}
+	if err := json.Unmarshal(body, &report); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if report.Total != 1 || report.Resolved != 1 {
+		t.Errorf("expected 1 total and resolved, got total=%d resolved=%d", report.Total, report.Resolved)
+	}
+
+	// 2. Auth token enforcement on /api/v1/stack
+	srvAuth := NewServer(":0", nil, nil).
+		WithAuthToken("super-secret-token").
+		WithStackScanner(wf, nil, tempDir)
+	tsAuth := httptest.NewServer(srvAuth.Handler())
+	defer tsAuth.Close()
+
+	// 2a. Request without token -> 401
+	respNoAuth, err := http.Get(tsAuth.URL + "/api/v1/stack")
+	if err != nil {
+		t.Fatalf("GET /api/v1/stack without auth failed: %v", err)
+	}
+	respNoAuth.Body.Close()
+	if respNoAuth.StatusCode != http.StatusUnauthorized {
+		t.Errorf("expected 401 Unauthorized, got: %d", respNoAuth.StatusCode)
+	}
+
+	// 2b. Request with valid Bearer token -> 200
+	req, err := http.NewRequest(http.MethodGet, tsAuth.URL+"/api/v1/stack", nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer super-secret-token")
+	respAuth, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("Do request with auth failed: %v", err)
+	}
+	respAuth.Body.Close()
+	if respAuth.StatusCode != http.StatusOK {
+		t.Errorf("expected 200 OK with Bearer token, got: %d", respAuth.StatusCode)
+	}
+
+	// 3. Verify HTML includes Connected Tech Stack & Downstream Radar table
+	respHTML, err := http.Get(ts.URL + "/")
+	if err != nil {
+		t.Fatalf("GET / failed: %v", err)
+	}
+	defer respHTML.Body.Close()
+	htmlData, err := io.ReadAll(respHTML.Body)
+	if err != nil {
+		t.Fatalf("read html: %v", err)
+	}
+	htmlStr := string(htmlData)
+	if !strings.Contains(htmlStr, "Connected Tech Stack &amp; Downstream Radar") {
+		t.Errorf("expected stack radar header in indexHTML")
+	}
+	if !strings.Contains(htmlStr, "stack-table") || !strings.Contains(htmlStr, "fetchStack") {
+		t.Errorf("expected stack-table and fetchStack in indexHTML")
+	}
+}

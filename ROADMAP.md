@@ -73,23 +73,34 @@ Focuses on autonomous, zero-friction developer and agent triage from terminal er
 
 ---
 
-### Milestone 6: Tech Stack Explorer & Downstream Bug Radar (Active)
+### Milestone 6: Tech Stack Explorer & Downstream Bug Radar (Completed)
 Shifts bugrouter from reactive ticket routing to proactive dependency health and upstream tracking.
 
-- **Spec #13: Workspace Stack Scanner & Downstream Radar [ACTIVE]**
+- **Spec #13: Workspace Stack Scanner & Downstream Radar [COMPLETED]**
   - Command `bugrouter stack [--json] [--check-upstream]`: recursively catalogs all dependencies across `package.json`, `go.mod`, `Cargo.toml`, and `pyproject.toml`.
   - Maps each dependency to its upstream tracker and queries trackers for active bugs matching the local installed version.
   - Adds "Connected Tech Stack & Downstream Bugs" dashboard tab to the embedded Cloud Control Plane Web UI.
+  - Exposes `scan_workspace_stack` MCP tool for AI agents.
 
 ---
 
-### Milestone 7: Desktop/PC User Mode & Hardware Telemetry (Planned)
+### Milestone 7: Desktop/PC User Mode & Hardware Telemetry (Active)
 Brings zero-dependency bug routing to desktop operating systems and everyday GUI applications.
 
-- **Spec #14: Desktop App Resolver & Hardware Telemetry Collector [PLANNED]**
+- **Spec #14: Desktop App Resolver & Hardware Telemetry Collector [ACTIVE]**
   - Package probes for Windows `winget` and Linux `flatpak`/`snap`.
   - Support for community forges and custom issue trackers (such as Gitea/Forgejo at `projects.blender.org`).
   - Native hardware telemetry collector (`internal/telemetry`) gathering GPU model, driver versions, CPU architecture, and OS kernel info without third-party dependencies.
 - **Spec #15: Guided Human Bug Wizard [PLANNED]**
   - Interactive terminal wizard (`bugrouter report <app>`) prompting users for symptoms and reproducing steps with real-time anti-slop suggestions.
   - Web UI guided composer providing step-by-step assistance for non-technical users.
+
+---
+
+### Milestone 8: GitHub Actions, CI/CD Matrix & Release Automation (Planned — Post-Stabilization)
+Automates testing, cross-compilation, and autonomous upstream triage inside GitHub Actions pipelines.
+
+- **Spec #16: GitHub Actions CI/CD & CalVer Release Pipeline [PLANNED]**
+  - `.github/workflows/ci.yml`: Zero-dependency `go fmt`, `go vet`, commit-msg lint, and `go test -race ./...` matrix across `ubuntu-latest`, `windows-latest`, and `macos-latest`.
+  - `.github/workflows/release.yml`: Reproducible `CGO_ENABLED=0` static binary cross-compilation (`linux/amd64`, `linux/arm64`, `windows/amd64`, `darwin/arm64`) triggered on CalVer tags (`YYYY.0M.MICRO`) with `SHA256SUMS` provenance.
+  - Composite GitHub Action (`action.yml`): Turnkey CI step allowing any GitHub Actions workflow to pipe failing test logs into `bugrouter agent triage` and stage anti-slop gated tickets automatically.

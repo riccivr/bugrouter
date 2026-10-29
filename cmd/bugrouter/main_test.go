@@ -438,3 +438,42 @@ func TestDraftVerifyCmdIntegration(t *testing.T) {
 		t.Errorf("expected auto-populated logs in markdown body")
 	}
 }
+
+func TestStackCommandIntegration(t *testing.T) {
+	tempDir := t.TempDir()
+
+	goMod := `module myapp
+go 1.22
+require github.com/example/lib v1.2.3
+`
+	if err := os.WriteFile(filepath.Join(tempDir, "go.mod"), []byte(goMod), 0600); err != nil {
+		t.Fatalf("write go.mod: %v", err)
+	}
+
+	pkgJson := `{
+		"dependencies": {
+			"https://github.com/example/nodepkg": "2.0.0"
+		}
+	}`
+	if err := os.WriteFile(filepath.Join(tempDir, "package.json"), []byte(pkgJson), 0600); err != nil {
+		t.Fatalf("write package.json: %v", err)
+	}
+
+	wf := resolver.NewWaterfall(time.Second, resolver.NewDirectProbe())
+	finder := dedup.NewFinder(httpx.NewTestClient(time.Second))
+
+	report, err := dedup.BuildStackRadar(context.Background(), wf, finder, tempDir, false)
+	if err != nil {
+		t.Fatalf("BuildStackRadar failed: %v", err)
+	}
+
+	if report.Total != 2 {
+		t.Errorf("report.Total = %d, want 2", report.Total)
+	}
+	if report.Resolved != 2 {
+		t.Errorf("report.Resolved = %d, want 2", report.Resolved)
+	}
+	if len(report.Entries) != 2 {
+		t.Fatalf("len(report.Entries) = %d, want 2", len(report.Entries))
+	}
+}

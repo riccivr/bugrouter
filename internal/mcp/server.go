@@ -396,6 +396,23 @@ func (s *Server) toolDefinitions() []map[string]any {
 				"required": []string{"command"},
 			},
 		},
+		{
+			"name":        "scan_workspace_stack",
+			"description": "Scans workspace manifests (services.json, go.mod, package.json, Cargo.toml, pyproject.toml), resolves each dependency to its canonical tracker, and optionally checks for downstream open bugs.",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"dir": map[string]any{
+						"type":        "string",
+						"description": "Workspace root directory to scan (default: .)",
+					},
+					"check_upstream": map[string]any{
+						"type":        "boolean",
+						"description": "Whether to query upstream trackers for open bugs affecting matching versions (default: false)",
+					},
+				},
+			},
+		},
 	}
 }
 
@@ -971,6 +988,44 @@ func (s *Server) handleToolCall(ctx context.Context, params toolCallParams) tool
 		if err != nil {
 			return toolCallResult{
 				Content: []toolContent{{Type: "text", Text: fmt.Sprintf("marshal proof: %v", err)}},
+				IsError: true,
+			}
+		}
+		return toolCallResult{
+			Content: []toolContent{{Type: "text", Text: string(data)}},
+			IsError: false,
+		}
+
+	case "scan_workspace_stack":
+		var args struct {
+			Dir           string `json:"dir"`
+			CheckUpstream bool   `json:"check_upstream"`
+		}
+		if len(params.Arguments) > 0 && string(params.Arguments) != "{}" && string(params.Arguments) != "null" {
+			if err := json.Unmarshal(params.Arguments, &args); err != nil {
+				return toolCallResult{
+					Content: []toolContent{{Type: "text", Text: fmt.Sprintf("parse arguments: %v", err)}},
+					IsError: true,
+				}
+			}
+		}
+		dir := args.Dir
+		if strings.TrimSpace(dir) == "" {
+			dir = "."
+		}
+
+		report, err := dedup.BuildStackRadar(ctx, s.resolver, s.dedupFinder, dir, args.CheckUpstream)
+		if err != nil {
+			return toolCallResult{
+				Content: []toolContent{{Type: "text", Text: fmt.Sprintf("scan workspace stack: %v", err)}},
+				IsError: true,
+			}
+		}
+
+		data, err := json.MarshalIndent(report, "", "  ")
+		if err != nil {
+			return toolCallResult{
+				Content: []toolContent{{Type: "text", Text: fmt.Sprintf("marshal stack report: %v", err)}},
 				IsError: true,
 			}
 		}

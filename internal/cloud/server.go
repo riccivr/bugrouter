@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/riccivr/bugrouter/internal/adapter"
+	"github.com/riccivr/bugrouter/internal/dedup"
+	"github.com/riccivr/bugrouter/internal/resolver"
 	"github.com/riccivr/bugrouter/internal/version"
 )
 
@@ -30,6 +32,9 @@ type Server struct {
 	auditLogger     *AuditLogger
 	webhookNotifier *WebhookNotifier
 	httpServer      *http.Server
+	resolver        *resolver.Waterfall
+	dedupFinder     *dedup.Finder
+	stackDir        string
 }
 
 // NewServer initializes a Cloud Control Plane server with routes registered.
@@ -43,8 +48,21 @@ func NewServer(addr string, store *adapter.DraftStore, submitter ForgeSubmitter)
 		addr:       addr,
 		submitter:  submitter,
 		authToken:  os.Getenv("BUGROUTER_CLOUD_TOKEN"),
+		stackDir:   ".",
 	}
 	s.registerRoutes()
+	return s
+}
+
+// WithStackScanner configures the resolver waterfall and duplicate finder for the stack radar API.
+func (s *Server) WithStackScanner(wf *resolver.Waterfall, finder *dedup.Finder, rootDir string) *Server {
+	s.resolver = wf
+	s.dedupFinder = finder
+	if strings.TrimSpace(rootDir) != "" {
+		s.stackDir = rootDir
+	} else {
+		s.stackDir = "."
+	}
 	return s
 }
 
@@ -140,7 +158,40 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("POST /api/v1/drafts/{id}/approve", s.handleApproveDraft)
 	s.mux.HandleFunc("POST /api/v1/drafts/{id}/discard", s.handleDiscardDraft)
 	s.mux.HandleFunc("GET /api/v1/audit", s.handleAuditLog)
+	s.mux.HandleFunc("GET /api/v1/stack", s.handleStack)
 	s.mux.HandleFunc("GET /", s.handleIndex)
+}
+
+func (s *Server) handleStack(w http.ResponseWriter, r *http.Request) {
+	checkUpstream := r.URL.Query().Get("check_upstream") == "1" || r.URL.Query().Get("check_upstream") == "true"
+	if s.resolver == nil {
+		report := dedup.StackRadarReport{
+			RootDir:   s.stackDir,
+			ScannedAt: time.Now().UTC(),
+			Entries:   []dedup.StackRadarEntry{},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(report); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+		return
+	}
+
+	stackDir := s.stackDir
+	if dirParam := r.URL.Query().Get("dir"); dirParam != "" {
+		stackDir = dirParam
+	}
+
+	report, err := dedup.BuildStackRadar(r.Context(), s.resolver, s.dedupFinder, stackDir, checkUpstream)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("build stack radar: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(report); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -610,6 +661,29 @@ const indexHTML = `<!DOCTYPE html>
         </tbody>
       </table>
     </div>
+
+    <div style="display: flex; justify-content: space-between; align-items: center;">
+      <h2>Connected Tech Stack &amp; Downstream Radar</h2>
+      <button class="btn btn-inspect" onclick="fetchStack(true)">Scan Upstream Bugs</button>
+    </div>
+    <div class="card" id="stack-container">
+      <table>
+        <thead>
+          <tr>
+            <th>Name</th>
+            <th>Version</th>
+            <th>Ecosystem</th>
+            <th>Manifest</th>
+            <th>Protocol</th>
+            <th>Upstream Tracker URL</th>
+            <th>Downstream Radar / Open Issues</th>
+          </tr>
+        </thead>
+        <tbody id="stack-table">
+          <tr><td colspan="7" style="text-align:center; color: var(--muted);">Loading workspace stack radar...</td></tr>
+        </tbody>
+      </table>
+    </div>
   </main>
 
   <div id="modal" onclick="closeModal(event)">
@@ -725,6 +799,7 @@ const indexHTML = `<!DOCTYPE html>
     function refreshQueue() {
       fetchDrafts();
       fetchAudit();
+      fetchStack(false);
     }
 
     async function fetchAudit() {
@@ -811,8 +886,62 @@ const indexHTML = `<!DOCTYPE html>
       }[tag] || tag));
     }
 
+    async function fetchStack(checkUpstream = false) {
+      const tbody = document.getElementById('stack-table');
+      if (checkUpstream) {
+        tbody.innerHTML = '<tr><td colspan="7" style="text-align:center; color: var(--muted);">Scanning upstream trackers for open bugs...</td></tr>';
+      }
+      try {
+        const url = '/api/v1/stack' + (checkUpstream ? '?check_upstream=1' : '');
+        const res = await fetch(url, { headers: getHeaders() });
+        const report = await res.json();
+        renderStack(report);
+      } catch (err) {
+        tbody.innerHTML = '<tr><td colspan="7" style="color:var(--danger); text-align:center;">Failed to load stack radar: ' + err.message + '</td></tr>';
+      }
+    }
+
+    function renderStack(report) {
+      const tbody = document.getElementById('stack-table');
+      if (!report || !report.entries || report.entries.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="7" style="text-align:center; color: var(--muted);">No workspace dependencies discovered.</td></tr>';
+        return;
+      }
+      tbody.innerHTML = report.entries.map(e => {
+        const d = e.dependency;
+        const target = d.target;
+        const protocol = (target && target.tracker && target.tracker.protocol) || (d.resolution_error ? 'error' : 'unresolved');
+        const trackerURL = (target && target.tracker && (target.tracker.url || target.tracker.email)) || (d.resolution_error || '-');
+        let trackerLink = escapeHTML(trackerURL);
+        if (trackerURL.startsWith('http://') || trackerURL.startsWith('https://')) {
+          trackerLink = '<a href="' + escapeHTML(trackerURL) + '" target="_blank" style="color:var(--accent);">' + escapeHTML(trackerURL) + '</a>';
+        }
+
+        let bugsHtml = '<span style="color:var(--muted);">No issues flagged</span>';
+        if (e.upstream_bugs && e.upstream_bugs.length > 0) {
+          bugsHtml = '<ul style="margin:0; padding-left:16px;">' + e.upstream_bugs.map(b => {
+            const bLink = (b.url && (b.url.startsWith('http://') || b.url.startsWith('https://'))) ?
+              '<a href="' + escapeHTML(b.url) + '" target="_blank" style="color:var(--warning);">' + escapeHTML(b.title || b.id) + '</a>' :
+              escapeHTML(b.title || b.id);
+            return '<li>[#' + escapeHTML(b.id) + '] ' + bLink + '</li>';
+          }).join('') + '</ul>';
+        }
+
+        return '<tr>' +
+          '<td><b>' + escapeHTML(d.name || '') + '</b></td>' +
+          '<td><code>' + escapeHTML(d.version || 'latest') + '</code></td>' +
+          '<td><span class="badge">' + escapeHTML(d.ecosystem || '') + '</span></td>' +
+          '<td>' + escapeHTML(d.manifest || '') + '</td>' +
+          '<td><span class="badge">' + escapeHTML(protocol) + '</span></td>' +
+          '<td>' + trackerLink + '</td>' +
+          '<td>' + bugsHtml + '</td>' +
+        '</tr>';
+      }).join('');
+    }
+
     fetchDrafts();
     fetchAudit();
+    fetchStack(false);
   </script>
 </body>
 </html>

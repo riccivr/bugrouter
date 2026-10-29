@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -126,8 +127,8 @@ body:
 	}
 	res3 := resp3.Result.(map[string]any)
 	tools := res3["tools"].([]any)
-	if len(tools) != 9 {
-		t.Errorf("expected 9 tools, got %d", len(tools))
+	if len(tools) != 10 {
+		t.Errorf("expected 10 tools, got %d", len(tools))
 	}
 
 	// Response 4: tools/call scrub_text
@@ -444,5 +445,61 @@ func TestDraftBugReportStrictQualityRejection(t *testing.T) {
 	}
 	if len(drafts) != 0 {
 		t.Errorf("expected 0 drafts staged after rejection, got %d", len(drafts))
+	}
+}
+
+func TestScanWorkspaceStackTool(t *testing.T) {
+	tempDir := t.TempDir()
+	store := adapter.NewDraftStore(tempDir)
+	wf := resolver.NewWaterfall(time.Second, resolver.NewDirectProbe())
+	server := NewServer(wf, store)
+
+	pkgJsonContent := `{
+		"dependencies": {
+			"https://github.com/myorg/component": "1.0.0"
+		}
+	}`
+	if err := os.WriteFile(filepath.Join(tempDir, "package.json"), []byte(pkgJsonContent), 0600); err != nil {
+		t.Fatalf("write package.json: %v", err)
+	}
+
+	var in, out bytes.Buffer
+	reqPayload := map[string]any{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"method":  "tools/call",
+		"params": map[string]any{
+			"name": "scan_workspace_stack",
+			"arguments": map[string]any{
+				"dir": tempDir,
+			},
+		},
+	}
+	reqBytes, err := json.Marshal(reqPayload)
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	in.Write(append(reqBytes, '\n'))
+
+	if err := server.Run(context.Background(), &in, &out); err != nil {
+		t.Fatalf("server.Run failed: %v", err)
+	}
+
+	var resp jsonrpcResponse
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out.String())), &resp); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+
+	resMap, ok := resp.Result.(map[string]any)
+	if !ok {
+		t.Fatalf("expected result map, got: %v", resp.Result)
+	}
+	if resMap["isError"] != false {
+		t.Fatalf("scan_workspace_stack isError = true: %v", resMap)
+	}
+
+	rawText := resMap["content"].([]any)[0].(map[string]any)["text"].(string)
+	if !strings.Contains(rawText, "component") || !strings.Contains(rawText, "total") {
+		t.Errorf("scan_workspace_stack result missing expected tokens: %s", rawText)
 	}
 }

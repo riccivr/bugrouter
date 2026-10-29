@@ -539,6 +539,82 @@ func main() {
 		}
 		return
 
+	case "stack":
+		fs := flag.NewFlagSet("stack", flag.ContinueOnError)
+		dir := fs.String("dir", ".", "workspace directory to scan")
+		checkUpstream := fs.Bool("check-upstream", false, "query upstream trackers for active bugs matching dependencies")
+		jsonOut := fs.Bool("json", false, "output structured JSON")
+		noCache := fs.Bool("no-cache", false, "disable disk cache")
+		timeout := fs.Duration("timeout", 30*time.Second, "request and scan timeout duration")
+		if err := fs.Parse(os.Args[2:]); err != nil {
+			os.Exit(1)
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+		defer cancel()
+
+		httpClient := httpx.NewClient(0)
+		wf := resolver.NewWaterfall(
+			0,
+			resolver.NewOrgCloudProbe(),
+			resolver.NewDirectProbe(),
+			resolver.NewWorkspaceProbe(*dir),
+			resolver.NewOSPackageProbe(),
+			resolver.NewRegistryProbe(httpClient, resolver.DefaultRegistryEndpoints()),
+			resolver.NewWebDomainProbe(httpClient),
+		)
+		if !*noCache {
+			wf.WithCache(cache.NewStore("", 0))
+		}
+
+		finder := dedup.NewFinder(httpClient)
+		report, err := dedup.BuildStackRadar(ctx, wf, finder, *dir, *checkUpstream)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: scan stack: %v\n", err)
+			os.Exit(1)
+		}
+
+		if *jsonOut {
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			if err := enc.Encode(report); err != nil {
+				fmt.Fprintf(os.Stderr, "error: encode json: %v\n", err)
+				os.Exit(1)
+			}
+			return
+		}
+
+		fmt.Printf("Workspace Stack Inventory (%s): %d dependencies (%d resolved)\n", report.RootDir, report.Total, report.Resolved)
+		for _, entry := range report.Entries {
+			dep := entry.Dependency
+			verStr := ""
+			if dep.Version != "" {
+				verStr = fmt.Sprintf(" (%s)", dep.Version)
+			}
+			if dep.Target != nil {
+				trackerInfo := ""
+				if dep.Target.Tracker.URL != "" {
+					trackerInfo = fmt.Sprintf(" -> %s: %s", dep.Target.Tracker.Protocol, dep.Target.Tracker.URL)
+				} else if dep.Target.Tracker.Email != "" {
+					trackerInfo = fmt.Sprintf(" -> %s: %s", dep.Target.Tracker.Protocol, dep.Target.Tracker.Email)
+				}
+				fmt.Printf("- [%s] %s%s%s\n", dep.Ecosystem, dep.Name, verStr, trackerInfo)
+			} else {
+				errInfo := ""
+				if dep.ResolutionErr != "" {
+					errInfo = fmt.Sprintf(" (error: %s)", dep.ResolutionErr)
+				}
+				fmt.Printf("- [%s] %s%s [unresolved%s]\n", dep.Ecosystem, dep.Name, verStr, errInfo)
+			}
+
+			if len(entry.UpstreamBugs) > 0 {
+				for _, bug := range entry.UpstreamBugs {
+					fmt.Printf("    * [#%s] %s (%s)\n", bug.ID, bug.Title, bug.URL)
+				}
+			}
+		}
+		return
+
 	case "serve":
 		fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 		addr := fs.String("addr", ":8080", "HTTP server listen address")
@@ -560,6 +636,19 @@ func main() {
 		}
 		srv.WithAuditLogger(cloud.NewAuditLogger(*auditLog))
 		srv.WithWebhookNotifier(cloud.NewWebhookNotifier(httpClient, *webhookURL, *webhookSecret))
+
+		cacheStore := cache.NewStore("", 0)
+		wf := resolver.NewWaterfall(
+			0,
+			resolver.NewOrgCloudProbe(),
+			resolver.NewDirectProbe(),
+			resolver.NewWorkspaceProbe("."),
+			resolver.NewOSPackageProbe(),
+			resolver.NewRegistryProbe(httpClient, resolver.DefaultRegistryEndpoints()),
+			resolver.NewWebDomainProbe(httpClient),
+		).WithCache(cacheStore)
+		finder := dedup.NewFinder(httpClient)
+		srv.WithStackScanner(wf, finder, ".")
 
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
@@ -600,6 +689,8 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "                              Autonomous triage of crash logs outputting machine-parseable JSON")
 	fmt.Fprintln(os.Stderr, "  agent verify --cmd <command> [--timeout <dur>] [--expect-exit <code>] [--work-dir <dir>]")
 	fmt.Fprintln(os.Stderr, "                              Bounded reproduction execution and deterministic proof generation")
+	fmt.Fprintln(os.Stderr, "  stack [--dir <dir>] [--check-upstream] [--json] [--no-cache] [--timeout <dur>]")
+	fmt.Fprintln(os.Stderr, "                              Scan workspace dependency manifests and downstream bug radar")
 	fmt.Fprintln(os.Stderr, "  serve [--addr <addr>] [--drafts-dir <dir>] [--auth-token <tok>] [--audit-log <path>] [--webhook-url <url>] [--webhook-secret <sec>]")
 	fmt.Fprintln(os.Stderr, "                              Start Cloud Control Plane HTTP daemon and Web UI")
 	fmt.Fprintln(os.Stderr, "  mcp                         Start Model Context Protocol (MCP) stdio server")
