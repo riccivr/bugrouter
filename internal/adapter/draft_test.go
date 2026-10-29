@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/riccivr/bugrouter/internal/dedup"
 	"github.com/riccivr/bugrouter/internal/introspector"
 	"github.com/riccivr/bugrouter/internal/resolver"
 )
@@ -481,5 +482,40 @@ func TestDraftStoreIDValidation(t *testing.T) {
 		if !IsValidDraftID(id) {
 			t.Errorf("IsValidDraftID(%q) = false, want true", id)
 		}
+	}
+}
+
+func TestBuildDraftDuplicates(t *testing.T) {
+	in := DraftInput{
+		Target: resolver.Target{
+			CanonicalName: "my-app",
+			Tracker: resolver.TrackerInfo{
+				Protocol: resolver.ProtocolGitHub,
+				URL:      "https://github.com/org/my-app/issues",
+			},
+		},
+		Title: "Null pointer exception on startup",
+		Duplicates: []dedup.ExistingIssue{
+			{
+				ID:    "123",
+				Title: "Panic: null pointer dereference during startup",
+				URL:   "https://github.com/org/my-app/issues/123",
+				State: "open",
+				Score: 0.75,
+			},
+		},
+	}
+
+	draft, err := BuildDraft(in)
+	if err != nil {
+		t.Fatalf("BuildDraft failed: %v", err)
+	}
+
+	if len(draft.PotentialDuplicates) != 1 {
+		t.Fatalf("len(PotentialDuplicates) = %d, want 1", len(draft.PotentialDuplicates))
+	}
+	dup := draft.PotentialDuplicates[0]
+	if dup.ID != "123" || dup.Score != 0.75 || dup.State != "open" {
+		t.Errorf("unexpected duplicate: %+v", dup)
 	}
 }

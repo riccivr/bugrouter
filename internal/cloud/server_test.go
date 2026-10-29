@@ -254,3 +254,24 @@ func TestServerIndexHTMLDOMXSSGuard(t *testing.T) {
 		t.Errorf("index HTML missing URL scheme validation or escaping guards")
 	}
 }
+
+func TestServerIndexHTMLPotentialDuplicates(t *testing.T) {
+	srv := NewServer(":0", nil, nil)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/")
+	if err != nil {
+		t.Fatalf("GET / failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	html := string(data)
+	if !strings.Contains(html, "potential_duplicates") || !strings.Contains(html, "Potential Upstream Duplicates") {
+		t.Errorf("index HTML missing duplicate rendering logic")
+	}
+}

@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/riccivr/bugrouter/internal/dedup"
 	"github.com/riccivr/bugrouter/internal/introspector"
 	"github.com/riccivr/bugrouter/internal/resolver"
 	"github.com/riccivr/bugrouter/internal/scrubber"
@@ -32,19 +33,21 @@ type DraftInput struct {
 	Logs             string
 	Severity         string
 	Template         *introspector.TemplateSchema
+	Duplicates       []dedup.ExistingIssue
 }
 
 // StagedDraft represents a redacted and formatted issue ready for review or submission.
 type StagedDraft struct {
-	ID            string                       `json:"id"`
-	CreatedAt     time.Time                    `json:"created_at"`
-	Status        string                       `json:"status"`
-	Target        resolver.Target              `json:"target"`
-	Title         scrubber.ScrubbedText        `json:"title"`
-	MarkdownBody  scrubber.ScrubbedText        `json:"markdown_body"`
-	SubmissionURL string                       `json:"submission_url,omitempty"`
-	DebbugsEmail  string                       `json:"debbugs_email,omitempty"`
-	Template      *introspector.TemplateSchema `json:"template,omitempty"`
+	ID                  string                       `json:"id"`
+	CreatedAt           time.Time                    `json:"created_at"`
+	Status              string                       `json:"status"`
+	Target              resolver.Target              `json:"target"`
+	Title               scrubber.ScrubbedText        `json:"title"`
+	MarkdownBody        scrubber.ScrubbedText        `json:"markdown_body"`
+	SubmissionURL       string                       `json:"submission_url,omitempty"`
+	DebbugsEmail        string                       `json:"debbugs_email,omitempty"`
+	Template            *introspector.TemplateSchema `json:"template,omitempty"`
+	PotentialDuplicates []dedup.ExistingIssue        `json:"potential_duplicates,omitempty"`
 }
 
 func generateDraftID() (string, error) {
@@ -314,15 +317,16 @@ func BuildDraft(in DraftInput) (*StagedDraft, error) {
 	}
 
 	return &StagedDraft{
-		ID:            id,
-		CreatedAt:     time.Now().UTC(),
-		Status:        "pending_review",
-		Target:        in.Target,
-		Title:         scrubbedTitle,
-		MarkdownBody:  markdownBody,
-		SubmissionURL: submissionURL,
-		DebbugsEmail:  debbugsEmail,
-		Template:      in.Template,
+		ID:                  id,
+		CreatedAt:           time.Now().UTC(),
+		Status:              "pending_review",
+		Target:              in.Target,
+		Title:               scrubbedTitle,
+		MarkdownBody:        markdownBody,
+		SubmissionURL:       submissionURL,
+		DebbugsEmail:        debbugsEmail,
+		Template:            in.Template,
+		PotentialDuplicates: in.Duplicates,
 	}, nil
 }
 

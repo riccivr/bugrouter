@@ -13,10 +13,12 @@ import (
 	"github.com/riccivr/bugrouter/internal/adapter"
 	"github.com/riccivr/bugrouter/internal/cache"
 	"github.com/riccivr/bugrouter/internal/cloud"
+	"github.com/riccivr/bugrouter/internal/dedup"
 	"github.com/riccivr/bugrouter/internal/httpx"
 	"github.com/riccivr/bugrouter/internal/introspector"
 	"github.com/riccivr/bugrouter/internal/mcp"
 	"github.com/riccivr/bugrouter/internal/resolver"
+	"github.com/riccivr/bugrouter/internal/scrubber"
 	"github.com/riccivr/bugrouter/internal/version"
 )
 
@@ -151,6 +153,13 @@ func main() {
 			schema = nil
 		}
 
+		finder := dedup.NewFinder(httpClient)
+		dups, err := finder.FindDuplicates(context.Background(), *target, scrubber.Scrub(*title))
+		if err != nil {
+			// Non-fatal; proceed if duplicate search encounters network/rate errors.
+			dups = nil
+		}
+
 		draft, err := adapter.BuildDraft(adapter.DraftInput{
 			Target:           *target,
 			Title:            *title,
@@ -158,6 +167,7 @@ func main() {
 			StepsToReproduce: *steps,
 			Logs:             *logs,
 			Template:         schema,
+			Duplicates:       dups,
 		})
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: build draft: %v\n", err)
@@ -187,6 +197,12 @@ func main() {
 		fmt.Printf("Title:          %s\n", draft.Title)
 		if draft.SubmissionURL != "" {
 			fmt.Printf("Submission URL: %s\n", draft.SubmissionURL)
+		}
+		if len(draft.PotentialDuplicates) > 0 {
+			fmt.Printf("\nPotential Upstream Duplicates (%d found):\n", len(draft.PotentialDuplicates))
+			for _, d := range draft.PotentialDuplicates {
+				fmt.Printf("  - [%s] (%.0f%% match) %s\n    %s\n", d.State, d.Score*100, d.Title, d.URL)
+			}
 		}
 		if draft.DebbugsEmail != "" {
 			fmt.Printf("\n--- Debbugs Email ---\n%s\n", draft.DebbugsEmail)

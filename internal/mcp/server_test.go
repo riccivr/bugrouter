@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/riccivr/bugrouter/internal/adapter"
+	"github.com/riccivr/bugrouter/internal/dedup"
 	"github.com/riccivr/bugrouter/internal/httpx"
 	"github.com/riccivr/bugrouter/internal/introspector"
 	"github.com/riccivr/bugrouter/internal/resolver"
@@ -41,6 +42,9 @@ body:
     attributes:
       label: What happened?
 `)
+		case "/search/issues":
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"items": [{"number": 42, "title": "Crash on start with memory error", "html_url": "https://github.com/expressjs/express/issues/42", "state": "open"}]}`)
 		default:
 			http.NotFound(w, r)
 		}
@@ -53,8 +57,11 @@ body:
 	intro := introspector.New(httpx.NewTestClient(time.Second)).WithEndpoints(introspector.Endpoints{
 		GitHubAPIBaseURL: ts.URL,
 	})
+	finder := dedup.NewFinder(httpx.NewTestClient(time.Second)).WithEndpoints(dedup.Endpoints{
+		GitHubAPIBaseURL: ts.URL,
+	})
 	mockSub := &mockSubmitter{submittedURL: "https://github.com/expressjs/express/issues/999"}
-	server := NewServer(wf, store).WithIntrospector(intro).WithForgeClient(mockSub)
+	server := NewServer(wf, store).WithIntrospector(intro).WithFinder(finder).WithForgeClient(mockSub)
 
 	var in bytes.Buffer
 	var out bytes.Buffer
@@ -73,20 +80,22 @@ body:
 	in.WriteString(`{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"resolve_target","arguments":{"query":"https://github.com/expressjs/express"}}}` + "\n")
 	// 7. tools/call: introspect_template
 	in.WriteString(`{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"introspect_template","arguments":{"query":"https://github.com/expressjs/express"}}}` + "\n")
-	// 8. tools/call: draft_bug_report
-	in.WriteString(`{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"draft_bug_report","arguments":{"query":"https://github.com/expressjs/express","title":"Crash on start","summary":"Failed with AKIAIOSFODNN7EXAMPLE","steps_to_reproduce":"Run server","logs":"error stack"}}}` + "\n")
-	// 9. tools/call: list_staged_drafts
-	in.WriteString(`{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"list_staged_drafts","arguments":{}}}` + "\n")
-	// 10. unknown method
-	in.WriteString(`{"jsonrpc":"2.0","id":9,"method":"unknown_cmd"}` + "\n")
+	// 8. tools/call: search_duplicates
+	in.WriteString(`{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"search_duplicates","arguments":{"query":"https://github.com/expressjs/express","title":"Crash on start with memory error"}}}` + "\n")
+	// 9. tools/call: draft_bug_report
+	in.WriteString(`{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"draft_bug_report","arguments":{"query":"https://github.com/expressjs/express","title":"Crash on start with memory error","summary":"Failed with AKIAIOSFODNN7EXAMPLE","steps_to_reproduce":"Run server","logs":"error stack"}}}` + "\n")
+	// 10. tools/call: list_staged_drafts
+	in.WriteString(`{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"list_staged_drafts","arguments":{}}}` + "\n")
+	// 11. unknown method
+	in.WriteString(`{"jsonrpc":"2.0","id":10,"method":"unknown_cmd"}` + "\n")
 
 	if err := server.Run(context.Background(), &in, &out); err != nil {
 		t.Fatalf("Server.Run failed: %v", err)
 	}
 
 	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
-	if len(lines) != 9 {
-		t.Fatalf("expected 9 responses (notification has no response), got %d: %v", len(lines), lines)
+	if len(lines) != 10 {
+		t.Fatalf("expected 10 responses (notification has no response), got %d: %v", len(lines), lines)
 	}
 
 	// Response 1: initialize
@@ -115,8 +124,8 @@ body:
 	}
 	res3 := resp3.Result.(map[string]any)
 	tools := res3["tools"].([]any)
-	if len(tools) != 6 {
-		t.Errorf("expected 6 tools, got %d", len(tools))
+	if len(tools) != 7 {
+		t.Errorf("expected 7 tools, got %d", len(tools))
 	}
 
 	// Response 4: tools/call scrub_text
@@ -161,9 +170,23 @@ body:
 		t.Errorf("introspect_template response missing expected schema: %s", content6)
 	}
 
-	// Response 7: tools/call draft_bug_report
+	// Response 7: tools/call search_duplicates
+	var respDups jsonrpcResponse
+	if err := json.Unmarshal([]byte(lines[6]), &respDups); err != nil {
+		t.Fatalf("unmarshal respDups: %v", err)
+	}
+	resDups := respDups.Result.(map[string]any)
+	if resDups["isError"] != false {
+		t.Errorf("search_duplicates isError = true: %v", resDups)
+	}
+	contentDups := resDups["content"].([]any)[0].(map[string]any)["text"].(string)
+	if !strings.Contains(contentDups, "Crash on start with memory error") || !strings.Contains(contentDups, "express/issues/42") {
+		t.Errorf("search_duplicates response missing duplicate issue: %s", contentDups)
+	}
+
+	// Response 8: tools/call draft_bug_report
 	var resp7 jsonrpcResponse
-	if err := json.Unmarshal([]byte(lines[6]), &resp7); err != nil {
+	if err := json.Unmarshal([]byte(lines[7]), &resp7); err != nil {
 		t.Fatalf("unmarshal resp7: %v", err)
 	}
 	res7 := resp7.Result.(map[string]any)
@@ -184,10 +207,13 @@ body:
 	if staged.Template == nil || staged.Template.FileName != "bug.yml" {
 		t.Errorf("staged draft missing introspected template: %+v", staged.Template)
 	}
+	if len(staged.PotentialDuplicates) != 1 {
+		t.Errorf("staged draft expected 1 potential duplicate, got %d", len(staged.PotentialDuplicates))
+	}
 
-	// Response 8: tools/call list_staged_drafts
+	// Response 9: tools/call list_staged_drafts
 	var resp8 jsonrpcResponse
-	if err := json.Unmarshal([]byte(lines[7]), &resp8); err != nil {
+	if err := json.Unmarshal([]byte(lines[8]), &resp8); err != nil {
 		t.Fatalf("unmarshal resp8: %v", err)
 	}
 	res8 := resp8.Result.(map[string]any)
@@ -199,9 +225,9 @@ body:
 		t.Errorf("list_staged_drafts missing created draft id: %s", content8)
 	}
 
-	// Response 9: unknown method error
+	// Response 10: unknown method error
 	var resp9 jsonrpcResponse
-	if err := json.Unmarshal([]byte(lines[8]), &resp9); err != nil {
+	if err := json.Unmarshal([]byte(lines[9]), &resp9); err != nil {
 		t.Fatalf("unmarshal resp9: %v", err)
 	}
 	if resp9.Error == nil || resp9.Error.Code != -32601 {

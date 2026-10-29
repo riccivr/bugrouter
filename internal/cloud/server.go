@@ -457,6 +457,18 @@ const indexHTML = `<!DOCTYPE html>
       if (d.template) {
         bodyHtml += '<h4>Template Schema</h4><p>Name: ' + escapeHTML(d.template.name || '') + ' (' + d.template.format + ')</p>';
       }
+      if (d.potential_duplicates && d.potential_duplicates.length > 0) {
+        bodyHtml += '<div style="margin-top:12px; padding:12px; background:rgba(210,153,34,0.15); border:1px solid var(--warning); border-radius:6px;">';
+        bodyHtml += '<h4 style="margin:0 0 8px 0; color:var(--warning);">Potential Upstream Duplicates</h4><ul style="margin:0; padding-left:20px;">';
+        for (const dup of d.potential_duplicates) {
+          const scorePct = (dup.score * 100).toFixed(0) + '%';
+          const link = (dup.url && (dup.url.startsWith('https://') || dup.url.startsWith('http://'))) ?
+            '<a href="' + escapeHTML(dup.url) + '" target="_blank" style="color:var(--accent);">' + escapeHTML(dup.title || dup.id) + '</a>' :
+            escapeHTML(dup.title || dup.id);
+          bodyHtml += '<li>[' + escapeHTML(dup.state || 'unknown') + '] ' + link + ' <span class="badge">' + scorePct + ' match</span></li>';
+        }
+        bodyHtml += '</ul></div>';
+      }
       bodyHtml += '<h4>Scrubbed Markdown Body</h4><pre>' + escapeHTML(d.markdown_body || '') + '</pre>';
       document.getElementById('modal-content').innerHTML = bodyHtml;
       document.getElementById('modal').style.display = 'flex';

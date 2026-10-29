@@ -10,6 +10,7 @@ import (
 
 	"github.com/riccivr/bugrouter/internal/adapter"
 	"github.com/riccivr/bugrouter/internal/cloud"
+	"github.com/riccivr/bugrouter/internal/dedup"
 	"github.com/riccivr/bugrouter/internal/httpx"
 	"github.com/riccivr/bugrouter/internal/introspector"
 	"github.com/riccivr/bugrouter/internal/resolver"
@@ -61,6 +62,7 @@ type Server struct {
 	draftStore   *adapter.DraftStore
 	introspector *introspector.Introspector
 	forgeClient  adapter.ForgeSubmitter
+	dedupFinder  *dedup.Finder
 }
 
 // NewServer creates an MCP server backed by the provided waterfall and draft store.
@@ -71,6 +73,7 @@ func NewServer(wf *resolver.Waterfall, store *adapter.DraftStore) *Server {
 		draftStore:   store,
 		introspector: introspector.New(httpClient),
 		forgeClient:  cloud.NewForgeClient(httpClient),
+		dedupFinder:  dedup.NewFinder(httpClient),
 	}
 }
 
@@ -83,6 +86,12 @@ func (s *Server) WithIntrospector(intro *introspector.Introspector) *Server {
 // WithForgeClient overrides the default forge submitter for testing or custom authentication.
 func (s *Server) WithForgeClient(f adapter.ForgeSubmitter) *Server {
 	s.forgeClient = f
+	return s
+}
+
+// WithFinder overrides the deduplication finder for testing or custom configuration.
+func (s *Server) WithFinder(f *dedup.Finder) *Server {
+	s.dedupFinder = f
 	return s
 }
 
@@ -285,6 +294,24 @@ func (s *Server) toolDefinitions() []map[string]any {
 			},
 		},
 		{
+			"name":        "search_duplicates",
+			"description": "Searches upstream issue tracker (GitHub, GitLab, Bugzilla) for existing duplicate bug reports.",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"query": map[string]any{
+						"type":        "string",
+						"description": "Software package name, binary name, repository URL, or domain",
+					},
+					"title": map[string]any{
+						"type":        "string",
+						"description": "Bug report title or problem description to extract search keywords from",
+					},
+				},
+				"required": []string{"query", "title"},
+			},
+		},
+		{
 			"name":        "approve_draft",
 			"description": "Approves and submits a staged draft to its upstream tracker via authenticated OAuth connectors.",
 			"inputSchema": map[string]any{
@@ -435,6 +462,13 @@ func (s *Server) handleToolCall(ctx context.Context, params toolCallParams) tool
 			schema = nil
 		}
 
+		var dups []dedup.ExistingIssue
+		if s.dedupFinder != nil {
+			if d, err := s.dedupFinder.FindDuplicates(ctx, *target, scrubber.Scrub(args.Title)); err == nil {
+				dups = d
+			}
+		}
+
 		draft, err := adapter.BuildDraft(adapter.DraftInput{
 			Target:           *target,
 			Title:            args.Title,
@@ -442,6 +476,7 @@ func (s *Server) handleToolCall(ctx context.Context, params toolCallParams) tool
 			StepsToReproduce: args.StepsToReproduce,
 			Logs:             args.Logs,
 			Template:         schema,
+			Duplicates:       dups,
 		})
 		if err != nil {
 			return toolCallResult{
@@ -461,6 +496,56 @@ func (s *Server) handleToolCall(ctx context.Context, params toolCallParams) tool
 		if err != nil {
 			return toolCallResult{
 				Content: []toolContent{{Type: "text", Text: fmt.Sprintf("marshal draft: %v", err)}},
+				IsError: true,
+			}
+		}
+		return toolCallResult{
+			Content: []toolContent{{Type: "text", Text: string(data)}},
+			IsError: false,
+		}
+
+	case "search_duplicates":
+		var args struct {
+			Query string `json:"query"`
+			Title string `json:"title"`
+		}
+		if err := json.Unmarshal(params.Arguments, &args); err != nil {
+			return toolCallResult{
+				Content: []toolContent{{Type: "text", Text: fmt.Sprintf("parse arguments: %v", err)}},
+				IsError: true,
+			}
+		}
+		if strings.TrimSpace(args.Query) == "" || strings.TrimSpace(args.Title) == "" {
+			return toolCallResult{
+				Content: []toolContent{{Type: "text", Text: "query and title parameters are required"}},
+				IsError: true,
+			}
+		}
+
+		target, err := s.resolver.Resolve(ctx, args.Query)
+		if err != nil {
+			return toolCallResult{
+				Content: []toolContent{{Type: "text", Text: fmt.Sprintf("resolve target %s: %v", args.Query, err)}},
+				IsError: true,
+			}
+		}
+
+		if s.dedupFinder == nil {
+			s.dedupFinder = dedup.NewFinder(httpx.NewClient(0))
+		}
+
+		dups, err := s.dedupFinder.FindDuplicates(ctx, *target, scrubber.Scrub(args.Title))
+		if err != nil {
+			return toolCallResult{
+				Content: []toolContent{{Type: "text", Text: fmt.Sprintf("find duplicates for %s: %v", args.Query, err)}},
+				IsError: true,
+			}
+		}
+
+		data, err := json.MarshalIndent(dups, "", "  ")
+		if err != nil {
+			return toolCallResult{
+				Content: []toolContent{{Type: "text", Text: fmt.Sprintf("marshal duplicates: %v", err)}},
 				IsError: true,
 			}
 		}
