@@ -1,7 +1,7 @@
 # ARCHITECTURE_STATE.md — bugrouter System Architecture & Handoff
 
 Current CalVer: **2026.10.0**  
-Status: **Milestone 3 Spec 07 Completed** (Upstream Issue Deduplicator + Polyglot Workspace Probes (Cargo/Pyproject) + Cross-Distro OS Probes (RPM/Pacman) + MCP Search Duplicates Tool)
+Status: **Milestone 3 Spec 08 Completed** (Cloud Control Plane Hardening + Constant-Time Bearer Auth + CSRF Guard + Append-Only JSONL Audit Log + SSRF-Guarded Webhook Dispatcher + Spec 07.1 Red-Team Remediations)
 
 ---
 
@@ -21,10 +21,10 @@ Status: **Milestone 3 Spec 07 Completed** (Upstream Issue Deduplicator + Polyglo
 | `cache` | `internal/cache/disk.go` | Zero-dependency local TTL disk cache backed by `$XDG_CACHE_HOME/bugrouter/targets` with SHA-256 key hashing and atomic file replacement. |
 | `resolver` | `internal/resolver/` | 6-layer waterfall resolution engine: `OrgCloudProbe` (enterprise catalog/monorepo ownership), `DirectProbe`, `WorkspaceProbe` (`node_modules`, `go.mod`, `Cargo.toml`/`Cargo.lock`, `pyproject.toml`), `OSPackageProbe` (Debian `dpkg`/`apt`, Fedora/RHEL `rpm`, Arch `pacman`), `RegistryProbe` (`npm`, `PyPI`, `Crates.io`), and `WebDomainProbe` (`.well-known/bug-report`, RFC 9116 `security.txt`). Strict hostname classification for GitHub, GitLab, Codeberg, SourceHut, Bugzilla, Debbugs, Jira, and Linear. Wires optional `TargetCache` into resolution lifecycle. |
 | `introspector` | `internal/introspector/` | Discovers and parses upstream issue templates across GitHub (YAML Issue Forms and Markdown), GitLab (Markdown templates), and Bugzilla (REST schemas `/rest/product` and `/rest/field/bug`) with zero external dependencies. |
-| `dedup` | `internal/dedup/` | Queries upstream trackers (GitHub, GitLab, Bugzilla) for existing duplicate bug reports using token overlap scoring, stop word filtering, and keyword extraction with bounded API pagination. |
+| `dedup` | `internal/dedup/` | Queries upstream trackers (GitHub, GitLab, Bugzilla) for existing duplicate bug reports using token overlap scoring, stop word filtering, keyword extraction, and enterprise forge API base URL derivation. |
 | `scrubber` | `internal/scrubber/scrubber.go` | Deterministic secret and PII redactor producing `ScrubbedText`. Strips PEM private keys, Bearer tokens, AWS/GitHub/OpenAI/Stripe/Slack keys, generic config assignments, URI credentials, and `/home/*` or `/Users/*` paths. |
 | `adapter` | `internal/adapter/draft.go` | Sanitizes titles against RFC-822 header injection, maps upstream template schemas to Markdown sections (`### <Label>`), attaches potential upstream duplicate tickets, generates deep-link submission URLs (GitHub issue form query parameters, GitLab `issuable_template`, Bugzilla `enter_bug.cgi`), RFC-822 Debbugs emails with pseudo-headers, and atomically stages tickets with `0600` permissions via `DraftStore`. |
-| `cloud` | `internal/cloud/` | Zero-dependency Cloud Control Plane HTTP daemon (`Server`) with embedded single-page Web UI for Human-in-the-Loop review queues (`/api/v1/health`, `/api/v1/drafts`, `/api/v1/drafts/{id}/approve`, `/api/v1/drafts/{id}/discard`), duplicate issue warnings, and authenticated OAuth enterprise forge connectors (`ForgeClient` supporting GitHub Enterprise, GitLab Self-Managed, Jira REST, and Linear GraphQL). |
+| `cloud` | `internal/cloud/` | Zero-dependency Cloud Control Plane HTTP daemon (`Server`) with embedded single-page Web UI for Human-in-the-Loop review queues (`/api/v1/health`, `/api/v1/drafts`, `/api/v1/drafts/{id}/approve`, `/api/v1/drafts/{id}/discard`, `/api/v1/audit`), constant-time Bearer token auth, CSRF/origin guard, append-only JSONL audit logging (`AuditLogger`), SSRF-guarded HMAC webhook dispatcher (`WebhookNotifier`), and authenticated OAuth enterprise forge connectors (`ForgeClient`). |
 | `mcp` | `internal/mcp/server.go` | Zero-dependency JSON-RPC 2.0 stdio server implementing Model Context Protocol (spec `2024-11-05`), publishing `resolve_target`, `scrub_text`, `draft_bug_report`, `introspect_template`, `search_duplicates`, `list_staged_drafts`, and `approve_draft` tools (total: 7 tools). Automatically benefits from XDG disk caching. |
 
 ---
@@ -105,3 +105,18 @@ TemplateSchema                             PotentialDuplicates
 - Added duplicate warning section in Cloud Web UI review modal with escaped links and match percentages.
 - Added duplicate warning output to `bugrouter draft` CLI command.
 - Exposed `search_duplicates` tool in MCP server and updated MCP tool count to 7.
+
+### Spec #07.1: Red-Team Remediation & Parser Hardening (COMPLETED)
+- Replaced `extractInlineTableField` with a scanner/splitter enforcing exact key matching outside quotes across Cargo and Poetry inline tables.
+- Added PEP 503/508 package name normalization (`normalizePyPkgName`) stripping extras and normalizing delimiters (`-`, `.`) to `_` in `resolvePyproject` while preserving query as `CanonicalName`.
+- Added opening array line parsing when `dependencies = [` has inline entries.
+- Added enterprise host API base URL derivation in `internal/dedup` for GitHub Enterprise (`/api/v3`) and GitLab Self-Managed.
+- Added `dedup` scope to commit-msg hook and `AGENTS.md` engineering constitution.
+
+### Spec #08: Cloud Control Plane Security, Audit Log & Webhook Dispatcher (COMPLETED)
+- Hardened Cloud Control Plane with constant-time Bearer token authentication via `crypto/subtle.ConstantTimeCompare` and SHA-256 pre-hashing on protected API endpoints (`/api/v1/drafts...`, `/api/v1/audit`), keeping `/` and `/api/v1/health` public.
+- Implemented CSRF origin validation and custom header guard (`X-Bugrouter-Request: 1` or valid Bearer token) on all `POST /api/v1/...` routes.
+- Updated embedded Web UI SPA with Bearer token authentication input and session storage persistence.
+- Built append-only JSONL `AuditLogger` writing to `$XDG_STATE_HOME/bugrouter/audit.log` with strict `0600` permissions and 1 MiB bounded reverse-chronological retrieval.
+- Implemented SSRF-guarded `WebhookNotifier` delivering HMAC-SHA256 signed audit events (`X-Bugrouter-Signature`) with 3-second bounded timeouts.
+- Added `--auth-token`, `--audit-log`, and `--webhook-url` CLI flags to `serve` subcommand.
