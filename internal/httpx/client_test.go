@@ -168,3 +168,40 @@ func TestClientGetBytesWithHeaders(t *testing.T) {
 		t.Errorf("Authorization = %q, want Bearer my-secret-token", capturedAuth)
 	}
 }
+
+func TestClientStripsAuthHeadersOnCrossHostRedirect(t *testing.T) {
+	var capturedAuth, capturedPrivateToken string
+
+	destServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedAuth = r.Header.Get("Authorization")
+		capturedPrivateToken = r.Header.Get("PRIVATE-TOKEN")
+		w.Header().Set("Content-Type", "text/plain")
+		fmt.Fprint(w, "redirected-ok")
+	}))
+	defer destServer.Close()
+
+	destURL := strings.Replace(destServer.URL, "127.0.0.1", "localhost", 1)
+
+	redirectServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, destURL, http.StatusFound)
+	}))
+	defer redirectServer.Close()
+
+	client := NewTestClient(time.Second)
+	data, err := client.GetBytesWithHeaders(context.Background(), redirectServer.URL, "text/plain", map[string]string{
+		"Authorization": "Bearer secret123",
+		"PRIVATE-TOKEN": "glpat-secret456",
+	})
+	if err != nil {
+		t.Fatalf("GetBytesWithHeaders failed: %v", err)
+	}
+	if string(data) != "redirected-ok" {
+		t.Errorf("data = %q, want redirected-ok", string(data))
+	}
+	if capturedAuth != "" {
+		t.Errorf("Authorization header leaked across hosts: %q", capturedAuth)
+	}
+	if capturedPrivateToken != "" {
+		t.Errorf("PRIVATE-TOKEN header leaked across hosts: %q", capturedPrivateToken)
+	}
+}

@@ -122,6 +122,11 @@ func NewClient(timeout time.Duration) *Client {
 				return errors.New("stopped after 5 redirects")
 			}
 
+			if len(via) > 0 && !strings.EqualFold(req.URL.Hostname(), via[0].URL.Hostname()) {
+				req.Header.Del("Authorization")
+				req.Header.Del("PRIVATE-TOKEN")
+			}
+
 			if !c.allowPrivateHosts {
 				host := req.URL.Hostname()
 				parsedIP := net.ParseIP(host)
