@@ -1,7 +1,7 @@
 # ARCHITECTURE_STATE.md — bugrouter System Architecture & Handoff
 
 Current CalVer: **2026.10.0**  
-Status: **Milestone 3 Spec 08 Completed** (Cloud Control Plane Hardening + Constant-Time Bearer Auth + CSRF Guard + Append-Only JSONL Audit Log + SSRF-Guarded Webhook Dispatcher + Spec 07.1 Red-Team Remediations)
+Status: **Milestone 4 Spec 09 Completed** (v1.0 Readiness, CLI UX Polish, `--body-file` Stdin Support, Scrubber Precision Hardening, Cloud Web UI Audit Trail, Enterprise Host Derivation, and E2E Golden-Path Integration Tests)
 
 ---
 
@@ -15,16 +15,16 @@ Status: **Milestone 3 Spec 08 Completed** (Cloud Control Plane Hardening + Const
 
 | Package | Path | Purpose & Responsibilities |
 | :--- | :--- | :--- |
-| `main` | `cmd/bugrouter/main.go` | Entrypoint providing `version`, `resolve`, `draft`, `serve`, and `mcp` subcommands with disk caching, duplicate detection warnings, and flag orchestration. |
+| `main` | `cmd/bugrouter/main.go` | Entrypoint providing `version`, `resolve`, `draft`, `serve`, and `mcp` subcommands with disk caching, bounded execution (`--timeout`), `--body-file` with stdin support, graceful shutdown, duplicate detection warnings, and flag orchestration. |
 | `version` | `internal/version/version.go` | CalVer version constant (`2026.10.0`) and canonical `User-Agent` generator. |
 | `httpx` | `internal/httpx/client.go` | Bounded HTTP client enforcing 2 MiB body caps, timeouts, rate limiting (`429`/`503` retry handling), and SSRF/DNS-rebinding protection against private/loopback/link-local addresses. |
 | `cache` | `internal/cache/disk.go` | Zero-dependency local TTL disk cache backed by `$XDG_CACHE_HOME/bugrouter/targets` with SHA-256 key hashing and atomic file replacement. |
 | `resolver` | `internal/resolver/` | 6-layer waterfall resolution engine: `OrgCloudProbe` (enterprise catalog/monorepo ownership), `DirectProbe`, `WorkspaceProbe` (`node_modules`, `go.mod`, `Cargo.toml`/`Cargo.lock`, `pyproject.toml`), `OSPackageProbe` (Debian `dpkg`/`apt`, Fedora/RHEL `rpm`, Arch `pacman`), `RegistryProbe` (`npm`, `PyPI`, `Crates.io`), and `WebDomainProbe` (`.well-known/bug-report`, RFC 9116 `security.txt`). Strict hostname classification for GitHub, GitLab, Codeberg, SourceHut, Bugzilla, Debbugs, Jira, and Linear. Wires optional `TargetCache` into resolution lifecycle. |
-| `introspector` | `internal/introspector/` | Discovers and parses upstream issue templates across GitHub (YAML Issue Forms and Markdown), GitLab (Markdown templates), and Bugzilla (REST schemas `/rest/product` and `/rest/field/bug`) with zero external dependencies. |
+| `introspector` | `internal/introspector/` | Discovers and parses upstream issue templates across GitHub (YAML Issue Forms and Markdown), GitLab (Markdown templates), and Bugzilla (REST schemas `/rest/product` and `/rest/field/bug`) with enterprise host API base URL derivation and zero external dependencies. |
 | `dedup` | `internal/dedup/` | Queries upstream trackers (GitHub, GitLab, Bugzilla) for existing duplicate bug reports using token overlap scoring, stop word filtering, keyword extraction, and enterprise forge API base URL derivation. |
-| `scrubber` | `internal/scrubber/scrubber.go` | Deterministic secret and PII redactor producing `ScrubbedText`. Strips PEM private keys, Bearer tokens, AWS/GitHub/OpenAI/Stripe/Slack keys, generic config assignments, URI credentials, and `/home/*` or `/Users/*` paths. |
+| `scrubber` | `internal/scrubber/scrubber.go` | Deterministic secret and PII redactor producing `ScrubbedText`. Strips PEM private keys, Bearer tokens, AWS/GitHub/OpenAI/Stripe/Slack keys, generic config assignments (>= 6 chars, preserving non-secret literals like `true`/`false`/`null`/`nil`), URI credentials, and `/home/*` or `/Users/*` paths. |
 | `adapter` | `internal/adapter/draft.go` | Sanitizes titles against RFC-822 header injection, maps upstream template schemas to Markdown sections (`### <Label>`), attaches potential upstream duplicate tickets, generates deep-link submission URLs (GitHub issue form query parameters, GitLab `issuable_template`, Bugzilla `enter_bug.cgi`), RFC-822 Debbugs emails with pseudo-headers, and atomically stages tickets with `0600` permissions via `DraftStore`. |
-| `cloud` | `internal/cloud/` | Zero-dependency Cloud Control Plane HTTP daemon (`Server`) with embedded single-page Web UI for Human-in-the-Loop review queues (`/api/v1/health`, `/api/v1/drafts`, `/api/v1/drafts/{id}/approve`, `/api/v1/drafts/{id}/discard`, `/api/v1/audit`), constant-time Bearer token auth, CSRF/origin guard, append-only JSONL audit logging (`AuditLogger`), SSRF-guarded HMAC webhook dispatcher (`WebhookNotifier`), and authenticated OAuth enterprise forge connectors (`ForgeClient`). |
+| `cloud` | `internal/cloud/` | Zero-dependency Cloud Control Plane HTTP daemon (`Server`) with embedded single-page Web UI for Human-in-the-Loop review queues (`/api/v1/health`, `/api/v1/drafts`, `/api/v1/drafts/{id}/approve`, `/api/v1/drafts/{id}/discard`, `/api/v1/audit`), audit trail display panel, constant-time Bearer token auth, CSRF/origin guard, append-only JSONL audit logging (`AuditLogger`), SSRF-guarded HMAC webhook dispatcher (`WebhookNotifier`), and authenticated OAuth enterprise forge connectors (`ForgeClient`). |
 | `mcp` | `internal/mcp/server.go` | Zero-dependency JSON-RPC 2.0 stdio server implementing Model Context Protocol (spec `2024-11-05`), publishing `resolve_target`, `scrub_text`, `draft_bug_report`, `introspect_template`, `search_duplicates`, `list_staged_drafts`, and `approve_draft` tools (total: 7 tools). Automatically benefits from XDG disk caching. |
 
 ---
@@ -120,3 +120,11 @@ TemplateSchema                             PotentialDuplicates
 - Built append-only JSONL `AuditLogger` writing to `$XDG_STATE_HOME/bugrouter/audit.log` with strict `0600` permissions and 1 MiB bounded reverse-chronological retrieval.
 - Implemented SSRF-guarded `WebhookNotifier` delivering HMAC-SHA256 signed audit events (`X-Bugrouter-Signature`) with 3-second bounded timeouts.
 - Added `--auth-token`, `--audit-log`, and `--webhook-url` CLI flags to `serve` subcommand.
+
+### Spec #09: v1.0 Readiness, CLI Polish, Scrubber Precision & E2E Golden-Path (COMPLETED)
+- Scrubber false-positive hardening in `internal/scrubber`: refined generic secret redaction using `genericSecretRegex.ReplaceAllStringFunc` to require at least 6 characters (excluding quotes) and ignore common non-secret literals (`true`, `false`, `null`, `nil`, `none`, `undefined`, `yes`, `no`), preserving boolean configs, flags, and nil assignments.
+- CLI polish and bounded execution in `cmd/bugrouter`: added `--timeout` duration flag (default 15s) with `context.WithTimeout` to `resolve` and `draft` commands, wired `context.Context` through `resolveTarget`, and added graceful `SIGINT`/`SIGTERM` server shutdown (5s timeout) in `serve`.
+- File and Stdin input support in `cmd/bugrouter draft`: implemented `--body-file` flag (supporting `-` for stdin, bounded by `io.LimitReader` at 512 KiB) with Markdown heading parser `parseMarkdownBodyFile` extracting `## Summary`, `## Steps to Reproduce` / `## Steps`, and `## Logs` / `## Logs & Output`, falling back to full text summary when no recognized headings exist.
+- Cloud Control Plane audit trail in `internal/cloud`: added "Recent Audit Trail" table to embedded SPA `indexHTML` fetching `/api/v1/audit` with headers, rendering timestamps, actions, draft IDs, targets, protocols, and escaped clickable URLs or errors, refreshing on load, refresh button, approval, and discard.
+- Introspector enterprise API URL derivation: aligned `internal/introspector` with `dedup` and `cloud.ForgeClient` to derive `/api/v3` for GitHub Enterprise and self-managed GitLab hosts.
+- Comprehensive end-to-end golden-path integration tests in `cmd/bugrouter/main_test.go`: verified end-to-end flow from `--body-file` parsing, target resolution, template introspection, duplicate detection, draft generation with scrubber redaction, template field mapping, and draft storage serialization with `0600` permissions.
