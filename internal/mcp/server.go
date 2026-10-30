@@ -644,6 +644,23 @@ func (s *Server) toolDefinitions() []map[string]any {
 				"properties": map[string]any{},
 			},
 		},
+		{
+			"name":        "read_system_crash_log",
+			"description": "Reads the latest native OS post-mortem crash record (Linux coredumpctl/var-crash, Windows WER/Event 1000, macOS DiagnosticReports), extracts suspect binary and trace candidates, scrubs PII, and returns structured triage context.",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"query": map[string]any{
+						"type":        "string",
+						"description": "Optional target package name, binary name, or repo override",
+					},
+					"title": map[string]any{
+						"type":        "string",
+						"description": "Optional bug report title or problem description override for duplicate search",
+					},
+				},
+			},
+		},
 	}
 }
 
@@ -1384,6 +1401,9 @@ func (s *Server) handleToolCall(ctx context.Context, params toolCallParams, out 
 			IsError: false,
 		}
 
+	case "read_system_crash_log":
+		return s.handleReadSystemCrashLog(ctx, params.Arguments)
+
 	default:
 		return toolCallResult{
 			Content: []toolContent{{Type: "text", Text: fmt.Sprintf("unknown tool: %s", params.Name)}},
@@ -1450,5 +1470,136 @@ func (s *Server) handleParkBug(ctx context.Context, args json.RawMessage, out io
 
 	return toolCallResult{
 		Content: []toolContent{{Type: "text", Text: string(data)}},
+	}
+}
+
+func (s *Server) handleReadSystemCrashLog(ctx context.Context, args json.RawMessage) toolCallResult {
+	var input struct {
+		Query string `json:"query"`
+		Title string `json:"title"`
+	}
+	if len(args) > 0 && string(args) != "{}" && string(args) != "null" {
+		if err := json.Unmarshal(args, &input); err != nil {
+			return toolCallResult{
+				Content: []toolContent{{Type: "text", Text: fmt.Sprintf("parse arguments: %v", err)}},
+				IsError: true,
+			}
+		}
+	}
+
+	rawLog, suspect, err := resolver.ReadLatestCrash(ctx)
+	if err != nil {
+		return toolCallResult{
+			Content: []toolContent{{Type: "text", Text: fmt.Sprintf("read system crash log: %v", err)}},
+			IsError: true,
+		}
+	}
+
+	candidates := resolver.ExtractTargetsFromLog(rawLog)
+	if suspect != "" {
+		found := false
+		for _, c := range candidates {
+			if strings.EqualFold(c.Query, suspect) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			candidates = append([]resolver.TraceCandidate{{
+				Query:    suspect,
+				Source:   "os_crash_suspect",
+				Evidence: "OS post-mortem crash log suspect binary: " + suspect,
+			}}, candidates...)
+		}
+	}
+
+	var resolvedTarget *resolver.Target
+	if strings.TrimSpace(input.Query) != "" {
+		t, err := s.resolver.Resolve(ctx, strings.TrimSpace(input.Query))
+		if err == nil && t != nil {
+			resolvedTarget = t
+		}
+	}
+
+	if resolvedTarget == nil && suspect != "" {
+		t, err := s.resolver.Resolve(ctx, suspect)
+		if err == nil && t != nil {
+			resolvedTarget = t
+		}
+	}
+
+	if resolvedTarget == nil {
+		for _, c := range candidates {
+			t, err := s.resolver.Resolve(ctx, c.Query)
+			if err == nil && t != nil {
+				resolvedTarget = t
+				break
+			}
+		}
+	}
+
+	var schema *introspector.TemplateSchema
+	var dups []dedup.ExistingIssue
+
+	if resolvedTarget != nil {
+		tmpl, err := s.introspector.Introspect(ctx, *resolvedTarget)
+		if err == nil {
+			schema = tmpl
+		}
+
+		searchTitle := input.Title
+		if searchTitle == "" && suspect != "" {
+			searchTitle = fmt.Sprintf("crash in %s", suspect)
+		} else if searchTitle == "" && len(candidates) > 0 {
+			searchTitle = candidates[0].Evidence
+		}
+		if searchTitle != "" && s.dedupFinder != nil {
+			d, err := s.dedupFinder.FindDuplicates(ctx, *resolvedTarget, scrubber.Scrub(searchTitle))
+			if err == nil {
+				dups = d
+			}
+		}
+	}
+
+	var nextActions []string
+	if resolvedTarget != nil {
+		nextActions = append(nextActions, fmt.Sprintf("Run 'bugrouter draft --title <title> --steps <steps> %s' to stage a verified bug ticket", resolvedTarget.CanonicalName))
+		if len(dups) > 0 {
+			nextActions = append(nextActions, "Review potential upstream duplicates before submitting")
+		}
+		if schema != nil && schema.Name != "" {
+			nextActions = append(nextActions, fmt.Sprintf("Fill required fields defined in upstream issue template: %s", schema.Name))
+		}
+	} else {
+		nextActions = append(nextActions, "No candidates could be automatically resolved to an upstream tracker. Specify target manually via '--query <target>'")
+	}
+
+	if dups == nil {
+		dups = []dedup.ExistingIssue{}
+	}
+	if candidates == nil {
+		candidates = []resolver.TraceCandidate{}
+	}
+
+	result := map[string]any{
+		"suspect":              suspect,
+		"candidates":           candidates,
+		"resolved_target":      resolvedTarget,
+		"template_schema":      schema,
+		"potential_duplicates": dups,
+		"scrubbed_log":         scrubber.Scrub(rawLog),
+		"next_actions":         nextActions,
+	}
+
+	data, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		return toolCallResult{
+			Content: []toolContent{{Type: "text", Text: fmt.Sprintf("marshal triage result: %v", err)}},
+			IsError: true,
+		}
+	}
+	return toolCallResult{
+		Content: []toolContent{{Type: "text", Text: string(data)}},
+		IsError: false,
 	}
 }

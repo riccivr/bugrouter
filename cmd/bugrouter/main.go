@@ -1060,6 +1060,167 @@ func main() {
 		}
 		return
 
+	case "crash-log":
+		fs := flag.NewFlagSet("crash-log", flag.ContinueOnError)
+		jsonOut := fs.Bool("json", false, "output structured JSON")
+		query := fs.String("query", "", "target package name, binary name, or repo query override")
+		title := fs.String("title", "", "bug report title override for duplicate search")
+		timeout := fs.Duration("timeout", 15*time.Second, "request and probe timeout duration")
+		noCache := fs.Bool("no-cache", false, "disable disk cache")
+		if err := fs.Parse(os.Args[2:]); err != nil {
+			os.Exit(1)
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+		defer cancel()
+
+		rawLog, suspect, err := resolver.ReadLatestCrash(ctx)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: read system crash log: %v\n", err)
+			os.Exit(1)
+		}
+
+		candidates := resolver.ExtractTargetsFromLog(rawLog)
+		if suspect != "" {
+			found := false
+			for _, c := range candidates {
+				if strings.EqualFold(c.Query, suspect) {
+					found = true
+					break
+				}
+			}
+			if !found {
+				candidates = append([]resolver.TraceCandidate{{
+					Query:    suspect,
+					Source:   "os_crash_suspect",
+					Evidence: "OS post-mortem crash log suspect binary: " + suspect,
+				}}, candidates...)
+			}
+		}
+
+		httpClient := httpx.NewClient(0)
+		var resolvedTarget *resolver.Target
+
+		if *query != "" {
+			t, err := resolveTarget(ctx, httpClient, *query, *noCache)
+			if err == nil {
+				resolvedTarget = t
+			}
+		} else if suspect != "" {
+			t, err := resolveTarget(ctx, httpClient, suspect, *noCache)
+			if err == nil {
+				resolvedTarget = t
+			}
+		}
+
+		if resolvedTarget == nil {
+			for _, c := range candidates {
+				t, err := resolveTarget(ctx, httpClient, c.Query, *noCache)
+				if err == nil && t != nil {
+					resolvedTarget = t
+					break
+				}
+			}
+		}
+
+		var schema *introspector.TemplateSchema
+		var dups []dedup.ExistingIssue
+
+		if resolvedTarget != nil {
+			intro := introspector.New(httpClient)
+			if !*noCache {
+				intro.WithCache(cache.NewStore("", 0))
+			}
+			s, err := intro.Introspect(ctx, *resolvedTarget)
+			if err == nil {
+				schema = s
+			}
+
+			searchTitle := *title
+			if searchTitle == "" && suspect != "" {
+				searchTitle = fmt.Sprintf("crash in %s", suspect)
+			} else if searchTitle == "" && len(candidates) > 0 {
+				searchTitle = candidates[0].Evidence
+			}
+			if searchTitle != "" {
+				finder := dedup.NewFinder(httpClient)
+				d, err := finder.FindDuplicates(ctx, *resolvedTarget, scrubber.Scrub(searchTitle))
+				if err == nil {
+					dups = d
+				}
+			}
+		}
+
+		var nextActions []string
+		if resolvedTarget != nil {
+			nextActions = append(nextActions, fmt.Sprintf("Run 'bugrouter draft --title <title> --steps <steps> %s' to stage a verified bug ticket", resolvedTarget.CanonicalName))
+			if len(dups) > 0 {
+				nextActions = append(nextActions, "Review potential upstream duplicates before submitting")
+			}
+			if schema != nil && schema.Name != "" {
+				nextActions = append(nextActions, fmt.Sprintf("Fill required fields defined in upstream issue template: %s", schema.Name))
+			}
+		} else {
+			nextActions = append(nextActions, "No candidates could be automatically resolved to an upstream tracker. Specify target manually via '--query <target>'")
+		}
+
+		if dups == nil {
+			dups = []dedup.ExistingIssue{}
+		}
+		if candidates == nil {
+			candidates = []resolver.TraceCandidate{}
+		}
+
+		scrubbed := scrubber.Scrub(rawLog)
+
+		if *jsonOut {
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			if err := enc.Encode(map[string]any{
+				"suspect":              suspect,
+				"candidates":           candidates,
+				"resolved_target":      resolvedTarget,
+				"template_schema":      schema,
+				"potential_duplicates": dups,
+				"scrubbed_log":         scrubbed,
+				"next_actions":         nextActions,
+			}); err != nil {
+				fmt.Fprintf(os.Stderr, "error: encode json: %v\n", err)
+				os.Exit(1)
+			}
+			return
+		}
+
+		fmt.Println("=== Latest System Crash Log ===")
+		if suspect != "" {
+			fmt.Printf("Suspect Binary / Package: %s\n", suspect)
+		}
+		if resolvedTarget != nil {
+			fmt.Printf("Resolved Upstream Target: %s (%s [%s])\n", resolvedTarget.CanonicalName, resolvedTarget.Tracker.URL, resolvedTarget.Tracker.Protocol)
+		} else {
+			fmt.Println("Resolved Upstream Target: (none)")
+		}
+		if len(candidates) > 0 {
+			fmt.Printf("\nExtracted Trace Candidates (%d found):\n", len(candidates))
+			for _, c := range candidates {
+				fmt.Printf("  - [%s] %s - %s\n", c.Source, c.Query, c.Evidence)
+			}
+		}
+		if len(dups) > 0 {
+			fmt.Printf("\nPotential Upstream Duplicates (%d found):\n", len(dups))
+			for _, d := range dups {
+				fmt.Printf("  - [%s] (%.0f%% match) %s\n    %s\n", d.State, d.Score*100, d.Title, d.URL)
+			}
+		}
+		if len(nextActions) > 0 {
+			fmt.Println("\nRecommended Next Actions:")
+			for _, a := range nextActions {
+				fmt.Printf("  * %s\n", a)
+			}
+		}
+		fmt.Printf("\nScrubbed Crash Log Sample:\n%s\n", scrubbed)
+		return
+
 	case "telemetry":
 		fs := flag.NewFlagSet("telemetry", flag.ContinueOnError)
 		jsonOut := fs.Bool("json", false, "output structured JSON")
@@ -1242,6 +1403,8 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "                              Interactive guided bug reporting wizard with live anti-slop quality linting")
 	fmt.Fprintln(os.Stderr, "  telemetry [--json] [--timeout <dur>]")
 	fmt.Fprintln(os.Stderr, "                              Inspect local operating system and hardware telemetry")
+	fmt.Fprintln(os.Stderr, "  crash-log [--json] [--query <target>] [--no-cache] [--timeout <dur>]")
+	fmt.Fprintln(os.Stderr, "                              Inspect and triage the latest native OS post-mortem crash log")
 	fmt.Fprintln(os.Stderr, "  agent triage [--log-file <path>] [--query <target>] [--title <t>] [--timeout <dur>]")
 	fmt.Fprintln(os.Stderr, "                              Autonomous triage of crash logs outputting machine-parseable JSON")
 	fmt.Fprintln(os.Stderr, "  agent verify --cmd <command> [--timeout <dur>] [--expect-exit <code>] [--work-dir <dir>]")

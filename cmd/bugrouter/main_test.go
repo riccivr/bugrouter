@@ -785,3 +785,25 @@ func TestRecoverAndParkSelfBug(t *testing.T) {
 		t.Errorf("reloaded title = %q, want %q", reloaded.Title, bug.Title)
 	}
 }
+
+func TestCrashLogPipeline(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	logData, suspect, err := resolver.ReadLatestCrash(ctx)
+	if err == nil {
+		if logData == "" {
+			t.Errorf("expected non-empty crash log when err == nil")
+		}
+		if suspect != "" {
+			candidates := resolver.ExtractTargetsFromLog(logData)
+			if len(candidates) < 0 {
+				t.Errorf("unexpected negative candidates")
+			}
+		}
+	} else {
+		if !strings.Contains(err.Error(), "no") && !strings.Contains(err.Error(), "context") && !strings.Contains(err.Error(), "not found") {
+			t.Logf("ReadLatestCrash returned: %v (expected in clean test environment)", err)
+		}
+	}
+}

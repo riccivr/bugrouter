@@ -131,8 +131,8 @@ body:
 	}
 	res3 := resp3.Result.(map[string]any)
 	tools := res3["tools"].([]any)
-	if len(tools) != 13 {
-		t.Errorf("expected 13 tools, got %d", len(tools))
+	if len(tools) != 14 {
+		t.Errorf("expected 14 tools, got %d", len(tools))
 	}
 	if len(tools) > 0 && tools[0].(map[string]any)["name"] != "park_bug" {
 		t.Errorf("expected first tool to be park_bug, got %v", tools[0].(map[string]any)["name"])
@@ -892,5 +892,33 @@ func TestMCPParkBugRelatedDependency(t *testing.T) {
 	}
 	if bugs[0].RelatedDependency != "grammarly-extension" {
 		t.Errorf("RelatedDependency = %q, want 'grammarly-extension'", bugs[0].RelatedDependency)
+	}
+}
+
+func TestReadSystemCrashLogTool(t *testing.T) {
+	server := NewServer(nil, nil)
+	var in bytes.Buffer
+	var out bytes.Buffer
+
+	callMsg := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"read_system_crash_log","arguments":{}}}` + "\n"
+	in.WriteString(callMsg)
+
+	if err := server.Run(context.Background(), &in, &out); err != nil {
+		t.Fatalf("server.Run failed: %v", err)
+	}
+
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	var resp jsonrpcResponse
+	if err := json.Unmarshal([]byte(lines[len(lines)-1]), &resp); err != nil {
+		t.Fatalf("unmarshal response failed: %v", err)
+	}
+
+	resultMap, ok := resp.Result.(map[string]any)
+	if !ok {
+		t.Fatalf("expected map result, got %T: %+v", resp.Result, resp.Result)
+	}
+	content, ok := resultMap["content"].([]any)
+	if !ok || len(content) == 0 {
+		t.Fatalf("expected content in result: %+v", resultMap)
 	}
 }
