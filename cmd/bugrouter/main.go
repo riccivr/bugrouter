@@ -360,6 +360,7 @@ func runTriage(ctx context.Context, httpClient *httpx.Client, in io.Reader, out 
 	logFile := fs.String("log-file", "", "path to crash log file or '-' for stdin")
 	query := fs.String("query", "", "target package name, binary name, or repo query override")
 	title := fs.String("title", "", "bug report title override for duplicate search")
+	summaryMD := fs.Bool("summary-md", false, "output GitHub-Flavored Markdown summary")
 	timeout := fs.Duration("timeout", 15*time.Second, "request and probe timeout duration")
 	noCache := fs.Bool("no-cache", false, "disable disk cache")
 	if err := fs.Parse(args); err != nil {
@@ -477,6 +478,47 @@ func runTriage(ctx context.Context, httpClient *httpx.Client, in io.Reader, out 
 		PotentialDuplicates: dups,
 		ScrubbedLog:         scrubber.Scrub(rawLog),
 		NextActions:         nextActions,
+	}
+
+	if *summaryMD {
+		var sb strings.Builder
+		sb.WriteString("### 🔍 bugrouter Crash Log Triage Summary\n\n")
+
+		if result.ResolvedTarget != nil {
+			sb.WriteString(fmt.Sprintf("**Resolved Upstream Target:** `%s` (%s [%s])\n\n",
+				result.ResolvedTarget.CanonicalName, result.ResolvedTarget.Tracker.URL, result.ResolvedTarget.Tracker.Protocol))
+		} else {
+			sb.WriteString("**Resolved Upstream Target:** _None automatically resolved_\n\n")
+		}
+
+		if len(result.Candidates) > 0 {
+			sb.WriteString("#### Extracted Trace Candidates\n\n")
+			sb.WriteString("| Source | Candidate Query | Evidence |\n")
+			sb.WriteString("| :--- | :--- | :--- |\n")
+			for _, c := range result.Candidates {
+				sb.WriteString(fmt.Sprintf("| `%s` | `%s` | `%s` |\n", c.Source, c.Query, c.Evidence))
+			}
+			sb.WriteString("\n")
+		}
+
+		if len(result.PotentialDuplicates) > 0 {
+			sb.WriteString(fmt.Sprintf("#### Potential Upstream Duplicates (%d found)\n\n", len(result.PotentialDuplicates)))
+			for _, d := range result.PotentialDuplicates {
+				sb.WriteString(fmt.Sprintf("- [%s] (%.0f%% match) [%s](%s)\n", d.State, d.Score*100, d.Title, d.URL))
+			}
+			sb.WriteString("\n")
+		}
+
+		if len(result.NextActions) > 0 {
+			sb.WriteString("#### Recommended Next Actions\n\n")
+			for _, action := range result.NextActions {
+				sb.WriteString(fmt.Sprintf("- %s\n", action))
+			}
+			sb.WriteString("\n")
+		}
+
+		fmt.Fprint(out, sb.String())
+		return 0
 	}
 
 	enc := json.NewEncoder(out)
@@ -698,6 +740,281 @@ func runScrub(in io.Reader, out io.Writer, errOut io.Writer, args []string) int 
 	return 0
 }
 
+func runParked(out io.Writer, errOut io.Writer, args []string) int {
+	var subAction string
+	var subArgs []string
+	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
+		subAction = "list"
+		subArgs = args
+	} else {
+		subAction = args[0]
+		subArgs = args[1:]
+	}
+
+	parkStore := adapter.NewParkedStore("")
+	switch subAction {
+	case "list":
+		fs := flag.NewFlagSet("parked list", flag.ContinueOnError)
+		fs.SetOutput(errOut)
+		jsonOut := fs.Bool("json", false, "output JSON array")
+		showAll := fs.Bool("all", false, "include triaged parked bugs")
+		if err := fs.Parse(subArgs); err != nil {
+			return 1
+		}
+		bugs, err := parkStore.List()
+		if err != nil {
+			fmt.Fprintf(errOut, "error: list parked bugs: %v\n", err)
+			return 1
+		}
+		var filtered []*adapter.ParkedBug
+		for _, b := range bugs {
+			if !*showAll && b.Status == "triaged" {
+				continue
+			}
+			filtered = append(filtered, b)
+		}
+		if filtered == nil {
+			filtered = []*adapter.ParkedBug{}
+		}
+
+		if *jsonOut {
+			enc := json.NewEncoder(out)
+			enc.SetIndent("", "  ")
+			if err := enc.Encode(filtered); err != nil {
+				fmt.Fprintf(errOut, "error: encode json: %v\n", err)
+				return 1
+			}
+			return 0
+		}
+		if len(filtered) == 0 {
+			fmt.Fprintln(out, "No active parked bugs in queue.")
+			return 0
+		}
+		fmt.Fprintf(out, "%-10s %-10s %-20s %-15s %-30s %s\n", "ID", "STATUS", "DEPENDENCY", "RELATED", "TITLE", "FILE")
+		fmt.Fprintln(out, strings.Repeat("-", 100))
+		for _, b := range filtered {
+			related := b.RelatedDependency
+			if related == "" {
+				related = "-"
+			}
+			file := b.WorkspaceFile
+			if file == "" {
+				file = "-"
+			}
+			status := b.Status
+			if status == "" {
+				status = "parked"
+			}
+			fmt.Fprintf(out, "%-10s %-10s %-20s %-15s %-30s %s\n", b.ID, status, b.Dependency, related, b.Title, file)
+		}
+		return 0
+
+	case "show":
+		fs := flag.NewFlagSet("parked show", flag.ContinueOnError)
+		fs.SetOutput(errOut)
+		jsonOut := fs.Bool("json", false, "output structured JSON")
+		if err := fs.Parse(subArgs); err != nil {
+			return 1
+		}
+		posArgs := fs.Args()
+		if len(posArgs) < 1 {
+			fmt.Fprintln(errOut, "error: parked show requires <id>")
+			fmt.Fprintln(errOut, "Usage: bugrouter parked show [--json] <id>")
+			return 1
+		}
+		id := posArgs[0]
+		b, err := parkStore.Get(id)
+		if err != nil {
+			fmt.Fprintf(errOut, "error: load parked bug %s: %v\n", id, err)
+			return 1
+		}
+		if *jsonOut {
+			enc := json.NewEncoder(out)
+			enc.SetIndent("", "  ")
+			if err := enc.Encode(b); err != nil {
+				fmt.Fprintf(errOut, "error: encode json: %v\n", err)
+				return 1
+			}
+			return 0
+		}
+		fmt.Fprintf(out, "Parked Bug ID:   %s\n", b.ID)
+		status := b.Status
+		if status == "" {
+			status = "parked"
+		}
+		fmt.Fprintf(out, "Status:          %s\n", status)
+		fmt.Fprintf(out, "Dependency:      %s\n", b.Dependency)
+		if b.RelatedDependency != "" {
+			fmt.Fprintf(out, "Related Dep:     %s\n", b.RelatedDependency)
+		}
+		fmt.Fprintf(out, "Title:           %s\n", b.Title)
+		if b.WorkspaceFile != "" {
+			fmt.Fprintf(out, "Workspace File:  %s\n", b.WorkspaceFile)
+		}
+		if string(b.WorkaroundNote) != "" {
+			fmt.Fprintf(out, "Workaround Note:\n  %s\n", b.WorkaroundNote)
+		}
+		if string(b.ErrorSnippet) != "" {
+			fmt.Fprintf(out, "Error Snippet:\n%s\n", b.ErrorSnippet)
+		}
+		fmt.Fprintf(out, "\nTo stage a draft bug report from this parked bug:\n  bugrouter draft --from-parked %s\n", b.ID)
+		return 0
+
+	case "rm":
+		if len(subArgs) < 1 {
+			fmt.Fprintln(errOut, "error: parked rm requires <id>")
+			fmt.Fprintln(errOut, "Usage: bugrouter parked rm <id>")
+			return 1
+		}
+		id := subArgs[0]
+		if err := parkStore.Delete(id); err != nil {
+			fmt.Fprintf(errOut, "error: remove parked bug %s: %v\n", id, err)
+			return 1
+		}
+		fmt.Fprintf(out, "Removed parked bug %s from queue.\n", id)
+		return 0
+
+	default:
+		fmt.Fprintf(errOut, "error: unknown parked subcommand %q\n", subAction)
+		fmt.Fprintln(errOut, "Usage: bugrouter parked <list|show|rm> [arguments...]")
+		return 1
+	}
+}
+
+func runPatchCheck(ctx context.Context, httpClient *httpx.Client, out, errOut io.Writer, args []string) int {
+	fs := flag.NewFlagSet("patch check", flag.ContinueOnError)
+	fs.SetOutput(errOut)
+	jsonOut := fs.Bool("json", false, "output JSON array of patch status results")
+	summaryMD := fs.Bool("summary-md", false, "output GitHub-Flavored Markdown summary")
+	failOnRevertable := fs.Bool("fail-on-revertable", false, "exit with code 2 if any patch can be reverted")
+	timeout := fs.Duration("timeout", 15*time.Second, "timeout for checking upstream status")
+	if err := fs.Parse(args); err != nil {
+		return 1
+	}
+	patchStore := adapter.NewPatchStore("")
+	patches, err := patchStore.List()
+	if err != nil {
+		fmt.Fprintf(errOut, "error: list patches: %v\n", err)
+		return 1
+	}
+	if len(patches) == 0 {
+		if *summaryMD {
+			fmt.Fprint(out, "### 🛡️ bugrouter Upstream Patch Audit\n\nNo active temporary dependency patches tracked in ledger.\n")
+		} else if *jsonOut {
+			fmt.Fprintln(out, "[]")
+		} else {
+			fmt.Fprintln(out, "No active dependency patches tracked in ledger.")
+		}
+		return 0
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(ctx, *timeout)
+	defer cancel()
+	if httpClient == nil {
+		httpClient = httpx.NewClient(5 * time.Second)
+	}
+	results, err := adapter.CheckPatchUpstreamStatus(ctx, httpClient, patches)
+	if err != nil {
+		fmt.Fprintf(errOut, "error: check patches: %v\n", err)
+		return 1
+	}
+
+	revertableCount := 0
+	for _, r := range results {
+		if r.CanRevert {
+			revertableCount++
+		}
+	}
+
+	if *summaryMD {
+		var sb strings.Builder
+		if revertableCount > 0 {
+			sb.WriteString(fmt.Sprintf("### ⚠️ bugrouter Upstream Patch Audit: %d Revertable Fork(s) Detected\n\n", revertableCount))
+			sb.WriteString("The following tracked dependencies have resolved upstream issues and can be safely reverted:\n\n")
+			sb.WriteString("| Dependency | State | Target | Upstream Issue |\n")
+			sb.WriteString("| :--- | :--- | :--- | :--- |\n")
+			for _, r := range results {
+				if r.CanRevert {
+					url := r.Patch.UpstreamIssueURL
+					if url == "" {
+						url = "-"
+					}
+					sb.WriteString(fmt.Sprintf("| `%s` | **%s** | `%s` | %s |\n", r.Patch.Dependency, r.UpstreamState, r.Patch.PatchTarget, url))
+				}
+			}
+			sb.WriteString("\n<details><summary>All Tracked Patches</summary>\n\n")
+			sb.WriteString("| Dependency | State | Status | Upstream Issue |\n")
+			sb.WriteString("| :--- | :--- | :--- | :--- |\n")
+			for _, r := range results {
+				status := "Active Fork"
+				if r.CanRevert {
+					status = "✅ Ready to Revert"
+				}
+				url := r.Patch.UpstreamIssueURL
+				if url == "" {
+					url = "-"
+				}
+				sb.WriteString(fmt.Sprintf("| `%s` | %s | %s | %s |\n", r.Patch.Dependency, r.UpstreamState, status, url))
+			}
+			sb.WriteString("\n</details>\n")
+		} else {
+			sb.WriteString("### ✅ bugrouter Upstream Patch Audit: All Clear\n\nAll tracked dependency patches remain active upstream. No temporary forks are ready for revert.\n\n")
+			sb.WriteString("| Dependency | State | Target | Upstream Issue |\n")
+			sb.WriteString("| :--- | :--- | :--- | :--- |\n")
+			for _, r := range results {
+				url := r.Patch.UpstreamIssueURL
+				if url == "" {
+					url = "-"
+				}
+				sb.WriteString(fmt.Sprintf("| `%s` | %s | `%s` | %s |\n", r.Patch.Dependency, r.UpstreamState, r.Patch.PatchTarget, url))
+			}
+		}
+		fmt.Fprint(out, sb.String())
+		if *failOnRevertable && revertableCount > 0 {
+			return 2
+		}
+		return 0
+	}
+
+	if *jsonOut {
+		enc := json.NewEncoder(out)
+		enc.SetIndent("", "  ")
+		if err := enc.Encode(results); err != nil {
+			fmt.Fprintf(errOut, "error: encode json: %v\n", err)
+			return 1
+		}
+		if *failOnRevertable && revertableCount > 0 {
+			return 2
+		}
+		return 0
+	}
+	fmt.Fprintf(out, "%-10s %-25s %-12s %-20s %s\n", "ID", "DEPENDENCY", "STATE", "STATUS", "UPSTREAM ISSUE")
+	fmt.Fprintln(out, strings.Repeat("-", 95))
+	for _, r := range results {
+		statusStr := "-"
+		if r.CanRevert {
+			statusStr = "[READY TO REVERT]"
+		} else if r.UpstreamState == "open" {
+			statusStr = "Upstream Open"
+		} else if r.UpstreamState == "no_url" {
+			statusStr = "No Upstream URL"
+		} else if r.CheckError != "" {
+			statusStr = "Check Error"
+		}
+		issueURL := r.Patch.UpstreamIssueURL
+		if issueURL == "" {
+			issueURL = "-"
+		}
+		fmt.Fprintf(out, "%-10s %-25s %-12s %-20s %s\n", r.Patch.ID, r.Patch.Dependency, r.UpstreamState, statusStr, issueURL)
+	}
+	if *failOnRevertable && revertableCount > 0 {
+		return 2
+	}
+	return 0
+}
+
 func main() {
 	defer func() {
 		if r := recover(); r != nil {
@@ -897,6 +1214,16 @@ func main() {
 		fmt.Printf("\nDirective:\n  %s\n", handoff.AgentDirective)
 		return
 
+	case "parked":
+		var parkedArgs []string
+		if len(os.Args) > 2 {
+			parkedArgs = os.Args[2:]
+		}
+		if code := runParked(os.Stdout, os.Stderr, parkedArgs); code != 0 {
+			os.Exit(code)
+		}
+		return
+
 	case "patch":
 		if len(os.Args) < 3 {
 			fmt.Fprintln(os.Stderr, "Usage: bugrouter patch <list|add|check|rm> [arguments...]")
@@ -936,60 +1263,12 @@ func main() {
 			return
 
 		case "check":
-			fs := flag.NewFlagSet("patch check", flag.ContinueOnError)
-			jsonOut := fs.Bool("json", false, "output JSON array of patch status results")
-			timeout := fs.Duration("timeout", 15*time.Second, "timeout for checking upstream status")
-			if err := fs.Parse(os.Args[3:]); err != nil {
-				os.Exit(1)
+			var checkArgs []string
+			if len(os.Args) > 3 {
+				checkArgs = os.Args[3:]
 			}
-			patches, err := patchStore.List()
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "error: list patches: %v\n", err)
-				os.Exit(1)
-			}
-			if len(patches) == 0 {
-				if *jsonOut {
-					fmt.Println("[]")
-				} else {
-					fmt.Println("No active dependency patches tracked in ledger.")
-				}
-				return
-			}
-			ctx, cancel := context.WithTimeout(context.Background(), *timeout)
-			defer cancel()
-			client := httpx.NewClient(5 * time.Second)
-			results, err := adapter.CheckPatchUpstreamStatus(ctx, client, patches)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "error: check patches: %v\n", err)
-				os.Exit(1)
-			}
-			if *jsonOut {
-				enc := json.NewEncoder(os.Stdout)
-				enc.SetIndent("", "  ")
-				if err := enc.Encode(results); err != nil {
-					fmt.Fprintf(os.Stderr, "error: encode json: %v\n", err)
-					os.Exit(1)
-				}
-				return
-			}
-			fmt.Printf("%-10s %-25s %-12s %-20s %s\n", "ID", "DEPENDENCY", "STATE", "STATUS", "UPSTREAM ISSUE")
-			fmt.Println(strings.Repeat("-", 95))
-			for _, r := range results {
-				statusStr := "-"
-				if r.CanRevert {
-					statusStr = "[READY TO REVERT]"
-				} else if r.UpstreamState == "open" {
-					statusStr = "Upstream Open"
-				} else if r.UpstreamState == "no_url" {
-					statusStr = "No Upstream URL"
-				} else if r.CheckError != "" {
-					statusStr = "Check Error"
-				}
-				issueURL := r.Patch.UpstreamIssueURL
-				if issueURL == "" {
-					issueURL = "-"
-				}
-				fmt.Printf("%-10s %-25s %-12s %-20s %s\n", r.Patch.ID, r.Patch.Dependency, r.UpstreamState, statusStr, issueURL)
+			if code := runPatchCheck(context.Background(), nil, os.Stdout, os.Stderr, checkArgs); code != 0 {
+				os.Exit(code)
 			}
 			return
 
@@ -1719,17 +1998,21 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "  dedup [--json] [--no-cache] [--timeout <dur>] <target> <title>")
 	fmt.Fprintln(os.Stderr, "                              Query upstream tracker for existing duplicate bug reports")
 	fmt.Fprintln(os.Stderr, "  scrub [--input <text>]      Deterministically scrub secrets and sensitive paths from input text")
-	fmt.Fprintln(os.Stderr, "  triage [--log-file <path>] [--query <target>] [--title <t>] [--timeout <dur>]")
-	fmt.Fprintln(os.Stderr, "                              Autonomous triage of crash logs outputting machine-parseable JSON")
+	fmt.Fprintln(os.Stderr, "  triage [--log-file <path>] [--query <target>] [--title <t>] [--summary-md] [--timeout <dur>]")
+	fmt.Fprintln(os.Stderr, "                              Autonomous triage of crash logs outputting machine-parseable JSON or Markdown")
 	fmt.Fprintln(os.Stderr, "  verify --cmd <command> [--timeout <dur>] [--expect-exit <code>] [--work-dir <dir>]")
 	fmt.Fprintln(os.Stderr, "                              Bounded reproduction execution and deterministic proof generation")
 	fmt.Fprintln(os.Stderr, "  park [--snippet <s>] [--workaround <w>] [--file <f>] [--related-dep <pkg>] [--json] <dependency> <title>")
 	fmt.Fprintln(os.Stderr, "                              Instantly park a 3rd-party anomaly in <5ms without hijacking session")
+	fmt.Fprintln(os.Stderr, "  parked [list] [--all] [--json]")
+	fmt.Fprintln(os.Stderr, "                              List active parked bug breadcrumbs in queue")
+	fmt.Fprintln(os.Stderr, "  parked show [--json] <id>   Inspect details of a parked bug breadcrumb")
+	fmt.Fprintln(os.Stderr, "  parked rm <id>              Remove a parked bug breadcrumb from queue")
 	fmt.Fprintln(os.Stderr, "  patch list [--json]         List tracked dependency patches and temporary forks")
 	fmt.Fprintln(os.Stderr, "  patch add --dep <d> --target <fork> [--ecosystem <e>] [--issue <url>] [--manifest <m>] [--reason <r>]")
 	fmt.Fprintln(os.Stderr, "                              Record a temporary dependency fork/patch in the ledger")
 	fmt.Fprintln(os.Stderr, "  patch rm <id-or-dep>        Remove a dependency patch from the ledger")
-	fmt.Fprintln(os.Stderr, "  patch check [--json] [--timeout <dur>]")
+	fmt.Fprintln(os.Stderr, "  patch check [--json] [--summary-md] [--fail-on-revertable] [--timeout <dur>]")
 	fmt.Fprintln(os.Stderr, "                              Check upstream issue status for tracked patches and flag revertable forks")
 	fmt.Fprintln(os.Stderr, "  draft [--title <t>] [--summary <s>] [--steps <st>] [--logs <l>] [--from-parked <id>] [--related-dep <pkg>]")
 	fmt.Fprintln(os.Stderr, "        [--verify-cmd <cmd>] [--with-telemetry] [--body-file <path>] [--strict-quality] [--timeout <dur>] [--json] [--no-cache] [<q>]")
@@ -1741,8 +2024,8 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "                              Inspect local operating system and hardware telemetry")
 	fmt.Fprintln(os.Stderr, "  crash-log [--json] [--query <target>] [--no-cache] [--timeout <dur>]")
 	fmt.Fprintln(os.Stderr, "                              Inspect and triage the latest native OS post-mortem crash log")
-	fmt.Fprintln(os.Stderr, "  agent triage [--log-file <path>] [--query <target>] [--title <t>] [--timeout <dur>]")
-	fmt.Fprintln(os.Stderr, "                              Autonomous triage of crash logs outputting machine-parseable JSON")
+	fmt.Fprintln(os.Stderr, "  agent triage [--log-file <path>] [--query <target>] [--title <t>] [--summary-md] [--timeout <dur>]")
+	fmt.Fprintln(os.Stderr, "                              Autonomous triage of crash logs outputting machine-parseable JSON or Markdown")
 	fmt.Fprintln(os.Stderr, "  agent verify --cmd <command> [--timeout <dur>] [--expect-exit <code>] [--work-dir <dir>]")
 	fmt.Fprintln(os.Stderr, "                              Bounded reproduction execution and deterministic proof generation")
 	fmt.Fprintln(os.Stderr, "  agent telemetry [--json] [--timeout <dur>]")

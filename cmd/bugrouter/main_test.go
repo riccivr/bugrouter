@@ -1114,3 +1114,320 @@ Strictly NO AI-generated issues or automated bots allowed.
 		t.Errorf("expected exit code 1 for missing title, got %d", codeDedupMissing)
 	}
 }
+
+func TestParkedCLICommands(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", tempDir)
+
+	var out, errOut bytes.Buffer
+
+	// 1. List with empty queue
+	code := runParked(&out, &errOut, []string{"list"})
+	if code != 0 {
+		t.Fatalf("expected exit code 0, got %d (err: %s)", code, errOut.String())
+	}
+	if !strings.Contains(out.String(), "No active parked bugs in queue.") {
+		t.Errorf("expected empty message, got %q", out.String())
+	}
+
+	// 2. List --json with empty queue
+	out.Reset()
+	errOut.Reset()
+	code = runParked(&out, &errOut, []string{"list", "--json"})
+	if code != 0 {
+		t.Fatalf("expected exit code 0, got %d (err: %s)", code, errOut.String())
+	}
+	var emptyBugs []*adapter.ParkedBug
+	if err := json.Unmarshal(out.Bytes(), &emptyBugs); err != nil {
+		t.Fatalf("decode json: %v", err)
+	}
+	if len(emptyBugs) != 0 {
+		t.Errorf("expected 0 bugs, got %d", len(emptyBugs))
+	}
+
+	// 3. Park bugs
+	store := adapter.NewParkedStore("")
+	bug1, _, err := store.Park("golang.org/x/crypto", "argon2 memory panic", "SIGSEGV at 0x0", "pin to v0.1.0", "auth/crypto.go", "golang.org/x/sys")
+	if err != nil {
+		t.Fatalf("park bug1: %v", err)
+	}
+	bug2, _, err := store.Park("github.com/pkg/errors", "stack overflow on wrap", "runtime: goroutine stack exceeds 1000000000-byte limit", "use fmt.Errorf", "server/handler.go", "")
+	if err != nil {
+		t.Fatalf("park bug2: %v", err)
+	}
+
+	// 4. Default invocation without 'list'
+	out.Reset()
+	errOut.Reset()
+	code = runParked(&out, &errOut, []string{})
+	if code != 0 {
+		t.Fatalf("expected code 0, got %d", code)
+	}
+	if !strings.Contains(out.String(), bug1.ID) || !strings.Contains(out.String(), bug2.ID) {
+		t.Errorf("expected both bugs in table output, got:\n%s", out.String())
+	}
+
+	// 5. List --json with active bugs
+	out.Reset()
+	errOut.Reset()
+	code = runParked(&out, &errOut, []string{"--json"})
+	if code != 0 {
+		t.Fatalf("expected code 0, got %d", code)
+	}
+	var listedBugs []*adapter.ParkedBug
+	if err := json.Unmarshal(out.Bytes(), &listedBugs); err != nil {
+		t.Fatalf("decode json: %v", err)
+	}
+	if len(listedBugs) != 2 {
+		t.Errorf("expected 2 bugs, got %d", len(listedBugs))
+	}
+
+	// 6. Show bug1
+	out.Reset()
+	errOut.Reset()
+	code = runParked(&out, &errOut, []string{"show", bug1.ID})
+	if code != 0 {
+		t.Fatalf("expected code 0, got %d", code)
+	}
+	showText := out.String()
+	if !strings.Contains(showText, bug1.ID) || !strings.Contains(showText, "argon2 memory panic") || !strings.Contains(showText, "pin to v0.1.0") {
+		t.Errorf("missing expected fields in show output:\n%s", showText)
+	}
+	if !strings.Contains(showText, "bugrouter draft --from-parked "+bug1.ID) {
+		t.Errorf("missing draft instruction in show output:\n%s", showText)
+	}
+
+	// 7. Show bug1 --json
+	out.Reset()
+	errOut.Reset()
+	code = runParked(&out, &errOut, []string{"show", "--json", bug1.ID})
+	if code != 0 {
+		t.Fatalf("expected code 0, got %d", code)
+	}
+	var loadedBug adapter.ParkedBug
+	if err := json.Unmarshal(out.Bytes(), &loadedBug); err != nil {
+		t.Fatalf("decode show json: %v", err)
+	}
+	if loadedBug.ID != bug1.ID || loadedBug.Dependency != "golang.org/x/crypto" {
+		t.Errorf("unexpected loaded bug: %+v", loadedBug)
+	}
+
+	// 8. Show non-existent bug
+	out.Reset()
+	errOut.Reset()
+	code = runParked(&out, &errOut, []string{"show", "non-existent-id"})
+	if code != 1 {
+		t.Errorf("expected code 1 for non-existent bug, got %d", code)
+	}
+
+	// 9. Show missing ID argument
+	out.Reset()
+	errOut.Reset()
+	code = runParked(&out, &errOut, []string{"show"})
+	if code != 1 {
+		t.Errorf("expected code 1 for missing ID, got %d", code)
+	}
+
+	// 10. Mark bug2 as triaged, verify list filters it out unless --all
+	bug2.Status = "triaged"
+	if err := store.Save(bug2); err != nil {
+		t.Fatalf("save triaged bug: %v", err)
+	}
+
+	out.Reset()
+	errOut.Reset()
+	code = runParked(&out, &errOut, []string{"list"})
+	if code != 0 {
+		t.Fatalf("expected code 0, got %d", code)
+	}
+	if strings.Contains(out.String(), bug2.ID) {
+		t.Errorf("expected bug2 to be hidden when not using --all")
+	}
+	if !strings.Contains(out.String(), bug1.ID) {
+		t.Errorf("expected bug1 to be present")
+	}
+
+	out.Reset()
+	errOut.Reset()
+	code = runParked(&out, &errOut, []string{"list", "--all"})
+	if code != 0 {
+		t.Fatalf("expected code 0, got %d", code)
+	}
+	if !strings.Contains(out.String(), bug2.ID) || !strings.Contains(out.String(), bug1.ID) {
+		t.Errorf("expected both bugs with --all, got:\n%s", out.String())
+	}
+
+	// 11. Remove bug1
+	out.Reset()
+	errOut.Reset()
+	code = runParked(&out, &errOut, []string{"rm", bug1.ID})
+	if code != 0 {
+		t.Fatalf("expected code 0, got %d (err: %s)", code, errOut.String())
+	}
+	if !strings.Contains(out.String(), "Removed parked bug "+bug1.ID) {
+		t.Errorf("unexpected rm output: %s", out.String())
+	}
+
+	// Verify bug1 is gone
+	_, err = store.Get(bug1.ID)
+	if err == nil {
+		t.Errorf("expected error getting deleted bug1, got nil")
+	}
+
+	// 12. Remove non-existent bug
+	out.Reset()
+	errOut.Reset()
+	code = runParked(&out, &errOut, []string{"rm", "non-existent-id"})
+	if code != 1 {
+		t.Errorf("expected code 1 for non-existent rm, got %d", code)
+	}
+
+	// 13. Remove missing ID
+	out.Reset()
+	errOut.Reset()
+	code = runParked(&out, &errOut, []string{"rm"})
+	if code != 1 {
+		t.Errorf("expected code 1 for missing ID, got %d", code)
+	}
+
+	// 14. Unknown sub-action
+	out.Reset()
+	errOut.Reset()
+	code = runParked(&out, &errOut, []string{"unknown"})
+	if code != 1 {
+		t.Errorf("expected code 1 for unknown subcommand, got %d", code)
+	}
+}
+
+func TestRunTriageSummaryMD(t *testing.T) {
+	crashLog := `goroutine 1 [running]:
+github.com/myorg/checkout-api/worker.ProcessPayment()
+	/app/worker.go:42 +0x123
+panic: connection timeout
+`
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	code := runTriage(context.Background(), nil, strings.NewReader(crashLog), &out, &errOut, []string{"--summary-md"})
+	if code != 0 {
+		t.Fatalf("expected exit code 0, got %d (err: %s)", code, errOut.String())
+	}
+
+	summary := out.String()
+	if !strings.Contains(summary, "### 🔍 bugrouter Crash Log Triage Summary") {
+		t.Errorf("missing summary header, got: %s", summary)
+	}
+	if !strings.Contains(summary, "#### Extracted Trace Candidates") {
+		t.Errorf("missing Extracted Trace Candidates section, got: %s", summary)
+	}
+	if !strings.Contains(summary, "| Source | Candidate Query | Evidence |") {
+		t.Errorf("missing candidates table header, got: %s", summary)
+	}
+	if !strings.Contains(summary, "#### Recommended Next Actions") {
+		t.Errorf("missing Recommended Next Actions, got: %s", summary)
+	}
+}
+
+func TestPatchCheckSummaryMDAndFailOnRevertable(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.Contains(r.URL.Path, "closed") {
+			fmt.Fprint(w, `{"state": "closed"}`)
+		} else {
+			fmt.Fprint(w, `{"state": "open"}`)
+		}
+	}))
+	defer ts.Close()
+
+	tempDir := t.TempDir()
+	patchFile := filepath.Join(tempDir, "patches.json")
+	t.Setenv("BUGROUTER_PATCHES_FILE", patchFile)
+
+	var out, errOut bytes.Buffer
+
+	testClient := httpx.NewTestClient(5 * time.Second)
+
+	// 1. Empty patch check with --summary-md
+	code := runPatchCheck(context.Background(), testClient, &out, &errOut, []string{"--summary-md"})
+	if code != 0 {
+		t.Fatalf("expected code 0, got %d", code)
+	}
+	if !strings.Contains(out.String(), "### 🛡️ bugrouter Upstream Patch Audit") || !strings.Contains(out.String(), "No active temporary dependency patches tracked in ledger.") {
+		t.Errorf("unexpected empty patch check summary: %s", out.String())
+	}
+
+	// 2. Empty patch check with --fail-on-revertable
+	out.Reset()
+	errOut.Reset()
+	code = runPatchCheck(context.Background(), testClient, &out, &errOut, []string{"--fail-on-revertable"})
+	if code != 0 {
+		t.Fatalf("expected code 0 on empty with --fail-on-revertable, got %d", code)
+	}
+
+	// 3. Record open patch
+	store := adapter.NewPatchStore(patchFile)
+	_, err := store.Record(
+		"react-dom",
+		"npm",
+		"patches/react-dom.patch",
+		"package.json",
+		ts.URL+"/repos/facebook/react/issues/open-issue",
+		"Work around bug",
+	)
+	if err != nil {
+		t.Fatalf("Record open patch: %v", err)
+	}
+
+	// Check with --summary-md (all clear)
+	out.Reset()
+	errOut.Reset()
+	code = runPatchCheck(context.Background(), testClient, &out, &errOut, []string{"--summary-md", "--fail-on-revertable"})
+	if code != 0 {
+		t.Fatalf("expected code 0 for open patch, got %d", code)
+	}
+	if !strings.Contains(out.String(), "### ✅ bugrouter Upstream Patch Audit: All Clear") {
+		t.Errorf("expected All Clear summary, got: %s", out.String())
+	}
+
+	// 4. Record closed patch (revertable)
+	_, err = store.Record(
+		"golang.org/x/crypto",
+		"go",
+		"vendor/x_crypto.patch",
+		"go.mod",
+		ts.URL+"/repos/golang/crypto/issues/closed-issue",
+		"Fix upstream panic",
+	)
+	if err != nil {
+		t.Fatalf("Record closed patch: %v", err)
+	}
+
+	// Check with --summary-md (warning / revertable detected)
+	out.Reset()
+	errOut.Reset()
+	code = runPatchCheck(context.Background(), testClient, &out, &errOut, []string{"--summary-md"})
+	if code != 0 {
+		t.Fatalf("expected code 0 without --fail-on-revertable, got %d", code)
+	}
+	if !strings.Contains(out.String(), "### ⚠️ bugrouter Upstream Patch Audit: 1 Revertable Fork(s) Detected") {
+		t.Errorf("expected 1 Revertable Fork(s) Detected, got: %s", out.String())
+	}
+	if !strings.Contains(out.String(), "Ready to Revert") {
+		t.Errorf("expected 'Ready to Revert' in details, got: %s", out.String())
+	}
+
+	// Check with --fail-on-revertable (must exit with code 2)
+	out.Reset()
+	errOut.Reset()
+	code = runPatchCheck(context.Background(), testClient, &out, &errOut, []string{"--fail-on-revertable", "--summary-md"})
+	if code != 2 {
+		t.Fatalf("expected exit code 2 with --fail-on-revertable, got %d", code)
+	}
+
+	// Check --json with --fail-on-revertable (must also exit code 2)
+	out.Reset()
+	errOut.Reset()
+	code = runPatchCheck(context.Background(), testClient, &out, &errOut, []string{"--json", "--fail-on-revertable"})
+	if code != 2 {
+		t.Fatalf("expected exit code 2 with --json --fail-on-revertable, got %d", code)
+	}
+}
