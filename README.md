@@ -317,6 +317,8 @@ The embedded Cloud Control Plane (`bugrouter serve`) provides a single-pane-of-g
    Live inventory of workspace dependencies with upstream open issue alerts.
 6. **Append-Only Audit Trail**:
    Structured log of all triage, dispatch, patch, and service operations.
+7. **Parked Bug Breadcrumbs (`<5ms` Handoff Queue)**:
+   Real-time queue of parked 3rd-party anomalies recorded during coding sessions via `GET /api/v1/parked` and dismissible via `DELETE /api/v1/parked/{id}`. Features a 1-click "Stage Draft" promotion that instantly pre-fills the Guided Report Composer with the dependency, error snippets, workaround notes, and related dependency links for human triage.
 
 ---
 

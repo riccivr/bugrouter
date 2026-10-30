@@ -3,6 +3,7 @@ package adapter
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -112,9 +113,11 @@ func TestParkedStoreLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stat parked file failed: %v", err)
 	}
-	perm := info.Mode().Perm()
-	if perm != 0600 {
-		t.Errorf("expected 0600 file permissions, got %04o", perm)
+	if runtime.GOOS != "windows" {
+		perm := info.Mode().Perm()
+		if perm != 0600 {
+			t.Errorf("expected 0600 file permissions, got %04o", perm)
+		}
 	}
 
 	// 4. Get
@@ -222,8 +225,10 @@ func TestPatchStoreLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stat patches.json failed: %v", err)
 	}
-	if perm := fi.Mode().Perm(); perm != 0600 {
-		t.Errorf("expected 0600 file permissions, got %04o", perm)
+	if runtime.GOOS != "windows" {
+		if perm := fi.Mode().Perm(); perm != 0600 {
+			t.Errorf("expected 0600 file permissions, got %04o", perm)
+		}
 	}
 
 	// 5. List patches

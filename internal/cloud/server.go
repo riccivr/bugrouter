@@ -732,6 +732,16 @@ func (s *Server) handleListParked(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("list parked: %v", err), http.StatusInternalServerError)
 		return
 	}
+	showAll := r.URL.Query().Get("all") == "1" || r.URL.Query().Get("all") == "true"
+	if !showAll {
+		var active []*adapter.ParkedBug
+		for _, b := range bugs {
+			if b.Status != "triaged" {
+				active = append(active, b)
+			}
+		}
+		bugs = active
+	}
 	if bugs == nil {
 		bugs = []*adapter.ParkedBug{}
 	}
@@ -821,15 +831,17 @@ func (s *Server) handleListDrafts(w http.ResponseWriter, r *http.Request) {
 
 // CreateDraftRequest defines the payload for creating a staged bug report draft.
 type CreateDraftRequest struct {
-	Query            string `json:"query"`
-	Title            string `json:"title"`
-	Summary          string `json:"summary"`
-	StepsToReproduce string `json:"steps_to_reproduce"`
-	ExpectedBehavior string `json:"expected_behavior,omitempty"`
-	ActualBehavior   string `json:"actual_behavior,omitempty"`
-	Logs             string `json:"logs,omitempty"`
-	IncludeTelemetry bool   `json:"include_telemetry"`
-	StrictQuality    bool   `json:"strict_quality"`
+	Query             string `json:"query"`
+	Title             string `json:"title"`
+	Summary           string `json:"summary"`
+	StepsToReproduce  string `json:"steps_to_reproduce"`
+	ExpectedBehavior  string `json:"expected_behavior,omitempty"`
+	ActualBehavior    string `json:"actual_behavior,omitempty"`
+	Logs              string `json:"logs,omitempty"`
+	IncludeTelemetry  bool   `json:"include_telemetry"`
+	StrictQuality     bool   `json:"strict_quality"`
+	ParkedID          string `json:"parked_id,omitempty"`
+	RelatedDependency string `json:"related_dependency,omitempty"`
 }
 
 func (s *Server) handleCreateDraft(w http.ResponseWriter, r *http.Request) {
@@ -891,6 +903,19 @@ func (s *Server) handleCreateDraft(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Query related dependency duplicates if requested
+	var relatedIssues []dedup.ExistingIssue
+	req.RelatedDependency = strings.TrimSpace(req.RelatedDependency)
+	if req.RelatedDependency != "" && s.resolver != nil && s.dedupFinder != nil {
+		relTarget, relErr := s.resolver.Resolve(r.Context(), req.RelatedDependency)
+		if relErr == nil && relTarget != nil {
+			searchQuery := scrubber.Scrub(req.Title + " " + req.Summary)
+			if relDups, err := s.dedupFinder.FindDuplicates(r.Context(), *relTarget, searchQuery); err == nil {
+				relatedIssues = relDups
+			}
+		}
+	}
+
 	// Introspect issue template and maintainer policy if available
 	var schema *introspector.TemplateSchema
 	if s.introspector != nil && target != nil {
@@ -901,16 +926,18 @@ func (s *Server) handleCreateDraft(w http.ResponseWriter, r *http.Request) {
 
 	// Build staged draft
 	draft, err := adapter.BuildDraft(adapter.DraftInput{
-		Target:           *target,
-		Template:         schema,
-		Title:            req.Title,
-		Summary:          req.Summary,
-		StepsToReproduce: req.StepsToReproduce,
-		ExpectedBehavior: req.ExpectedBehavior,
-		ActualBehavior:   req.ActualBehavior,
-		Logs:             req.Logs,
-		Duplicates:       dups,
-		Telemetry:        sysTelemetry,
+		Target:            *target,
+		Template:          schema,
+		Title:             req.Title,
+		Summary:           req.Summary,
+		StepsToReproduce:  req.StepsToReproduce,
+		ExpectedBehavior:  req.ExpectedBehavior,
+		ActualBehavior:    req.ActualBehavior,
+		Logs:              req.Logs,
+		Duplicates:        dups,
+		Telemetry:         sysTelemetry,
+		RelatedDependency: req.RelatedDependency,
+		RelatedIssues:     relatedIssues,
 	})
 	if err != nil {
 		http.Error(w, fmt.Sprintf("build draft: %v", err), http.StatusBadRequest)
@@ -934,6 +961,16 @@ func (s *Server) handleCreateDraft(w http.ResponseWriter, r *http.Request) {
 			return
 		} else if savedPath == "" {
 			// Non-fatal
+		}
+	}
+
+	// If spawned from a parked bug, transition the parked bug to "triaged"
+	if req.ParkedID != "" && s.parkedStore != nil {
+		if p, getErr := s.parkedStore.Get(req.ParkedID); getErr == nil && p != nil {
+			p.Status = "triaged"
+			if saveErr := s.parkedStore.Save(p); saveErr != nil {
+				fmt.Fprintf(os.Stderr, "failed to update parked bug status to triaged: %v\n", saveErr)
+			}
 		}
 	}
 
@@ -1594,6 +1631,7 @@ const indexHTML = `<!DOCTYPE html>
       <h3 style="margin-top:0; color:var(--heading);">New Guided Bug Report</h3>
       <div id="composer-error" style="display:none; color:var(--danger); margin-bottom:12px; font-size:0.85rem;"></div>
       <div style="display:flex; flex-direction:column; gap:12px;">
+        <input type="hidden" id="comp-parked-id">
         <div>
           <label style="display:block; font-size:0.8rem; color:var(--muted); margin-bottom:4px;">Target Query (e.g. org/repo, command, URL) *</label>
           <input type="text" id="comp-query" placeholder="github.com/myorg/myapp" style="width:100%; box-sizing:border-box; padding:8px; background:var(--bg); border:1px solid var(--border); border-radius:6px; color:var(--text); font-size:0.85rem;">
@@ -1623,6 +1661,10 @@ const indexHTML = `<!DOCTYPE html>
         <div>
           <label style="display:block; font-size:0.8rem; color:var(--muted); margin-bottom:4px;">Logs / Stack Trace</label>
           <textarea id="comp-logs" rows="3" placeholder="Paste error logs here..." style="width:100%; box-sizing:border-box; padding:8px; background:var(--bg); border:1px solid var(--border); border-radius:6px; color:var(--text); font-size:0.85rem; font-family:inherit;"></textarea>
+        </div>
+        <div>
+          <label style="display:block; font-size:0.8rem; color:var(--muted); margin-bottom:4px;">Related Dependency (optional cross-dependency duplicate search)</label>
+          <input type="text" id="comp-related-dep" placeholder="github.com/upstream/lib or sharp" style="width:100%; box-sizing:border-box; padding:8px; background:var(--bg); border:1px solid var(--border); border-radius:6px; color:var(--text); font-size:0.85rem;">
         </div>
         <div style="display:flex; align-items:center; gap:8px;">
           <input type="checkbox" id="comp-telemetry" checked>
@@ -1925,6 +1967,8 @@ const indexHTML = `<!DOCTYPE html>
       const b = currentParked.find(x => x.id === id);
       if (!b) return;
       openComposerModal();
+      document.getElementById('comp-parked-id').value = b.id || '';
+      document.getElementById('comp-related-dep').value = b.related_dependency || '';
       document.getElementById('comp-query').value = b.dependency || '';
       document.getElementById('comp-title').value = b.title || '';
       if (b.workaround_note) {
@@ -2267,6 +2311,10 @@ const indexHTML = `<!DOCTYPE html>
     function openComposerModal() {
       const errEl = document.getElementById('composer-error');
       if (errEl) errEl.style.display = 'none';
+      const pidEl = document.getElementById('comp-parked-id');
+      if (pidEl) pidEl.value = '';
+      const rdepEl = document.getElementById('comp-related-dep');
+      if (rdepEl) rdepEl.value = '';
       document.getElementById('composer-modal').style.display = 'flex';
     }
 
@@ -2285,6 +2333,8 @@ const indexHTML = `<!DOCTYPE html>
       const logs = document.getElementById('comp-logs').value.trim();
       const includeTelemetry = document.getElementById('comp-telemetry').checked;
       const strictQuality = document.getElementById('comp-strict').checked;
+      const parkedId = (document.getElementById('comp-parked-id')?.value || '').trim();
+      const relatedDep = (document.getElementById('comp-related-dep')?.value || '').trim();
 
       const errEl = document.getElementById('composer-error');
       if (!query || !title) {
@@ -2299,23 +2349,27 @@ const indexHTML = `<!DOCTYPE html>
       errEl.style.display = 'none';
 
       try {
+        const payload = {
+          query: query,
+          title: title,
+          summary: summary,
+          steps_to_reproduce: steps,
+          expected_behavior: expected,
+          actual_behavior: actual,
+          logs: logs,
+          include_telemetry: includeTelemetry,
+          strict_quality: strictQuality
+        };
+        if (parkedId) payload.parked_id = parkedId;
+        if (relatedDep) payload.related_dependency = relatedDep;
+
         const res = await fetch('/api/v1/drafts', {
           method: 'POST',
           headers: {
             ...getHeaders(),
             'Content-Type': 'application/json'
           },
-          body: JSON.stringify({
-            query: query,
-            title: title,
-            summary: summary,
-            steps_to_reproduce: steps,
-            expected_behavior: expected,
-            actual_behavior: actual,
-            logs: logs,
-            include_telemetry: includeTelemetry,
-            strict_quality: strictQuality
-          })
+          body: JSON.stringify(payload)
         });
 
         if (!res.ok) {
@@ -2335,6 +2389,7 @@ const indexHTML = `<!DOCTYPE html>
 
         const createdDraft = await res.json();
         closeComposerModal();
+        await fetchParked();
         await fetchDrafts();
         await fetchAudit();
         inspectDraft(createdDraft.id);

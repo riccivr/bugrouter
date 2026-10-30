@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -582,8 +583,10 @@ func TestServerAuditLogAndRetrieval(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stat audit log: %v", err)
 	}
-	if perm := info.Mode().Perm(); perm != 0600 {
-		t.Errorf("audit log permissions = %04o, want 0600", perm)
+	if runtime.GOOS != "windows" {
+		if perm := info.Mode().Perm(); perm != 0600 {
+			t.Errorf("audit log permissions = %04o, want 0600", perm)
+		}
 	}
 
 	// 4. Retrieve audit log via GET /api/v1/audit
@@ -1100,8 +1103,10 @@ func TestServerServicesCatalogEndpoints(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stat services.json failed: %v", err)
 	}
-	if perm := fi.Mode().Perm(); perm != 0600 {
-		t.Errorf("expected 0600 permissions, got %04o", perm)
+	if runtime.GOOS != "windows" {
+		if perm := fi.Mode().Perm(); perm != 0600 {
+			t.Errorf("expected 0600 permissions, got %04o", perm)
+		}
 	}
 
 	// 4. GET /api/v1/services returns 1 service
@@ -1299,8 +1304,10 @@ func TestServerPatchEndpoints(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stat patches.json failed: %v", err)
 	}
-	if perm := fi.Mode().Perm(); perm != 0600 {
-		t.Errorf("expected 0600 permissions, got %04o", perm)
+	if runtime.GOOS != "windows" {
+		if perm := fi.Mode().Perm(); perm != 0600 {
+			t.Errorf("expected 0600 permissions, got %04o", perm)
+		}
 	}
 
 	// 4. GET /api/v1/patches returns recorded patch
@@ -1761,5 +1768,112 @@ func TestServerIndexParkedCard(t *testing.T) {
 	// Verify automatic speculative stack scanning is removed from page load
 	if strings.Contains(body, "fetchStack(false)") {
 		t.Errorf("index HTML still contains automatic 'fetchStack(false)'")
+	}
+}
+
+func TestServerDraftFromParkedLifecycle(t *testing.T) {
+	tempDir := t.TempDir()
+	draftStore := adapter.NewDraftStore(filepath.Join(tempDir, "drafts"))
+	parkedStore := adapter.NewParkedStore(filepath.Join(tempDir, "parked"))
+
+	parkedBug, _, parkErr := parkedStore.Park("github.com/lovell/sharp", "Segmentation fault on sharp decode", "sigsegv in vips", "downgrade to 0.32", "package.json", "github.com/lovell/sharp")
+	if parkErr != nil {
+		t.Fatalf("Park failed: %v", parkErr)
+	}
+
+	srv := NewServer(":0", draftStore, nil).WithParkedStore(parkedStore)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	// 1. Initial GET /api/v1/parked returns 1 active bug
+	respActive, err := http.Get(ts.URL + "/api/v1/parked")
+	if err != nil {
+		t.Fatalf("GET /api/v1/parked failed: %v", err)
+	}
+	defer respActive.Body.Close()
+
+	var activeList []*adapter.ParkedBug
+	if decodeErr := json.NewDecoder(respActive.Body).Decode(&activeList); decodeErr != nil {
+		t.Fatalf("decode activeList: %v", decodeErr)
+	}
+	if len(activeList) != 1 {
+		t.Fatalf("expected 1 active parked bug, got %d", len(activeList))
+	}
+
+	// 2. Stage draft referencing parked_id and related_dependency
+	createReq := CreateDraftRequest{
+		Query:             "github.com/lovell/sharp",
+		Title:             "Segmentation fault on sharp decode",
+		Summary:           "Observed reproducible SIGSEGV in libvips during heavy concurrent image decode.",
+		StepsToReproduce:  "1. Decode 50 concurrent WebP images\n2. Observe crash in libvips worker thread",
+		Logs:              "SIGSEGV in libvips.so.42",
+		ParkedID:          parkedBug.ID,
+		RelatedDependency: "github.com/lovell/sharp",
+	}
+	bodyBytes, err := json.Marshal(createReq)
+	if err != nil {
+		t.Fatalf("marshal createReq: %v", err)
+	}
+
+	req, err := http.NewRequest(http.MethodPost, ts.URL+"/api/v1/drafts", bytes.NewReader(bodyBytes))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Bugrouter-Request", "1")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST /api/v1/drafts failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusCreated {
+		respBody, readErr := io.ReadAll(resp.Body)
+		if readErr != nil {
+			// drain
+		}
+		t.Fatalf("expected 201 Created, got %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var staged adapter.StagedDraft
+	if decodeErr := json.NewDecoder(resp.Body).Decode(&staged); decodeErr != nil {
+		t.Fatalf("decode staged draft: %v", decodeErr)
+	}
+	if staged.RelatedDependency != "github.com/lovell/sharp" {
+		t.Errorf("expected RelatedDependency 'github.com/lovell/sharp', got %q", staged.RelatedDependency)
+	}
+
+	// 3. GET /api/v1/parked now returns 0 active bugs
+	respActive2, err := http.Get(ts.URL + "/api/v1/parked")
+	if err != nil {
+		t.Fatalf("GET /api/v1/parked (second): %v", err)
+	}
+	defer respActive2.Body.Close()
+
+	var activeList2 []*adapter.ParkedBug
+	if decodeErr := json.NewDecoder(respActive2.Body).Decode(&activeList2); decodeErr != nil {
+		t.Fatalf("decode activeList2: %v", decodeErr)
+	}
+	if len(activeList2) != 0 {
+		t.Errorf("expected 0 active parked bugs after triage, got %d", len(activeList2))
+	}
+
+	// 4. GET /api/v1/parked?all=1 returns the triaged parked bug
+	respAll, err := http.Get(ts.URL + "/api/v1/parked?all=1")
+	if err != nil {
+		t.Fatalf("GET /api/v1/parked?all=1: %v", err)
+	}
+	defer respAll.Body.Close()
+
+	var allList []*adapter.ParkedBug
+	if decodeErr := json.NewDecoder(respAll.Body).Decode(&allList); decodeErr != nil {
+		t.Fatalf("decode allList: %v", decodeErr)
+	}
+	if len(allList) != 1 {
+		t.Fatalf("expected 1 total parked bug with ?all=1, got %d", len(allList))
+	}
+	if allList[0].Status != "triaged" {
+		t.Errorf("expected status 'triaged', got %q", allList[0].Status)
 	}
 }

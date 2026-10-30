@@ -63,8 +63,7 @@ jobs:
             # Handle macOS arm64 dyld missing LC_UUID with Go 1.22 race runtime
             CGO_ENABLED=1 go test -ldflags="-linkmode=external" -race -v ./... || go test -v ./...
           elif [ "${{ runner.os }}" = "Windows" ]; then
-            # Windows NTFS permissions report 0666 instead of POSIX 0600
-            go test -race -v ./... || go test -v ./... || true
+            go test -race -v ./... || go test -v ./...
           fi
 
       - name: Build static binary

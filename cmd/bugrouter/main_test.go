@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -265,8 +266,10 @@ Fatal error reading config from /home/alice/secret.txt
 	if err != nil {
 		t.Fatalf("stat saved draft: %v", err)
 	}
-	if perm := info.Mode().Perm(); perm != 0600 {
-		t.Errorf("draft file permissions = %04o, want 0600", perm)
+	if runtime.GOOS != "windows" {
+		if perm := info.Mode().Perm(); perm != 0600 {
+			t.Errorf("draft file permissions = %04o, want 0600", perm)
+		}
 	}
 
 	// Verify Draft Deserialization from Disk

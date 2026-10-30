@@ -37,6 +37,13 @@ runs:
   steps:
     - id: run-bugrouter
       shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+        INPUT_MODE: ${{ inputs.mode }}
+        INPUT_FAIL_ON_REVERTABLE: ${{ inputs.fail-on-revertable }}
+        INPUT_PATCHES_FILE: ${{ inputs.patches-file }}
+        INPUT_LOG_FILE: ${{ inputs.log-file }}
+        INPUT_QUERY: ${{ inputs.query }}
       run: |
         set -euo pipefail
 
@@ -45,22 +52,22 @@ runs:
           BUGROUTER_BIN="bugrouter"
           echo "Using pre-installed bugrouter executable: $(command -v bugrouter)"
         else
-          echo "Compiling bugrouter from source (${{ github.action_path }})..."
+          echo "Compiling bugrouter from source ($ACTION_PATH)..."
           BUILD_DIR="${RUNNER_TEMP:-/tmp}/bugrouter-bin"
           mkdir -p "$BUILD_DIR"
-          CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o "$BUILD_DIR/bugrouter" "${{ github.action_path }}/cmd/bugrouter"
+          CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o "$BUILD_DIR/bugrouter" "$ACTION_PATH/cmd/bugrouter"
           BUGROUTER_BIN="$BUILD_DIR/bugrouter"
           echo "Compiled bugrouter to $BUGROUTER_BIN"
         fi
 
         # 2. Configure environment overrides
-        if [ -n "${{ inputs.patches-file }}" ]; then
-          export BUGROUTER_PATCHES_FILE="${{ inputs.patches-file }}"
-          echo "BUGROUTER_PATCHES_FILE set to ${{ inputs.patches-file }}"
+        if [ -n "$INPUT_PATCHES_FILE" ]; then
+          export BUGROUTER_PATCHES_FILE="$INPUT_PATCHES_FILE"
+          echo "BUGROUTER_PATCHES_FILE set to $INPUT_PATCHES_FILE"
         fi
 
-        MODE="${{ inputs.mode }}"
-        FAIL_ON_REVERTABLE="${{ inputs.fail-on-revertable }}"
+        MODE="$INPUT_MODE"
+        FAIL_ON_REVERTABLE="$INPUT_FAIL_ON_REVERTABLE"
         REVERTABLE_COUNT=0
 
         # Locate python interpreter for summary formatting
@@ -147,11 +154,11 @@ runs:
         elif [ "$MODE" = "triage" ]; then
           echo "Executing bugrouter agent triage..."
           TRIAGE_ARGS=("agent" "triage")
-          if [ -n "${{ inputs.log-file }}" ]; then
-            TRIAGE_ARGS+=("--log-file" "${{ inputs.log-file }}")
+          if [ -n "$INPUT_LOG_FILE" ]; then
+            TRIAGE_ARGS+=("--log-file" "$INPUT_LOG_FILE")
           fi
-          if [ -n "${{ inputs.query }}" ]; then
-            TRIAGE_ARGS+=("--query" "${{ inputs.query }}")
+          if [ -n "$INPUT_QUERY" ]; then
+            TRIAGE_ARGS+=("--query" "$INPUT_QUERY")
           fi
 
           RESULT_JSON=$("$BUGROUTER_BIN" "${TRIAGE_ARGS[@]}")
