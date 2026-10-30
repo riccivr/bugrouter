@@ -41,7 +41,9 @@ Dependencies: **Standard Library Only (Zero Third-Party Dependencies)**
 - **Anti-Slop Quality Gate**: Evaluates draft quality against AI buzzwords, conversational chatbot filler, em dashes, typographic curly quotes, decorative emojis, and placeholders with strict gating (`--strict-quality`).
 - **Human-in-the-Loop Review Queue**: Embedded Web UI and REST API (`/api/v1/drafts`) for manual triage, review, and one-click dispatch via OAuth/PAT connectors.
 - **Hardened Cloud Security**: SHA-256 pre-hashed constant-time Bearer auth (`crypto/subtle.ConstantTimeCompare`), CSRF origin guards, append-only audit trail (`audit.log`), and HMAC-SHA256 signed webhooks (`X-Bugrouter-Signature`).
-- **Model Context Protocol (MCP)**: Native stdio JSON-RPC 2.0 server (spec `2024-11-05`) exposing 11 specialized agent tools.
+- **Zero-Hijacking Parked Bug Store & Native Host Handoff**: Instantly records 3rd-party dependency bugs in `<5ms` (`bugrouter park` / `park_bug`) with zero network calls, emitting native MCP resource notifications (`notifications/resources/list_changed`), MCP Resources (`bugrouter://parked/<id>`), and MCP Prompts (`triage_parked_bug`) so coding agents can alert engineers or spawn clean triage sessions without derailing active feature tasks.
+- **WorkOS-Style Plug-and-Play Dependency Portal**: Embedded Control Plane Web UI enables teams to click and connect downstream dependencies and internal services (`services.json`) via 1-click preset tiles (Stripe, Supabase, Auth0, Prisma, Next.js, Remix, Redis, Postgres, FFmpeg, Blender) and REST APIs (`GET/POST/DELETE /api/v1/services`), providing copyable 1-click CLI and MCP commands.
+- **Model Context Protocol (MCP)**: Native stdio JSON-RPC 2.0 server (spec `2024-11-05`) advertising tools, resources, and prompts, exposing 12 specialized agent tools.
 
 ---
 
@@ -89,6 +91,22 @@ bugrouter resolve curl --json
 
 # Resolve with custom timeout and disable disk cache
 bugrouter resolve nginx --timeout 5s --no-cache
+```
+
+### Park a 3rd-Party Bug & Native Session Handoff (`bugrouter park`)
+When an agent or engineer spots a 3rd-party bug while coding, park it immediately in `<5ms` without network calls or context hijacking:
+```bash
+# Park a dependency bug encountered mid-task (<5ms, zero network calls)
+bugrouter park sharp "v0.33.0 fails with SIGSEGV on musl alpine" \
+  --snippet "Segmentation fault at 0x00007f9c in libvips" \
+  --workaround "Downgraded to sharp@0.32.6" \
+  --file "src/image.ts"
+
+# Park and output machine-readable JSON handoff payload
+bugrouter park stripe "Webhook signature verification panic on malformed payload" --json
+
+# Hydrate and triage a parked bug in a spawned session
+bugrouter draft --from-parked <parked-id>
 ```
 
 ### Draft a Staged Bug Report
@@ -215,10 +233,17 @@ Add `bugrouter` to your MCP client configuration (e.g., `claude_desktop_config.j
 }
 ```
 
-### Available MCP Tools (11 Total)
+### MCP Capabilities, Resources & Prompts
+In addition to tools, `bugrouter` advertises `resources: { listChanged: true }` and `prompts: {}`:
+- **Resources**: Exposes parked bug records as `bugrouter://parked/<id>` (`application/json`), allowing host models to read full context.
+- **Prompts**: Provides `triage_parked_bug` with argument `id`, supplying ready-to-execute prompt templates for spawned triage sessions.
+- **Notifications**: Emits `notifications/resources/list_changed` to the host client immediately before returning `park_bug` responses.
+
+### Available MCP Tools (12 Total)
 
 | Tool Name | Parameters | Description |
 | :--- | :--- | :--- |
+| `park_bug` | `dependency` (string), `title` (string), `error_snippet` (string, optional), `workaround_note` (string, optional), `workspace_file` (string, optional) | PREFERRED DURING CODING: Instantly parks a 3rd-party dependency bug in <5ms with zero network calls and returns a native session-handoff payload so you can alert the user to spawn a separate bug-reporting session without derailing your current task. Emits `notifications/resources/list_changed`. |
 | `resolve_target` | `query` (string) | Resolves a software artifact or dependency query to its canonical bug tracker. |
 | `scrub_text` | `text` (string) | Deterministically redacts secrets, tokens, connection strings, and local username paths. |
 | `introspect_template` | `query` (string) | Discovers and parses upstream bug tracker issue templates or schemas for a target. |

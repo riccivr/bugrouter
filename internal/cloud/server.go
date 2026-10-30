@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -37,6 +38,7 @@ type Server struct {
 	resolver        *resolver.Waterfall
 	dedupFinder     *dedup.Finder
 	stackDir        string
+	servicesPath    string
 }
 
 // NewServer initializes a Cloud Control Plane server with routes registered.
@@ -45,14 +47,21 @@ func NewServer(addr string, store *adapter.DraftStore, submitter ForgeSubmitter)
 		addr = ":8080"
 	}
 	s := &Server{
-		mux:        http.NewServeMux(),
-		draftStore: store,
-		addr:       addr,
-		submitter:  submitter,
-		authToken:  os.Getenv("BUGROUTER_CLOUD_TOKEN"),
-		stackDir:   ".",
+		mux:          http.NewServeMux(),
+		draftStore:   store,
+		addr:         addr,
+		submitter:    submitter,
+		authToken:    os.Getenv("BUGROUTER_CLOUD_TOKEN"),
+		stackDir:     ".",
+		servicesPath: resolver.ResolveOrgCloudConfigPath(),
 	}
 	s.registerRoutes()
+	return s
+}
+
+// WithServicesFile sets the services.json file path for the plug-and-play dependency catalog.
+func (s *Server) WithServicesFile(path string) *Server {
+	s.servicesPath = path
 	return s
 }
 
@@ -120,8 +129,8 @@ func (s *Server) securityMiddleware(next http.Handler) http.Handler {
 			}
 		}
 
-		// 2. CSRF / Cross-Origin Mutation Guard on POST /api/v1/... routes
-		if r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/api/v1/") {
+		// 2. CSRF / Cross-Origin Mutation Guard on mutating /api/v1/... routes
+		if (r.Method == http.MethodPost || r.Method == http.MethodDelete || r.Method == http.MethodPut) && strings.HasPrefix(r.URL.Path, "/api/v1/") {
 			if origin := r.Header.Get("Origin"); origin != "" {
 				u, err := url.Parse(origin)
 				if err != nil || u.Host == "" || !strings.EqualFold(u.Host, r.Host) {
@@ -156,6 +165,9 @@ func (s *Server) securityMiddleware(next http.Handler) http.Handler {
 
 func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/v1/health", s.handleHealth)
+	s.mux.HandleFunc("GET /api/v1/services", s.handleListServices)
+	s.mux.HandleFunc("POST /api/v1/services", s.handleUpsertService)
+	s.mux.HandleFunc("DELETE /api/v1/services/{name}", s.handleDeleteService)
 	s.mux.HandleFunc("GET /api/v1/drafts", s.handleListDrafts)
 	s.mux.HandleFunc("POST /api/v1/drafts", s.handleCreateDraft)
 	s.mux.HandleFunc("POST /api/v1/drafts/{id}/approve", s.handleApproveDraft)
@@ -203,6 +215,279 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	}); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
+}
+
+func (s *Server) handleListServices(w http.ResponseWriter, r *http.Request) {
+	if s.servicesPath == "" {
+		w.Header().Set("Content-Type", "application/json")
+		if _, err := w.Write([]byte("[]")); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+		return
+	}
+
+	data, err := os.ReadFile(s.servicesPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			w.Header().Set("Content-Type", "application/json")
+			if _, writeErr := w.Write([]byte("[]")); writeErr != nil {
+				http.Error(w, writeErr.Error(), http.StatusInternalServerError)
+			}
+			return
+		}
+		http.Error(w, fmt.Sprintf("read services file: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	var reg resolver.OrgCloudRegistry
+	if err := json.Unmarshal(data, &reg); err != nil {
+		http.Error(w, fmt.Sprintf("unmarshal services: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	if reg.Services == nil {
+		reg.Services = []resolver.ServiceEntry{}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(reg.Services); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+}
+
+func (s *Server) handleUpsertService(w http.ResponseWriter, r *http.Request) {
+	var entry resolver.ServiceEntry
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1024*1024)).Decode(&entry); err != nil {
+		http.Error(w, fmt.Sprintf("invalid json payload: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	entry.Name = strings.TrimSpace(entry.Name)
+	if entry.Name == "" {
+		http.Error(w, "service name is required", http.StatusBadRequest)
+		return
+	}
+
+	// Normalize tracker if URL is omitted or protocol is missing
+	if entry.Tracker.URL == "" || entry.Tracker.Protocol == "" {
+		derivedTracker, normRepo := resolver.ClassifyTracker(entry.Tracker.URL, entry.Tracker.Email, entry.RepositoryURL)
+		if entry.Tracker.Protocol == "" {
+			entry.Tracker.Protocol = derivedTracker.Protocol
+		}
+		if entry.Tracker.URL == "" {
+			entry.Tracker.URL = derivedTracker.URL
+		}
+		if entry.Tracker.Email == "" {
+			entry.Tracker.Email = derivedTracker.Email
+		}
+		if normRepo != "" && entry.RepositoryURL == "" {
+			entry.RepositoryURL = normRepo
+		}
+	}
+
+	if s.servicesPath == "" {
+		http.Error(w, "services configuration path not set", http.StatusInternalServerError)
+		return
+	}
+
+	// Load existing registry or initialize empty
+	var reg resolver.OrgCloudRegistry
+	if data, err := os.ReadFile(s.servicesPath); err == nil {
+		if unmarshalErr := json.Unmarshal(data, &reg); unmarshalErr != nil {
+			http.Error(w, fmt.Sprintf("read existing services file: %v", unmarshalErr), http.StatusInternalServerError)
+			return
+		}
+	}
+
+	// Upsert entry by name (case-insensitive)
+	found := false
+	for i, existing := range reg.Services {
+		if strings.EqualFold(existing.Name, entry.Name) {
+			reg.Services[i] = entry
+			found = true
+			break
+		}
+	}
+	if !found {
+		reg.Services = append(reg.Services, entry)
+	}
+
+	// Write atomically with 0600 permissions
+	if err := writeRegistryAtomic(s.servicesPath, &reg); err != nil {
+		http.Error(w, fmt.Sprintf("save services: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	// Record audit event
+	remoteIP := r.RemoteAddr
+	if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
+		remoteIP = strings.TrimSpace(strings.Split(fwd, ",")[0])
+	}
+	ev := AuditEvent{
+		Timestamp: time.Now().UTC(),
+		Action:    "service.upserted",
+		Target:    entry.Name,
+		Protocol:  entry.Tracker.Protocol,
+		RemoteIP:  remoteIP,
+	}
+	if s.auditLogger != nil {
+		if logErr := s.auditLogger.Record(ev); logErr != nil {
+			fmt.Fprintf(os.Stderr, "audit log record error: %v\n", logErr)
+		}
+	}
+	if s.webhookNotifier != nil {
+		if notifyErr := s.webhookNotifier.Notify(r.Context(), ev); notifyErr != nil {
+			fmt.Fprintf(os.Stderr, "webhook notify error: %v\n", notifyErr)
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	if err := json.NewEncoder(w).Encode(entry); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+}
+
+func (s *Server) handleDeleteService(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	if name == "" {
+		trimmed := strings.TrimPrefix(r.URL.Path, "/api/v1/services/")
+		name = strings.Trim(trimmed, "/")
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		http.Error(w, "missing service name in path", http.StatusBadRequest)
+		return
+	}
+
+	if s.servicesPath == "" {
+		http.Error(w, "services configuration path not set", http.StatusInternalServerError)
+		return
+	}
+
+	data, err := os.ReadFile(s.servicesPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			http.Error(w, fmt.Sprintf("service %q not found", name), http.StatusNotFound)
+			return
+		}
+		http.Error(w, fmt.Sprintf("read services file: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	var reg resolver.OrgCloudRegistry
+	if err := json.Unmarshal(data, &reg); err != nil {
+		http.Error(w, fmt.Sprintf("unmarshal services: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	found := false
+	var updated []resolver.ServiceEntry
+	for _, existing := range reg.Services {
+		if strings.EqualFold(existing.Name, name) {
+			found = true
+			continue
+		}
+		updated = append(updated, existing)
+	}
+	if !found {
+		http.Error(w, fmt.Sprintf("service %q not found", name), http.StatusNotFound)
+		return
+	}
+
+	reg.Services = updated
+	if err := writeRegistryAtomic(s.servicesPath, &reg); err != nil {
+		http.Error(w, fmt.Sprintf("save services: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	// Record audit event
+	remoteIP := r.RemoteAddr
+	if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
+		remoteIP = strings.TrimSpace(strings.Split(fwd, ",")[0])
+	}
+	ev := AuditEvent{
+		Timestamp: time.Now().UTC(),
+		Action:    "service.deleted",
+		Target:    name,
+		RemoteIP:  remoteIP,
+	}
+	if s.auditLogger != nil {
+		if logErr := s.auditLogger.Record(ev); logErr != nil {
+			fmt.Fprintf(os.Stderr, "audit log record error: %v\n", logErr)
+		}
+	}
+	if s.webhookNotifier != nil {
+		if notifyErr := s.webhookNotifier.Notify(r.Context(), ev); notifyErr != nil {
+			fmt.Fprintf(os.Stderr, "webhook notify error: %v\n", notifyErr)
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	if err := json.NewEncoder(w).Encode(map[string]string{"status": "deleted", "name": name}); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+}
+
+func writeRegistryAtomic(path string, reg *resolver.OrgCloudRegistry) error {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return fmt.Errorf("create config dir %s: %w", dir, err)
+	}
+
+	data, err := json.MarshalIndent(reg, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal registry: %w", err)
+	}
+
+	tmpFile, err := os.CreateTemp(dir, "services-*.tmp")
+	if err != nil {
+		return fmt.Errorf("create temp services file in %s: %w", dir, err)
+	}
+	tmpName := tmpFile.Name()
+
+	if err := tmpFile.Chmod(0600); err != nil {
+		closeErr := tmpFile.Close()
+		cleanupErr := os.Remove(tmpName)
+		if cleanupErr != nil && !os.IsNotExist(cleanupErr) {
+			return fmt.Errorf("chmod %s: %w (close: %v, cleanup: %v)", tmpName, err, closeErr, cleanupErr)
+		}
+		if closeErr != nil {
+			return fmt.Errorf("chmod %s: %w (close: %v)", tmpName, err, closeErr)
+		}
+		return fmt.Errorf("chmod %s: %w", tmpName, err)
+	}
+
+	if _, err := tmpFile.Write(data); err != nil {
+		closeErr := tmpFile.Close()
+		cleanupErr := os.Remove(tmpName)
+		if cleanupErr != nil && !os.IsNotExist(cleanupErr) {
+			return fmt.Errorf("write %s: %w (close: %v, cleanup: %v)", tmpName, err, closeErr, cleanupErr)
+		}
+		if closeErr != nil {
+			return fmt.Errorf("write %s: %w (close: %v)", tmpName, err, closeErr)
+		}
+		return fmt.Errorf("write %s: %w", tmpName, err)
+	}
+
+	if err := tmpFile.Close(); err != nil {
+		cleanupErr := os.Remove(tmpName)
+		if cleanupErr != nil && !os.IsNotExist(cleanupErr) {
+			return fmt.Errorf("close %s: %w (cleanup: %v)", tmpName, err, cleanupErr)
+		}
+		return fmt.Errorf("close %s: %w", tmpName, err)
+	}
+
+	if err := os.Rename(tmpName, path); err != nil {
+		cleanupErr := os.Remove(tmpName)
+		if cleanupErr != nil && !os.IsNotExist(cleanupErr) {
+			return fmt.Errorf("rename to %s: %w (cleanup: %v)", path, err, cleanupErr)
+		}
+		return fmt.Errorf("rename to %s: %w", path, err)
+	}
+
+	return nil
 }
 
 func (s *Server) handleListDrafts(w http.ResponseWriter, r *http.Request) {
@@ -753,6 +1038,26 @@ const indexHTML = `<!DOCTYPE html>
       font-size: 0.85rem;
       color: #79c0ff;
     }
+    .service-tile {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 12px;
+      cursor: pointer;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      min-height: 75px;
+      transition: all 0.15s ease;
+    }
+    .service-tile:hover {
+      border-color: var(--accent);
+      transform: translateY(-1px);
+    }
+    .service-tile.connected {
+      border-color: rgba(35, 134, 54, 0.6);
+      background: rgba(35, 134, 54, 0.08);
+    }
   </style>
 </head>
 <body>
@@ -765,6 +1070,19 @@ const indexHTML = `<!DOCTYPE html>
     </div>
   </header>
   <main>
+    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+      <div>
+        <h2 style="margin: 0;">Connected Dependencies &amp; Downstream Services</h2>
+        <p style="margin: 4px 0 0 0; color: var(--muted); font-size: 0.85rem;">WorkOS-style plug-and-play catalog. Configure downstream dependencies so agents instantly resolve trackers and park bugs without context hijacking.</p>
+      </div>
+      <button class="btn btn-inspect" onclick="openAddServiceModal()">+ Add Custom Service</button>
+    </div>
+    <div class="card" style="padding: 16px; margin-bottom: 24px;">
+      <div id="services-grid" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 12px;">
+        <div style="color: var(--muted); font-size: 0.85rem;">Loading connected services...</div>
+      </div>
+    </div>
+
     <h2>Human-in-the-Loop Review Queue</h2>
     <div class="card">
       <table>
@@ -889,8 +1207,70 @@ const indexHTML = `<!DOCTYPE html>
     </div>
   </div>
 
+  <div id="service-detail-modal" style="display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.7); align-items: center; justify-content: center; z-index: 1000;" onclick="closeServiceDetailModal(event)">
+    <div style="background: var(--card); border: 1px solid var(--border); border-radius: 8px; max-width: 600px; width: 90%; max-height: 85vh; overflow-y: auto; padding: 24px;" onclick="event.stopPropagation()">
+      <h3 id="service-detail-title" style="margin-top:0; color:var(--heading);">Service Details</h3>
+      <div id="service-detail-content"></div>
+      <div style="text-align: right; margin-top: 16px;">
+        <button class="btn btn-discard" onclick="closeServiceDetailModal()">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="add-service-modal" style="display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.7); align-items: center; justify-content: center; z-index: 1000;" onclick="closeAddServiceModal(event)">
+    <div style="background: var(--card); border: 1px solid var(--border); border-radius: 8px; max-width: 600px; width: 90%; max-height: 85vh; overflow-y: auto; padding: 24px;" onclick="event.stopPropagation()">
+      <h3 style="margin-top:0; color:var(--heading);">Connect Custom Dependency / Service</h3>
+      <div id="add-service-error" style="display:none; color:var(--danger); margin-bottom:12px; font-size:0.85rem;"></div>
+      <div style="display:flex; flex-direction:column; gap:12px;">
+        <div>
+          <label style="display:block; font-size:0.8rem; color:var(--muted); margin-bottom:4px;">Service or Dependency Name *</label>
+          <input type="text" id="svc-name" placeholder="e.g. sharp, billing-api, ffmpeg" style="width:100%; box-sizing:border-box; padding:8px; background:var(--bg); border:1px solid var(--border); border-radius:6px; color:var(--text); font-size:0.85rem;">
+        </div>
+        <div>
+          <label style="display:block; font-size:0.8rem; color:var(--muted); margin-bottom:4px;">Repository URL</label>
+          <input type="text" id="svc-repo" placeholder="https://github.com/myorg/myservice" style="width:100%; box-sizing:border-box; padding:8px; background:var(--bg); border:1px solid var(--border); border-radius:6px; color:var(--text); font-size:0.85rem;">
+        </div>
+        <div>
+          <label style="display:block; font-size:0.8rem; color:var(--muted); margin-bottom:4px;">Tracker / Issues URL (optional if inferrable)</label>
+          <input type="text" id="svc-tracker" placeholder="https://github.com/myorg/myservice/issues" style="width:100%; box-sizing:border-box; padding:8px; background:var(--bg); border:1px solid var(--border); border-radius:6px; color:var(--text); font-size:0.85rem;">
+        </div>
+        <div>
+          <label style="display:block; font-size:0.8rem; color:var(--muted); margin-bottom:4px;">Protocol</label>
+          <select id="svc-protocol" style="width:100%; box-sizing:border-box; padding:8px; background:var(--bg); border:1px solid var(--border); border-radius:6px; color:var(--text); font-size:0.85rem;">
+            <option value="">Auto-detect from URL</option>
+            <option value="github">GitHub</option>
+            <option value="gitlab">GitLab</option>
+            <option value="jira">Jira</option>
+            <option value="linear">Linear</option>
+            <option value="gitea">Gitea / Forgejo</option>
+            <option value="bugzilla">Bugzilla</option>
+            <option value="custom">Custom Tracker</option>
+          </select>
+        </div>
+      </div>
+      <div style="display:flex; justify-content:flex-end; gap:8px; margin-top:20px;">
+        <button class="btn btn-discard" onclick="closeAddServiceModal()">Cancel</button>
+        <button class="btn btn-approve" id="btn-add-service" onclick="submitCustomService()">Connect Service</button>
+      </div>
+    </div>
+  </div>
+
   <script>
+    const PRESETS = [
+      { name: 'stripe', title: 'Stripe', repo: 'https://github.com/stripe/stripe-node', tracker: 'https://github.com/stripe/stripe-node/issues', protocol: 'github' },
+      { name: 'supabase', title: 'Supabase', repo: 'https://github.com/supabase/supabase', tracker: 'https://github.com/supabase/supabase/issues', protocol: 'github' },
+      { name: 'auth0', title: 'Auth0', repo: 'https://github.com/auth0/node-auth0', tracker: 'https://github.com/auth0/node-auth0/issues', protocol: 'github' },
+      { name: 'prisma', title: 'Prisma', repo: 'https://github.com/prisma/prisma', tracker: 'https://github.com/prisma/prisma/issues', protocol: 'github' },
+      { name: 'nextjs', title: 'Next.js', repo: 'https://github.com/vercel/next.js', tracker: 'https://github.com/vercel/next.js/issues', protocol: 'github' },
+      { name: 'remix', title: 'Remix', repo: 'https://github.com/remix-run/remix', tracker: 'https://github.com/remix-run/remix/issues', protocol: 'github' },
+      { name: 'redis', title: 'Redis', repo: 'https://github.com/redis/redis', tracker: 'https://github.com/redis/redis/issues', protocol: 'github' },
+      { name: 'postgres', title: 'Postgres', repo: 'https://github.com/postgres/postgres', tracker: 'https://github.com/postgres/postgres/issues', protocol: 'github' },
+      { name: 'ffmpeg', title: 'FFmpeg', repo: 'https://git.ffmpeg.org/ffmpeg.git', tracker: 'https://trac.ffmpeg.org', protocol: 'custom' },
+      { name: 'blender', title: 'Blender', repo: 'https://projects.blender.org/blender/blender', tracker: 'https://projects.blender.org/blender/blender/issues', protocol: 'gitea' }
+    ];
+
     let currentDrafts = [];
+    let currentServices = [];
 
     function getToken() {
       return sessionStorage.getItem('bugrouter_token') || '';
@@ -913,6 +1293,199 @@ const indexHTML = `<!DOCTYPE html>
         headers['Authorization'] = 'Bearer ' + tok;
       }
       return headers;
+    }
+
+    async function fetchServices() {
+      try {
+        const res = await fetch('/api/v1/services', { headers: getHeaders() });
+        currentServices = await res.json();
+        renderServices();
+      } catch (err) {
+        const grid = document.getElementById('services-grid');
+        if (grid) {
+          grid.innerHTML = '<div style="color:var(--danger);">Failed to load services: ' + escapeHTML(err.message) + '</div>';
+        }
+      }
+    }
+
+    function renderServices() {
+      const grid = document.getElementById('services-grid');
+      if (!grid) return;
+      let html = '';
+
+      for (const p of PRESETS) {
+        const connected = currentServices.find(s => s.name.toLowerCase() === p.name.toLowerCase());
+        const isConn = !!connected;
+        const badge = isConn ? '<span class="status-tag status-submitted" style="font-size:0.7rem;">Connected</span>' : '<span class="badge" style="font-size:0.7rem;">+ Connect</span>';
+        html += '<div class="service-tile ' + (isConn ? 'connected' : '') + '" onclick="clickPresetTile(\'' + p.name + '\')">' +
+          '<div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">' +
+            '<span style="font-weight:600; color:var(--heading);">' + escapeHTML(p.title) + '</span>' +
+            badge +
+          '</div>' +
+          '<div style="font-size:0.75rem; color:var(--muted); word-break:break-all;">' + escapeHTML(p.protocol) + ' &bull; ' + escapeHTML(p.name) + '</div>' +
+        '</div>';
+      }
+
+      for (const s of currentServices) {
+        if (!PRESETS.some(p => p.name.toLowerCase() === s.name.toLowerCase())) {
+          const proto = (s.tracker && s.tracker.protocol) || 'custom';
+          html += '<div class="service-tile connected" onclick="openServiceDetailModal(\'' + escapeHTML(s.name) + '\')">' +
+            '<div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">' +
+              '<span style="font-weight:600; color:var(--heading);">' + escapeHTML(s.name) + '</span>' +
+              '<span class="status-tag status-submitted" style="font-size:0.7rem;">Connected</span>' +
+            '</div>' +
+            '<div style="font-size:0.75rem; color:var(--muted); word-break:break-all;">' + escapeHTML(proto) + ' &bull; Custom Service</div>' +
+          '</div>';
+        }
+      }
+
+      grid.innerHTML = html;
+    }
+
+    async function clickPresetTile(name) {
+      const existing = currentServices.find(s => s.name.toLowerCase() === name.toLowerCase());
+      if (existing) {
+        openServiceDetailModal(existing.name);
+        return;
+      }
+      const p = PRESETS.find(x => x.name.toLowerCase() === name.toLowerCase());
+      if (!p) return;
+      try {
+        const res = await fetch('/api/v1/services', {
+          method: 'POST',
+          headers: { ...getHeaders(), 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            name: p.name,
+            repository_url: p.repo,
+            tracker: { protocol: p.protocol, url: p.tracker }
+          })
+        });
+        if (!res.ok) {
+          const errText = await res.text();
+          alert('Failed to connect ' + p.title + ': ' + errText);
+          return;
+        }
+        await fetchServices();
+        await fetchAudit();
+      } catch (err) {
+        alert('Network error: ' + err.message);
+      }
+    }
+
+    function openServiceDetailModal(name) {
+      const s = currentServices.find(x => x.name.toLowerCase() === name.toLowerCase());
+      if (!s) return;
+      document.getElementById('service-detail-title').textContent = 'Service: ' + s.name;
+      const proto = (s.tracker && s.tracker.protocol) || 'none';
+      const trackerURL = (s.tracker && (s.tracker.url || s.tracker.email)) || s.repository_url || '-';
+      const parkSnippet = 'bugrouter park ' + s.name + ' "Anomaly description here"';
+
+      let html = '<div style="display:flex; flex-direction:column; gap:12px;">' +
+        '<div><label style="color:var(--muted); font-size:0.8rem;">Protocol</label><br><span class="badge">' + escapeHTML(proto) + '</span></div>' +
+        '<div><label style="color:var(--muted); font-size:0.8rem;">Repository URL</label><br><code>' + escapeHTML(s.repository_url || '-') + '</code></div>' +
+        '<div><label style="color:var(--muted); font-size:0.8rem;">Tracker URL</label><br><code>' + escapeHTML(trackerURL) + '</code></div>' +
+        '<div><label style="color:var(--muted); font-size:0.8rem;">1-Click Copyable CLI Park Snippet</label><pre style="cursor:pointer;" title="Click to copy" onclick="copyToClipboard(\'' + escapeHTML(parkSnippet) + '\')">' + escapeHTML(parkSnippet) + '</pre></div>' +
+        '<div style="text-align:right; margin-top:8px;">' +
+          '<button class="btn btn-discard" onclick="disconnectService(\'' + escapeHTML(s.name) + '\')">Disconnect Service</button>' +
+        '</div>' +
+      '</div>';
+
+      document.getElementById('service-detail-content').innerHTML = html;
+      document.getElementById('service-detail-modal').style.display = 'flex';
+    }
+
+    function closeServiceDetailModal(e) {
+      if (e && e.target !== document.getElementById('service-detail-modal')) return;
+      document.getElementById('service-detail-modal').style.display = 'none';
+    }
+
+    async function disconnectService(name) {
+      if (!confirm('Disconnect ' + name + ' from org services?')) return;
+      try {
+        const res = await fetch('/api/v1/services/' + encodeURIComponent(name), {
+          method: 'DELETE',
+          headers: getHeaders()
+        });
+        if (!res.ok) {
+          const errText = await res.text();
+          alert('Disconnect failed: ' + errText);
+          return;
+        }
+        closeServiceDetailModal();
+        await fetchServices();
+        await fetchAudit();
+      } catch (err) {
+        alert('Network error: ' + err.message);
+      }
+    }
+
+    function openAddServiceModal() {
+      const errEl = document.getElementById('add-service-error');
+      if (errEl) errEl.style.display = 'none';
+      document.getElementById('svc-name').value = '';
+      document.getElementById('svc-repo').value = '';
+      document.getElementById('svc-tracker').value = '';
+      document.getElementById('svc-protocol').value = '';
+      document.getElementById('add-service-modal').style.display = 'flex';
+    }
+
+    function closeAddServiceModal(e) {
+      if (e && e.target !== document.getElementById('add-service-modal')) return;
+      document.getElementById('add-service-modal').style.display = 'none';
+    }
+
+    async function submitCustomService() {
+      const name = document.getElementById('svc-name').value.trim();
+      const repo = document.getElementById('svc-repo').value.trim();
+      const tracker = document.getElementById('svc-tracker').value.trim();
+      const protocol = document.getElementById('svc-protocol').value.trim();
+
+      const errEl = document.getElementById('add-service-error');
+      if (!name) {
+        errEl.textContent = 'Service name is required.';
+        errEl.style.display = 'block';
+        return;
+      }
+
+      const btn = document.getElementById('btn-add-service');
+      btn.disabled = true;
+      btn.textContent = 'Connecting...';
+      errEl.style.display = 'none';
+
+      try {
+        const res = await fetch('/api/v1/services', {
+          method: 'POST',
+          headers: { ...getHeaders(), 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            name: name,
+            repository_url: repo,
+            tracker: { protocol: protocol, url: tracker }
+          })
+        });
+
+        if (!res.ok) {
+          const errText = await res.text();
+          errEl.textContent = 'Failed to connect service: ' + errText;
+          errEl.style.display = 'block';
+          return;
+        }
+
+        closeAddServiceModal();
+        await fetchServices();
+        await fetchAudit();
+      } catch (err) {
+        errEl.textContent = 'Network error: ' + err.message;
+        errEl.style.display = 'block';
+      } finally {
+        btn.disabled = false;
+        btn.textContent = 'Connect Service';
+      }
+    }
+
+    function copyToClipboard(text) {
+      navigator.clipboard.writeText(text).then(() => {
+        alert('Copied to clipboard: ' + text);
+      }).catch(() => {});
     }
 
     async function fetchDrafts() {
@@ -1072,6 +1645,7 @@ const indexHTML = `<!DOCTYPE html>
     }
 
     function refreshQueue() {
+      fetchServices();
       fetchDrafts();
       fetchAudit();
       fetchStack(false);
@@ -1214,6 +1788,7 @@ const indexHTML = `<!DOCTYPE html>
       }).join('');
     }
 
+    fetchServices();
     fetchDrafts();
     fetchAudit();
     fetchStack(false);

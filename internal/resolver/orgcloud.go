@@ -28,6 +28,11 @@ type OrgCloudProbe struct {
 	registry   *OrgCloudRegistry
 }
 
+// ResolveOrgCloudConfigPath discovers the canonical file path for enterprise services.json.
+func ResolveOrgCloudConfigPath() string {
+	return resolveOrgCloudConfigPath()
+}
+
 func resolveOrgCloudConfigPath() string {
 	if env := os.Getenv("BUGROUTER_SERVICES_FILE"); env != "" {
 		if _, err := os.Stat(env); err == nil {

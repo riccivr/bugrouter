@@ -589,3 +589,90 @@ func TestGuidedReportWizard(t *testing.T) {
 		t.Errorf("output missing score: %s", output)
 	}
 }
+
+func TestParkAndDraftFromParked(t *testing.T) {
+	tempDir := t.TempDir()
+	dataHome := filepath.Join(tempDir, "data")
+	cacheHome := filepath.Join(tempDir, "cache")
+	configHome := filepath.Join(tempDir, "config")
+	t.Setenv("XDG_DATA_HOME", dataHome)
+	t.Setenv("XDG_CACHE_HOME", cacheHome)
+	t.Setenv("XDG_CONFIG_HOME", configHome)
+
+	parkStore := adapter.NewParkedStore("")
+	bug, handoff, err := parkStore.Park(
+		"https://github.com/lovell/sharp",
+		"SIGSEGV in libvips image resize",
+		"panic: runtime error in libvips.so",
+		"downgraded to 0.32.0",
+		"server/image.ts:15",
+	)
+	if err != nil {
+		t.Fatalf("Park failed: %v", err)
+	}
+
+	if bug.ID == "" || bug.Status != "parked" {
+		t.Fatalf("invalid parked bug: %+v", bug)
+	}
+	if handoff.CLICommand != "bugrouter draft --from-parked "+bug.ID {
+		t.Errorf("handoff.CLICommand = %q, want bugrouter draft --from-parked %s", handoff.CLICommand, bug.ID)
+	}
+
+	// Now hydrate draft using the parked ID
+	p, err := parkStore.Get(bug.ID)
+	if err != nil {
+		t.Fatalf("Get parked bug %s failed: %v", bug.ID, err)
+	}
+
+	target := resolver.Target{
+		CanonicalName: "sharp",
+		RepositoryURL: p.Dependency,
+		Tracker: resolver.TrackerInfo{
+			Protocol: resolver.ProtocolGitHub,
+			URL:      "https://github.com/lovell/sharp/issues",
+		},
+	}
+
+	title := p.Title
+	logs := string(p.ErrorSnippet)
+	summary := fmt.Sprintf("Discovered anomaly in %s: %s\n\nWorkaround/Notes: %s", p.Dependency, p.Title, string(p.WorkaroundNote))
+	steps := fmt.Sprintf("Observed in %s", p.WorkspaceFile)
+
+	draft, err := adapter.BuildDraft(adapter.DraftInput{
+		Target:           target,
+		Title:            title,
+		Summary:          summary,
+		StepsToReproduce: steps,
+		Logs:             logs,
+	})
+	if err != nil {
+		t.Fatalf("BuildDraft from parked failed: %v", err)
+	}
+
+	if draft.Title != "SIGSEGV in libvips image resize" {
+		t.Errorf("title = %q, want expected", draft.Title)
+	}
+
+	// Save draft and update parked status to triaged
+	draftStore := adapter.NewDraftStore("")
+	savedPath, err := draftStore.Save(draft)
+	if err != nil {
+		t.Fatalf("draftStore.Save failed: %v", err)
+	}
+	if savedPath == "" {
+		t.Fatal("expected non-empty savedPath")
+	}
+
+	p.Status = "triaged"
+	if err := parkStore.Save(p); err != nil {
+		t.Fatalf("parkStore.Save update status failed: %v", err)
+	}
+
+	triaged, err := parkStore.Get(bug.ID)
+	if err != nil {
+		t.Fatalf("Get triaged bug failed: %v", err)
+	}
+	if triaged.Status != "triaged" {
+		t.Errorf("triaged.Status = %q, want triaged", triaged.Status)
+	}
+}

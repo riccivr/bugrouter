@@ -994,3 +994,202 @@ func TestServerCreateDraftEndpoint(t *testing.T) {
 		t.Errorf("expected composer-modal and submitGuidedDraft in indexHTML")
 	}
 }
+
+func TestServerServicesCatalogEndpoints(t *testing.T) {
+	tempDir := t.TempDir()
+	servicesFile := filepath.Join(tempDir, "services.json")
+	auditFile := filepath.Join(tempDir, "audit.jsonl")
+	logger := NewAuditLogger(auditFile)
+
+	srv := NewServer(":0", nil, nil).
+		WithServicesFile(servicesFile).
+		WithAuditLogger(logger)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	// 1. Initial GET /api/v1/services returns empty list
+	resp, err := http.Get(ts.URL + "/api/v1/services")
+	if err != nil {
+		t.Fatalf("GET /api/v1/services failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d", resp.StatusCode)
+	}
+	var services []resolver.ServiceEntry
+	if err := json.NewDecoder(resp.Body).Decode(&services); err != nil {
+		t.Fatalf("decode empty services list: %v", err)
+	}
+	if len(services) != 0 {
+		t.Errorf("expected 0 services, got %d", len(services))
+	}
+
+	// 2. POST /api/v1/services validation: empty name rejected
+	badBody := []byte(`{"name": ""}`)
+	reqBad, err := http.NewRequest(http.MethodPost, ts.URL+"/api/v1/services", bytes.NewReader(badBody))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	reqBad.Header.Set("Content-Type", "application/json")
+	reqBad.Header.Set("X-Bugrouter-Request", "1")
+
+	respBad, err := http.DefaultClient.Do(reqBad)
+	if err != nil {
+		t.Fatalf("POST bad service failed: %v", err)
+	}
+	respBad.Body.Close()
+	if respBad.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 Bad Request, got %d", respBad.StatusCode)
+	}
+
+	// 3. POST /api/v1/services success case: upsert service
+	stripeEntry := resolver.ServiceEntry{
+		Name:          "stripe",
+		RepositoryURL: "https://github.com/stripe/stripe-node",
+	}
+	bodyBytes, err := json.Marshal(stripeEntry)
+	if err != nil {
+		t.Fatalf("marshal stripeEntry: %v", err)
+	}
+
+	reqPost, err := http.NewRequest(http.MethodPost, ts.URL+"/api/v1/services", bytes.NewReader(bodyBytes))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	reqPost.Header.Set("Content-Type", "application/json")
+	reqPost.Header.Set("X-Bugrouter-Request", "1")
+
+	respPost, err := http.DefaultClient.Do(reqPost)
+	if err != nil {
+		t.Fatalf("POST service failed: %v", err)
+	}
+	defer respPost.Body.Close()
+
+	if respPost.StatusCode != http.StatusOK {
+		respBytes, _ := io.ReadAll(respPost.Body)
+		t.Fatalf("expected 200 OK, got %d: %s", respPost.StatusCode, string(respBytes))
+	}
+
+	var savedEntry resolver.ServiceEntry
+	if err := json.NewDecoder(respPost.Body).Decode(&savedEntry); err != nil {
+		t.Fatalf("decode savedEntry: %v", err)
+	}
+	if savedEntry.Name != "stripe" {
+		t.Errorf("expected name stripe, got %q", savedEntry.Name)
+	}
+	if savedEntry.Tracker.Protocol != resolver.ProtocolGitHub {
+		t.Errorf("expected auto-classified protocol github, got %q", savedEntry.Tracker.Protocol)
+	}
+	if !strings.Contains(savedEntry.Tracker.URL, "github.com/stripe/stripe-node/issues") {
+		t.Errorf("expected auto-classified tracker URL, got %q", savedEntry.Tracker.URL)
+	}
+
+	// Verify file was written with 0600 permissions
+	fi, err := os.Stat(servicesFile)
+	if err != nil {
+		t.Fatalf("stat services.json failed: %v", err)
+	}
+	if perm := fi.Mode().Perm(); perm != 0600 {
+		t.Errorf("expected 0600 permissions, got %04o", perm)
+	}
+
+	// 4. GET /api/v1/services returns 1 service
+	respGet, err := http.Get(ts.URL + "/api/v1/services")
+	if err != nil {
+		t.Fatalf("GET /api/v1/services failed: %v", err)
+	}
+	defer respGet.Body.Close()
+
+	var svcList []resolver.ServiceEntry
+	if err := json.NewDecoder(respGet.Body).Decode(&svcList); err != nil {
+		t.Fatalf("decode svcList: %v", err)
+	}
+	if len(svcList) != 1 || svcList[0].Name != "stripe" {
+		t.Fatalf("expected 1 service 'stripe', got %v", svcList)
+	}
+
+	// 5. Audit logger recorded service.upserted
+	events, err := logger.ListRecent(10)
+	if err != nil {
+		t.Fatalf("ListRecent audit failed: %v", err)
+	}
+	foundUpsert := false
+	for _, ev := range events {
+		if ev.Action == "service.upserted" && ev.Target == "stripe" {
+			foundUpsert = true
+			break
+		}
+	}
+	if !foundUpsert {
+		t.Errorf("missing service.upserted audit event: %+v", events)
+	}
+
+	// 6. DELETE /api/v1/services/stripe
+	reqDel, err := http.NewRequest(http.MethodDelete, ts.URL+"/api/v1/services/stripe", nil)
+	if err != nil {
+		t.Fatalf("new delete request: %v", err)
+	}
+	reqDel.Header.Set("X-Bugrouter-Request", "1")
+
+	respDel, err := http.DefaultClient.Do(reqDel)
+	if err != nil {
+		t.Fatalf("DELETE /api/v1/services/stripe failed: %v", err)
+	}
+	respDel.Body.Close()
+
+	if respDel.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 OK on delete, got %d", respDel.StatusCode)
+	}
+
+	// Verify service is gone
+	respGet2, err := http.Get(ts.URL + "/api/v1/services")
+	if err != nil {
+		t.Fatalf("GET /api/v1/services failed: %v", err)
+	}
+	defer respGet2.Body.Close()
+	var svcList2 []resolver.ServiceEntry
+	if err := json.NewDecoder(respGet2.Body).Decode(&svcList2); err != nil {
+		t.Fatalf("decode svcList2: %v", err)
+	}
+	if len(svcList2) != 0 {
+		t.Errorf("expected 0 services after delete, got %d", len(svcList2))
+	}
+
+	// 7. DELETE nonexistent returns 404
+	reqDelNon, err := http.NewRequest(http.MethodDelete, ts.URL+"/api/v1/services/nonexistent", nil)
+	if err != nil {
+		t.Fatalf("new delete request: %v", err)
+	}
+	reqDelNon.Header.Set("X-Bugrouter-Request", "1")
+
+	respDelNon, err := http.DefaultClient.Do(reqDelNon)
+	if err != nil {
+		t.Fatalf("DELETE nonexistent failed: %v", err)
+	}
+	respDelNon.Body.Close()
+	if respDelNon.StatusCode != http.StatusNotFound {
+		t.Errorf("expected 404 Not Found, got %d", respDelNon.StatusCode)
+	}
+
+	// 8. Verify indexHTML includes WorkOS-style sections
+	respHTML, err := http.Get(ts.URL + "/")
+	if err != nil {
+		t.Fatalf("GET / failed: %v", err)
+	}
+	defer respHTML.Body.Close()
+	htmlBytes, err := io.ReadAll(respHTML.Body)
+	if err != nil {
+		t.Fatalf("read html: %v", err)
+	}
+	htmlStr := string(htmlBytes)
+	if !strings.Contains(htmlStr, "Connected Dependencies &amp; Downstream Services") {
+		t.Errorf("expected Connected Dependencies header in indexHTML")
+	}
+	if !strings.Contains(htmlStr, "services-grid") || !strings.Contains(htmlStr, "service-detail-modal") {
+		t.Errorf("expected services-grid and service-detail-modal in indexHTML")
+	}
+	if !strings.Contains(htmlStr, "PRESETS") || !strings.Contains(htmlStr, "fetchServices") {
+		t.Errorf("expected PRESETS and fetchServices in indexHTML script")
+	}
+}

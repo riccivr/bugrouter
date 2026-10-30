@@ -110,6 +110,10 @@ body:
 	if res1["protocolVersion"] != ProtocolVersion {
 		t.Errorf("protocolVersion = %v, want %s", res1["protocolVersion"], ProtocolVersion)
 	}
+	caps := res1["capabilities"].(map[string]any)
+	if caps["resources"] == nil || caps["prompts"] == nil {
+		t.Errorf("expected resources and prompts in capabilities, got: %v", caps)
+	}
 
 	// Response 2: ping
 	var resp2 jsonrpcResponse
@@ -127,8 +131,11 @@ body:
 	}
 	res3 := resp3.Result.(map[string]any)
 	tools := res3["tools"].([]any)
-	if len(tools) != 11 {
-		t.Errorf("expected 11 tools, got %d", len(tools))
+	if len(tools) != 12 {
+		t.Errorf("expected 12 tools, got %d", len(tools))
+	}
+	if len(tools) > 0 && tools[0].(map[string]any)["name"] != "park_bug" {
+		t.Errorf("expected first tool to be park_bug, got %v", tools[0].(map[string]any)["name"])
 	}
 
 	// Response 4: tools/call scrub_text
@@ -544,5 +551,151 @@ func TestCollectSystemTelemetryTool(t *testing.T) {
 	rawText := resMap["content"].([]any)[0].(map[string]any)["text"].(string)
 	if !strings.Contains(rawText, `"os":`) || !strings.Contains(rawText, `"num_cpu":`) {
 		t.Errorf("collect_system_telemetry result missing os or num_cpu: %s", rawText)
+	}
+}
+
+func TestMCPParkBugHandoffResourcesAndPrompts(t *testing.T) {
+	tempDir := t.TempDir()
+	parkedStore := adapter.NewParkedStore(tempDir)
+	server := NewServer(nil, nil).WithParkedStore(parkedStore)
+
+	var in bytes.Buffer
+	var out bytes.Buffer
+
+	// 1. Call park_bug tool
+	in.WriteString(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"park_bug","arguments":{"dependency":"sharp","title":"libvips null pointer","error_snippet":"panic: nil pointer","workaround_note":"use jimp fallback","workspace_file":"src/img.ts:10"}}}` + "\n")
+	// 2. Call resources/list
+	in.WriteString(`{"jsonrpc":"2.0","id":2,"method":"resources/list"}` + "\n")
+	// 3. Call prompts/list
+	in.WriteString(`{"jsonrpc":"2.0","id":3,"method":"prompts/list"}` + "\n")
+
+	if err := server.Run(context.Background(), &in, &out); err != nil {
+		t.Fatalf("server.Run failed: %v", err)
+	}
+
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	// Notice: park_bug emits notifications/resources/list_changed notification line BEFORE response line!
+	// So lines should be:
+	// line 0: notification {"jsonrpc":"2.0","method":"notifications/resources/list_changed"}
+	// line 1: tool call response (id=1)
+	// line 2: resources/list response (id=2)
+	// line 3: prompts/list response (id=3)
+	if len(lines) != 4 {
+		t.Fatalf("expected 4 lines (1 notification + 3 responses), got %d: %v", len(lines), lines)
+	}
+
+	// Verify line 0: notification
+	var notif map[string]any
+	if err := json.Unmarshal([]byte(lines[0]), &notif); err != nil {
+		t.Fatalf("unmarshal notification: %v", err)
+	}
+	if notif["method"] != "notifications/resources/list_changed" {
+		t.Errorf("expected notifications/resources/list_changed, got: %v", notif["method"])
+	}
+
+	// Verify line 1: park_bug response
+	var respPark jsonrpcResponse
+	if err := json.Unmarshal([]byte(lines[1]), &respPark); err != nil {
+		t.Fatalf("unmarshal respPark: %v", err)
+	}
+	resPark := respPark.Result.(map[string]any)
+	if resPark["isError"] != false {
+		t.Fatalf("park_bug isError=true: %v", resPark)
+	}
+	parkText := resPark["content"].([]any)[0].(map[string]any)["text"].(string)
+
+	var payload struct {
+		ParkedBug adapter.ParkedBug      `json:"parked_bug"`
+		Handoff   adapter.HandoffPayload `json:"handoff"`
+	}
+	if err := json.Unmarshal([]byte(parkText), &payload); err != nil {
+		t.Fatalf("unmarshal parked text: %v", err)
+	}
+	if payload.ParkedBug.Dependency != "sharp" {
+		t.Errorf("expected dependency sharp, got %q", payload.ParkedBug.Dependency)
+	}
+	if payload.Handoff.ResourceURI != "bugrouter://parked/"+payload.ParkedBug.ID {
+		t.Errorf("expected resource URI bugrouter://parked/%s, got %q", payload.ParkedBug.ID, payload.Handoff.ResourceURI)
+	}
+
+	// Verify line 2: resources/list response
+	var respResList jsonrpcResponse
+	if err := json.Unmarshal([]byte(lines[2]), &respResList); err != nil {
+		t.Fatalf("unmarshal respResList: %v", err)
+	}
+	resListMap := respResList.Result.(map[string]any)
+	resArr := resListMap["resources"].([]any)
+	if len(resArr) != 1 {
+		t.Fatalf("expected 1 resource, got %d", len(resArr))
+	}
+	firstRes := resArr[0].(map[string]any)
+	if firstRes["uri"] != "bugrouter://parked/"+payload.ParkedBug.ID {
+		t.Errorf("resource uri = %v, want bugrouter://parked/%s", firstRes["uri"], payload.ParkedBug.ID)
+	}
+
+	// Verify line 3: prompts/list response
+	var respPromptList jsonrpcResponse
+	if err := json.Unmarshal([]byte(lines[3]), &respPromptList); err != nil {
+		t.Fatalf("unmarshal respPromptList: %v", err)
+	}
+	promptListMap := respPromptList.Result.(map[string]any)
+	promptArr := promptListMap["prompts"].([]any)
+	if len(promptArr) != 1 {
+		t.Fatalf("expected 1 prompt, got %d", len(promptArr))
+	}
+	firstPrompt := promptArr[0].(map[string]any)
+	if firstPrompt["name"] != "triage_parked_bug" {
+		t.Errorf("prompt name = %v, want triage_parked_bug", firstPrompt["name"])
+	}
+
+	// Now test resources/read and prompts/get
+	var in2 bytes.Buffer
+	var out2 bytes.Buffer
+
+	in2.WriteString(fmt.Sprintf(`{"jsonrpc":"2.0","id":4,"method":"resources/read","params":{"uri":"bugrouter://parked/%s"}}`+"\n", payload.ParkedBug.ID))
+	in2.WriteString(fmt.Sprintf(`{"jsonrpc":"2.0","id":5,"method":"prompts/get","params":{"name":"triage_parked_bug","arguments":{"id":"%s"}}}`+"\n", payload.ParkedBug.ID))
+
+	if err := server.Run(context.Background(), &in2, &out2); err != nil {
+		t.Fatalf("server.Run 2 failed: %v", err)
+	}
+
+	lines2 := strings.Split(strings.TrimSpace(out2.String()), "\n")
+	if len(lines2) != 2 {
+		t.Fatalf("expected 2 responses, got %d: %v", len(lines2), lines2)
+	}
+
+	// Verify resources/read
+	var respResRead jsonrpcResponse
+	if err := json.Unmarshal([]byte(lines2[0]), &respResRead); err != nil {
+		t.Fatalf("unmarshal respResRead: %v", err)
+	}
+	resReadMap := respResRead.Result.(map[string]any)
+	contents := resReadMap["contents"].([]any)
+	if len(contents) != 1 {
+		t.Fatalf("expected 1 content, got %d", len(contents))
+	}
+	contentItem := contents[0].(map[string]any)
+	if contentItem["uri"] != "bugrouter://parked/"+payload.ParkedBug.ID {
+		t.Errorf("content uri = %v, want bugrouter://parked/%s", contentItem["uri"], payload.ParkedBug.ID)
+	}
+	if !strings.Contains(contentItem["text"].(string), "libvips null pointer") {
+		t.Errorf("content text missing bug title: %v", contentItem["text"])
+	}
+
+	// Verify prompts/get
+	var respPromptGet jsonrpcResponse
+	if err := json.Unmarshal([]byte(lines2[1]), &respPromptGet); err != nil {
+		t.Fatalf("unmarshal respPromptGet: %v", err)
+	}
+	promptGetMap := respPromptGet.Result.(map[string]any)
+	messages := promptGetMap["messages"].([]any)
+	if len(messages) != 1 {
+		t.Fatalf("expected 1 message, got %d", len(messages))
+	}
+	msgItem := messages[0].(map[string]any)
+	msgContent := msgItem["content"].(map[string]any)
+	promptText := msgContent["text"].(string)
+	if !strings.Contains(promptText, "draft_bug_report") || !strings.Contains(promptText, "sharp") {
+		t.Errorf("prompts/get text missing draft_bug_report or sharp: %s", promptText)
 	}
 }

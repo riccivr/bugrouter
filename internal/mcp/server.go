@@ -64,6 +64,7 @@ type toolCallParams struct {
 type Server struct {
 	resolver        *resolver.Waterfall
 	draftStore      *adapter.DraftStore
+	parkedStore     *adapter.ParkedStore
 	introspector    *introspector.Introspector
 	forgeClient     adapter.ForgeSubmitter
 	dedupFinder     *dedup.Finder
@@ -77,12 +78,19 @@ func NewServer(wf *resolver.Waterfall, store *adapter.DraftStore) *Server {
 	return &Server{
 		resolver:        wf,
 		draftStore:      store,
+		parkedStore:     adapter.NewParkedStore(""),
 		introspector:    introspector.New(httpClient),
 		forgeClient:     cloud.NewForgeClient(httpClient),
 		dedupFinder:     dedup.NewFinder(httpClient),
 		auditLogger:     cloud.NewAuditLogger(""),
 		webhookNotifier: cloud.NewWebhookNotifier(httpClient, "", ""),
 	}
+}
+
+// WithParkedStore overrides the default parked bug store for testing or custom configuration.
+func (s *Server) WithParkedStore(store *adapter.ParkedStore) *Server {
+	s.parkedStore = store
+	return s
 }
 
 // WithAuditLogger configures the audit logger for recording MCP actions.
@@ -149,7 +157,7 @@ func (s *Server) Run(ctx context.Context, in io.Reader, out io.Writer) error {
 		}
 
 		isNotification := len(req.ID) == 0 || string(req.ID) == "null"
-		resp := s.handleRequest(ctx, req)
+		resp := s.handleRequest(ctx, req, out)
 
 		if !isNotification {
 			if err := s.writeResponse(out, resp); err != nil {
@@ -175,7 +183,7 @@ func (s *Server) writeResponse(out io.Writer, resp jsonrpcResponse) error {
 	return nil
 }
 
-func (s *Server) handleRequest(ctx context.Context, req jsonrpcRequest) jsonrpcResponse {
+func (s *Server) handleRequest(ctx context.Context, req jsonrpcRequest, out io.Writer) jsonrpcResponse {
 	resp := jsonrpcResponse{
 		JSONRPC: "2.0",
 		ID:      req.ID,
@@ -186,7 +194,9 @@ func (s *Server) handleRequest(ctx context.Context, req jsonrpcRequest) jsonrpcR
 		resp.Result = map[string]any{
 			"protocolVersion": ProtocolVersion,
 			"capabilities": map[string]any{
-				"tools": map[string]any{},
+				"tools":     map[string]any{},
+				"resources": map[string]any{"listChanged": true},
+				"prompts":   map[string]any{},
 			},
 			"serverInfo": map[string]any{
 				"name":    "bugrouter",
@@ -199,6 +209,134 @@ func (s *Server) handleRequest(ctx context.Context, req jsonrpcRequest) jsonrpcR
 
 	case "ping":
 		resp.Result = map[string]any{}
+
+	case "resources/list":
+		var resourceList []map[string]any
+		if s.parkedStore != nil {
+			bugs, err := s.parkedStore.List()
+			if err == nil {
+				for _, b := range bugs {
+					resourceList = append(resourceList, map[string]any{
+						"uri":      "bugrouter://parked/" + b.ID,
+						"name":     fmt.Sprintf("Parked Bug: %s — %s", b.Dependency, b.Title),
+						"mimeType": "application/json",
+					})
+				}
+			}
+		}
+		if resourceList == nil {
+			resourceList = []map[string]any{}
+		}
+		resp.Result = map[string]any{
+			"resources": resourceList,
+		}
+
+	case "resources/read":
+		var params struct {
+			URI string `json:"uri"`
+		}
+		if err := json.Unmarshal(req.Params, &params); err != nil {
+			resp.Error = &jsonrpcError{Code: -32602, Message: fmt.Sprintf("invalid params: %v", err)}
+			return resp
+		}
+		const uriPrefix = "bugrouter://parked/"
+		if !strings.HasPrefix(params.URI, uriPrefix) {
+			resp.Error = &jsonrpcError{Code: -32602, Message: fmt.Sprintf("unsupported resource uri %q", params.URI)}
+			return resp
+		}
+		id := strings.TrimPrefix(params.URI, uriPrefix)
+		if s.parkedStore == nil {
+			resp.Error = &jsonrpcError{Code: -32000, Message: "parked store not initialized"}
+			return resp
+		}
+		b, err := s.parkedStore.Get(id)
+		if err != nil {
+			resp.Error = &jsonrpcError{Code: -32000, Message: fmt.Sprintf("resource not found: %v", err)}
+			return resp
+		}
+		data, err := json.Marshal(b)
+		if err != nil {
+			resp.Error = &jsonrpcError{Code: -32000, Message: fmt.Sprintf("marshal resource: %v", err)}
+			return resp
+		}
+		resp.Result = map[string]any{
+			"contents": []map[string]any{
+				{
+					"uri":      params.URI,
+					"mimeType": "application/json",
+					"text":     string(data),
+				},
+			},
+		}
+
+	case "prompts/list":
+		resp.Result = map[string]any{
+			"prompts": []map[string]any{
+				{
+					"name":        "triage_parked_bug",
+					"description": "Triage a previously parked 3rd-party dependency bug into a maintainer-ready bug report",
+					"arguments": []map[string]any{
+						{
+							"name":        "id",
+							"description": "Parked bug ID",
+							"required":    true,
+						},
+					},
+				},
+			},
+		}
+
+	case "prompts/get":
+		var params struct {
+			Name      string            `json:"name"`
+			Arguments map[string]string `json:"arguments"`
+		}
+		if err := json.Unmarshal(req.Params, &params); err != nil {
+			resp.Error = &jsonrpcError{Code: -32602, Message: fmt.Sprintf("invalid params: %v", err)}
+			return resp
+		}
+		if params.Name != "triage_parked_bug" {
+			resp.Error = &jsonrpcError{Code: -32602, Message: fmt.Sprintf("prompt %q not found", params.Name)}
+			return resp
+		}
+		id := params.Arguments["id"]
+		if id == "" {
+			resp.Error = &jsonrpcError{Code: -32602, Message: "argument 'id' is required"}
+			return resp
+		}
+		if s.parkedStore == nil {
+			resp.Error = &jsonrpcError{Code: -32000, Message: "parked store not initialized"}
+			return resp
+		}
+		b, err := s.parkedStore.Get(id)
+		if err != nil {
+			resp.Error = &jsonrpcError{Code: -32000, Message: fmt.Sprintf("parked bug %s not found: %v", id, err)}
+			return resp
+		}
+
+		userInstruction := fmt.Sprintf(
+			"Please triage the parked bug %s affecting dependency %q.\n\n"+
+				"Title: %s\n"+
+				"Error Snippet:\n%s\n\n"+
+				"Workaround / Notes:\n%s\n\n"+
+				"Encountered in: %s\n\n"+
+				"Instructions:\n"+
+				"Call the draft_bug_report tool for query %q with title %q and logs matching the error snippet to resolve its upstream tracker, introspect templates, and stage a high-signal report.",
+			b.ID, b.Dependency, b.Title, b.ErrorSnippet, b.WorkaroundNote, b.WorkspaceFile, b.Dependency, b.Title,
+		)
+
+		resp.Result = map[string]any{
+			"description": fmt.Sprintf("Triage instructions for parked bug %s (%s)", b.ID, b.Dependency),
+			"messages": []map[string]any{
+				{
+					"role": "user",
+					"content": map[string]any{
+						"type": "text",
+						"text": userInstruction,
+					},
+				},
+			},
+		}
 
 	case "tools/list":
 		resp.Result = map[string]any{
@@ -214,7 +352,7 @@ func (s *Server) handleRequest(ctx context.Context, req jsonrpcRequest) jsonrpcR
 			}
 			return resp
 		}
-		resp.Result = s.handleToolCall(ctx, params)
+		resp.Result = s.handleToolCall(ctx, params, out)
 
 	default:
 		resp.Error = &jsonrpcError{
@@ -228,6 +366,36 @@ func (s *Server) handleRequest(ctx context.Context, req jsonrpcRequest) jsonrpcR
 
 func (s *Server) toolDefinitions() []map[string]any {
 	return []map[string]any{
+		{
+			"name":        "park_bug",
+			"description": "PREFERRED DURING CODING: Instantly parks a 3rd-party dependency bug in <5ms with zero network calls and returns a native session-handoff payload so you can alert the user to spawn a separate bug-reporting session without derailing your current task.",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"dependency": map[string]any{
+						"type":        "string",
+						"description": "3rd-party package, binary, or external service name (e.g. 'sharp', 'stripe-node')",
+					},
+					"title": map[string]any{
+						"type":        "string",
+						"description": "1-line concise summary of the observed bug or anomaly",
+					},
+					"error_snippet": map[string]any{
+						"type":        "string",
+						"description": "Raw error message, stack trace, or failure logs",
+					},
+					"workaround_note": map[string]any{
+						"type":        "string",
+						"description": "How the current coding session bypassed or mitigated the bug",
+					},
+					"workspace_file": map[string]any{
+						"type":        "string",
+						"description": "Workspace file path or line number where the bug was encountered",
+					},
+				},
+				"required": []string{"dependency", "title"},
+			},
+		},
 		{
 			"name":        "resolve_target",
 			"description": "Resolves a software artifact or dependency query to its canonical bug tracker.",
@@ -429,8 +597,11 @@ func (s *Server) toolDefinitions() []map[string]any {
 	}
 }
 
-func (s *Server) handleToolCall(ctx context.Context, params toolCallParams) toolCallResult {
+func (s *Server) handleToolCall(ctx context.Context, params toolCallParams, out io.Writer) toolCallResult {
 	switch params.Name {
+	case "park_bug":
+		return s.handleParkBug(ctx, params.Arguments, out)
+
 	case "resolve_target":
 		var args struct {
 			Query string `json:"query"`
@@ -1074,5 +1245,65 @@ func (s *Server) handleToolCall(ctx context.Context, params toolCallParams) tool
 			Content: []toolContent{{Type: "text", Text: fmt.Sprintf("unknown tool: %s", params.Name)}},
 			IsError: true,
 		}
+	}
+}
+
+func (s *Server) handleParkBug(ctx context.Context, args json.RawMessage, out io.Writer) toolCallResult {
+	if s.parkedStore == nil {
+		return toolCallResult{
+			Content: []toolContent{{Type: "text", Text: "parked store is not initialized"}},
+			IsError: true,
+		}
+	}
+
+	var input struct {
+		Dependency     string `json:"dependency"`
+		Title          string `json:"title"`
+		ErrorSnippet   string `json:"error_snippet"`
+		WorkaroundNote string `json:"workaround_note"`
+		WorkspaceFile  string `json:"workspace_file"`
+	}
+	if err := json.Unmarshal(args, &input); err != nil {
+		return toolCallResult{
+			Content: []toolContent{{Type: "text", Text: fmt.Sprintf("invalid arguments: %v", err)}},
+			IsError: true,
+		}
+	}
+
+	bug, handoff, err := s.parkedStore.Park(input.Dependency, input.Title, input.ErrorSnippet, input.WorkaroundNote, input.WorkspaceFile)
+	if err != nil {
+		return toolCallResult{
+			Content: []toolContent{{Type: "text", Text: fmt.Sprintf("failed to park bug: %v", err)}},
+			IsError: true,
+		}
+	}
+
+	// Emit native MCP notification so host knows resources changed before returning result
+	if out != nil {
+		notification := map[string]any{
+			"jsonrpc": "2.0",
+			"method":  "notifications/resources/list_changed",
+		}
+		if data, err := json.Marshal(notification); err == nil {
+			if _, writeErr := out.Write(append(data, '\n')); writeErr != nil {
+				// Non-fatal notification emit error
+			}
+		}
+	}
+
+	resultMap := map[string]any{
+		"parked_bug": bug,
+		"handoff":    handoff,
+	}
+	data, err := json.MarshalIndent(resultMap, "", "  ")
+	if err != nil {
+		return toolCallResult{
+			Content: []toolContent{{Type: "text", Text: fmt.Sprintf("failed to marshal handoff payload: %v", err)}},
+			IsError: true,
+		}
+	}
+
+	return toolCallResult{
+		Content: []toolContent{{Type: "text", Text: string(data)}},
 	}
 }

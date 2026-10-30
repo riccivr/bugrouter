@@ -378,6 +378,56 @@ func main() {
 			fmt.Printf("Tracker Email:  %s\n", target.Tracker.Email)
 		}
 
+	case "park":
+		fs := flag.NewFlagSet("park", flag.ContinueOnError)
+		snippet := fs.String("snippet", "", "error snippet or stack trace")
+		workaround := fs.String("workaround", "", "how the anomaly was mitigated or worked around")
+		file := fs.String("file", "", "workspace file path where anomaly was discovered")
+		jsonOut := fs.Bool("json", false, "output JSON handoff payload")
+		if err := fs.Parse(os.Args[2:]); err != nil {
+			os.Exit(1)
+		}
+
+		args := fs.Args()
+		if len(args) < 2 {
+			fmt.Fprintln(os.Stderr, "error: park requires <dependency> and <title> arguments")
+			fmt.Fprintln(os.Stderr, "Usage: bugrouter park <dependency> <title> [--snippet <s>] [--workaround <w>] [--file <f>] [--json]")
+			os.Exit(1)
+		}
+
+		dep := args[0]
+		title := args[1]
+
+		parkStore := adapter.NewParkedStore("")
+		bug, handoff, err := parkStore.Park(dep, title, *snippet, *workaround, *file)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: park bug: %v\n", err)
+			os.Exit(1)
+		}
+
+		if *jsonOut {
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			if err := enc.Encode(map[string]any{
+				"parked_bug": bug,
+				"handoff":    handoff,
+			}); err != nil {
+				fmt.Fprintf(os.Stderr, "error: encode json: %v\n", err)
+				os.Exit(1)
+			}
+			return
+		}
+
+		fmt.Printf("Bug parked successfully in <5ms!\n")
+		fmt.Printf("Parked ID:       %s\n", bug.ID)
+		fmt.Printf("Dependency:      %s\n", bug.Dependency)
+		fmt.Printf("Title:           %s\n", bug.Title)
+		fmt.Printf("Resource URI:    %s\n", handoff.ResourceURI)
+		fmt.Printf("CLI Command:     %s\n\n", handoff.CLICommand)
+		fmt.Printf("Spawn Instruction:\n  %s\n\n", handoff.SpawnSessionPrompt)
+		fmt.Printf("Directive:\n  %s\n", handoff.AgentDirective)
+		return
+
 	case "draft":
 		fs := flag.NewFlagSet("draft", flag.ContinueOnError)
 		title := fs.String("title", "", "bug report title")
@@ -385,6 +435,7 @@ func main() {
 		steps := fs.String("steps", "", "steps to reproduce")
 		logs := fs.String("logs", "", "error logs or console output")
 		bodyFile := fs.String("body-file", "", "path to markdown body file or '-' for stdin")
+		fromParked := fs.String("from-parked", "", "hydrate draft from previously parked bug ID")
 		timeout := fs.Duration("timeout", 15*time.Second, "request and probe timeout duration")
 		strictQuality := fs.Bool("strict-quality", false, "reject draft if quality checks fail")
 		verifyCmd := fs.String("verify-cmd", "", "run bounded command to verify reproduction and attach proof")
@@ -395,9 +446,41 @@ func main() {
 			os.Exit(1)
 		}
 
+		var parkedBug *adapter.ParkedBug
+		if *fromParked != "" {
+			parkStore := adapter.NewParkedStore("")
+			p, err := parkStore.Get(*fromParked)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "error: load parked bug %s: %v\n", *fromParked, err)
+				os.Exit(1)
+			}
+			parkedBug = p
+			if *title == "" {
+				*title = parkedBug.Title
+			}
+			if *logs == "" && string(parkedBug.ErrorSnippet) != "" {
+				*logs = string(parkedBug.ErrorSnippet)
+			}
+			if *summary == "" {
+				if string(parkedBug.WorkaroundNote) != "" {
+					*summary = fmt.Sprintf("Discovered anomaly in %s: %s\n\nWorkaround/Notes: %s", parkedBug.Dependency, parkedBug.Title, string(parkedBug.WorkaroundNote))
+				} else {
+					*summary = fmt.Sprintf("Discovered anomaly in %s: %s", parkedBug.Dependency, parkedBug.Title)
+				}
+			}
+			if *steps == "" && parkedBug.WorkspaceFile != "" {
+				*steps = fmt.Sprintf("Observed in %s", parkedBug.WorkspaceFile)
+			}
+		}
+
 		args := fs.Args()
-		if len(args) < 1 {
-			fmt.Fprintln(os.Stderr, "error: draft requires a target query")
+		var targetQuery string
+		if len(args) > 0 {
+			targetQuery = args[0]
+		} else if parkedBug != nil {
+			targetQuery = parkedBug.Dependency
+		} else {
+			fmt.Fprintln(os.Stderr, "error: draft requires a target query or --from-parked <id>")
 			os.Exit(1)
 		}
 		if strings.TrimSpace(*title) == "" {
@@ -440,7 +523,7 @@ func main() {
 		defer cancel()
 
 		httpClient := httpx.NewClient(0)
-		target, err := resolveTarget(ctx, httpClient, args[0], *noCache)
+		target, err := resolveTarget(ctx, httpClient, targetQuery, *noCache)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			os.Exit(1)
@@ -522,6 +605,14 @@ func main() {
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: save draft: %v\n", err)
 			os.Exit(1)
+		}
+
+		if parkedBug != nil {
+			parkedBug.Status = "triaged"
+			parkStore := adapter.NewParkedStore("")
+			if parkSaveErr := parkStore.Save(parkedBug); parkSaveErr != nil {
+				// Non-fatal status update failure
+			}
 		}
 
 		if *jsonOut {
@@ -978,8 +1069,10 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "  version                     Print version information")
 	fmt.Fprintln(os.Stderr, "  resolve [--json] [--no-cache] [--timeout <dur>] <q>")
 	fmt.Fprintln(os.Stderr, "                              Resolve software target to bug tracker")
-	fmt.Fprintln(os.Stderr, "  draft [--title <t>] [--summary <s>] [--steps <st>] [--logs <l>]")
-	fmt.Fprintln(os.Stderr, "        [--verify-cmd <cmd>] [--with-telemetry] [--body-file <path>] [--strict-quality] [--timeout <dur>] [--json] [--no-cache] <q>")
+	fmt.Fprintln(os.Stderr, "  park <dependency> <title> [--snippet <s>] [--workaround <w>] [--file <f>] [--json]")
+	fmt.Fprintln(os.Stderr, "                              Instantly park a 3rd-party anomaly in <5ms without hijacking session")
+	fmt.Fprintln(os.Stderr, "  draft [--title <t>] [--summary <s>] [--steps <st>] [--logs <l>] [--from-parked <id>]")
+	fmt.Fprintln(os.Stderr, "        [--verify-cmd <cmd>] [--with-telemetry] [--body-file <path>] [--strict-quality] [--timeout <dur>] [--json] [--no-cache] [<q>]")
 	fmt.Fprintln(os.Stderr, "                              Stage bug report draft and generate submission URLs")
 	fmt.Fprintln(os.Stderr, "  report [--title <t>] [--summary <s>] [--steps <st>] [--expected <ex>] [--actual <ac>] [--logs <l>]")
 	fmt.Fprintln(os.Stderr, "         [--with-telemetry] [--no-telemetry] [--json] [--no-cache] [--timeout <dur>] <q>")
