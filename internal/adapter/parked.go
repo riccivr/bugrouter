@@ -27,14 +27,16 @@ type ParkedBug struct {
 	Status         string                `json:"status"` // "parked" or "triaged"
 }
 
-// HandoffPayload provides host agents with native MCP handoff directives and spawn instructions.
+// HandoffPayload provides host agents with native MCP handoff directives, user options, and spawn instructions.
 type HandoffPayload struct {
-	ParkedID           string `json:"parked_id"`
-	ResourceURI        string `json:"resource_uri"`
-	MCPPromptName      string `json:"mcp_prompt_name"`
-	CLICommand         string `json:"cli_command"`
-	SpawnSessionPrompt string `json:"spawn_session_prompt"`
-	AgentDirective     string `json:"agent_directive"`
+	ParkedID           string   `json:"parked_id"`
+	ResourceURI        string   `json:"resource_uri"`
+	MCPPromptName      string   `json:"mcp_prompt_name"`
+	CLICommand         string   `json:"cli_command"`
+	PatchInstructions  string   `json:"patch_instructions"`
+	UserOptions        []string `json:"user_options"`
+	SpawnSessionPrompt string   `json:"spawn_session_prompt,omitempty"`
+	AgentDirective     string   `json:"agent_directive"`
 }
 
 // ParkedStore manages zero-latency breadcrumbs in restricted user storage.
@@ -94,16 +96,45 @@ func (s *ParkedStore) Park(dep, title, snippet, workaround, file string) (*Parke
 		return nil, HandoffPayload{}, err
 	}
 
+	patchInstructions := derivePatchInstructions(dep, file)
+	userOptions := []string{
+		"1. Ignore and continue current task",
+		"2. Keep parked for later triage",
+		"3. Spawn separate session to file upstream bug",
+		"4. Fork/patch dependency locally and track in patch ledger",
+	}
+
 	handoff := HandoffPayload{
 		ParkedID:           id,
 		ResourceURI:        "bugrouter://parked/" + id,
 		MCPPromptName:      "triage_parked_bug",
 		CLICommand:         "bugrouter draft --from-parked " + id,
+		PatchInstructions:  patchInstructions,
+		UserOptions:        userOptions,
 		SpawnSessionPrompt: fmt.Sprintf("Triage parked bug %s affecting %s: %s", id, dep, title),
-		AgentDirective:     "CRITICAL: Bug parked in <5ms. Do NOT resolve, introspect, or draft this bug in the current session. Surface the spawn-session option to the user and immediately resume your primary engineering task.",
+		AgentDirective:     "CRITICAL: Bug parked in <5ms. Do NOT resolve, introspect, or draft this ticket in the current session. Present the 4 user_options concisely and continue the user's primary task.",
 	}
 
 	return bug, handoff, nil
+}
+
+func derivePatchInstructions(dep, file string) string {
+	depLower := strings.ToLower(dep)
+	fileLower := strings.ToLower(file)
+
+	if strings.Contains(fileLower, "go.mod") || strings.HasSuffix(fileLower, ".go") || strings.Contains(depLower, "github.com/") || strings.Contains(depLower, "golang.org/") {
+		return fmt.Sprintf("go mod edit -replace %s=<fork-target> && bugrouter patch add --dep %s --target <fork-target> --ecosystem go", dep, dep)
+	}
+	if strings.Contains(fileLower, "package.json") || strings.HasSuffix(fileLower, ".ts") || strings.HasSuffix(fileLower, ".js") {
+		return fmt.Sprintf("pnpm patch %s (or npm/yarn 'overrides') && bugrouter patch add --dep %s --target patches/%s.patch --ecosystem npm", dep, dep, dep)
+	}
+	if strings.Contains(fileLower, "cargo.toml") || strings.HasSuffix(fileLower, ".rs") {
+		return fmt.Sprintf("[patch.crates-io] in Cargo.toml && bugrouter patch add --dep %s --target <fork-target> --ecosystem cargo", dep)
+	}
+	if strings.Contains(fileLower, "pyproject.toml") || strings.Contains(fileLower, "requirements.txt") || strings.HasSuffix(fileLower, ".py") {
+		return fmt.Sprintf("Point dependency to git fork in pyproject.toml / requirements.txt && bugrouter patch add --dep %s --target <fork-target> --ecosystem python", dep)
+	}
+	return fmt.Sprintf("Fork repository locally/remotely and track in ledger via: bugrouter patch add --dep %s --target <fork-target>", dep)
 }
 
 // Save writes the parked bug atomically with 0600 file permissions.

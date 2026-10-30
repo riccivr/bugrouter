@@ -65,6 +65,7 @@ type Server struct {
 	resolver        *resolver.Waterfall
 	draftStore      *adapter.DraftStore
 	parkedStore     *adapter.ParkedStore
+	patchStore      *adapter.PatchStore
 	introspector    *introspector.Introspector
 	forgeClient     adapter.ForgeSubmitter
 	dedupFinder     *dedup.Finder
@@ -79,6 +80,7 @@ func NewServer(wf *resolver.Waterfall, store *adapter.DraftStore) *Server {
 		resolver:        wf,
 		draftStore:      store,
 		parkedStore:     adapter.NewParkedStore(""),
+		patchStore:      adapter.NewPatchStore(""),
 		introspector:    introspector.New(httpClient),
 		forgeClient:     cloud.NewForgeClient(httpClient),
 		dedupFinder:     dedup.NewFinder(httpClient),
@@ -90,6 +92,12 @@ func NewServer(wf *resolver.Waterfall, store *adapter.DraftStore) *Server {
 // WithParkedStore overrides the default parked bug store for testing or custom configuration.
 func (s *Server) WithParkedStore(store *adapter.ParkedStore) *Server {
 	s.parkedStore = store
+	return s
+}
+
+// WithPatchStore overrides the default dependency patch store for testing or custom configuration.
+func (s *Server) WithPatchStore(store *adapter.PatchStore) *Server {
+	s.patchStore = store
 	return s
 }
 
@@ -397,6 +405,40 @@ func (s *Server) toolDefinitions() []map[string]any {
 			},
 		},
 		{
+			"name":        "record_dependency_patch",
+			"description": "Records a temporary local fork or patch for a 3rd-party dependency in the patch ledger so it stays visible to engineers and can be reverted when upstream fixes the issue.",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"dependency": map[string]any{
+						"type":        "string",
+						"description": "3rd-party package, module, or repository name (e.g. 'sharp', 'github.com/org/lib')",
+					},
+					"patch_target": map[string]any{
+						"type":        "string",
+						"description": "Fork repository URL, branch, or local patch file (e.g. 'github.com/myorg/lib@fix-branch', 'patches/sharp+0.33.patch')",
+					},
+					"reason": map[string]any{
+						"type":        "string",
+						"description": "Reason for forking or patching the dependency",
+					},
+					"ecosystem": map[string]any{
+						"type":        "string",
+						"description": "Ecosystem identifier (e.g. 'go', 'npm', 'cargo', 'python', 'custom')",
+					},
+					"manifest_file": map[string]any{
+						"type":        "string",
+						"description": "Project manifest file declaring the patch (e.g. 'go.mod', 'package.json', 'Cargo.toml')",
+					},
+					"upstream_issue_url": map[string]any{
+						"type":        "string",
+						"description": "URL of the upstream issue or pull request being tracked",
+					},
+				},
+				"required": []string{"dependency", "patch_target", "reason"},
+			},
+		},
+		{
 			"name":        "resolve_target",
 			"description": "Resolves a software artifact or dependency query to its canonical bug tracker.",
 			"inputSchema": map[string]any{
@@ -601,6 +643,75 @@ func (s *Server) handleToolCall(ctx context.Context, params toolCallParams, out 
 	switch params.Name {
 	case "park_bug":
 		return s.handleParkBug(ctx, params.Arguments, out)
+
+	case "record_dependency_patch":
+		var args struct {
+			Dependency       string `json:"dependency"`
+			PatchTarget      string `json:"patch_target"`
+			Reason           string `json:"reason"`
+			Ecosystem        string `json:"ecosystem"`
+			ManifestFile     string `json:"manifest_file"`
+			UpstreamIssueURL string `json:"upstream_issue_url"`
+		}
+		if err := json.Unmarshal(params.Arguments, &args); err != nil {
+			return toolCallResult{
+				Content: []toolContent{{Type: "text", Text: fmt.Sprintf("parse arguments: %v", err)}},
+				IsError: true,
+			}
+		}
+		if strings.TrimSpace(args.Dependency) == "" {
+			return toolCallResult{
+				Content: []toolContent{{Type: "text", Text: "dependency parameter cannot be empty"}},
+				IsError: true,
+			}
+		}
+		if strings.TrimSpace(args.PatchTarget) == "" {
+			return toolCallResult{
+				Content: []toolContent{{Type: "text", Text: "patch_target parameter cannot be empty"}},
+				IsError: true,
+			}
+		}
+		if strings.TrimSpace(args.Reason) == "" {
+			return toolCallResult{
+				Content: []toolContent{{Type: "text", Text: "reason parameter cannot be empty"}},
+				IsError: true,
+			}
+		}
+
+		patch, err := s.patchStore.Record(args.Dependency, args.Ecosystem, args.PatchTarget, args.ManifestFile, args.UpstreamIssueURL, args.Reason)
+		if err != nil {
+			return toolCallResult{
+				Content: []toolContent{{Type: "text", Text: fmt.Sprintf("record patch: %v", err)}},
+				IsError: true,
+			}
+		}
+
+		data, err := json.MarshalIndent(patch, "", "  ")
+		if err != nil {
+			return toolCallResult{
+				Content: []toolContent{{Type: "text", Text: fmt.Sprintf("marshal patch: %v", err)}},
+				IsError: true,
+			}
+		}
+
+		if s.auditLogger != nil {
+			ev := cloud.AuditEvent{
+				Timestamp: time.Now().UTC(),
+				Action:    "patch.recorded",
+				DraftID:   patch.ID,
+				Target:    patch.Dependency,
+				Protocol:  resolver.Protocol(patch.Ecosystem),
+				RemoteIP:  "mcp-stdio",
+			}
+			if logErr := s.auditLogger.Record(ev); logErr != nil {
+				// Non-fatal audit log recording error
+			}
+		}
+
+		return toolCallResult{
+			Content: []toolContent{{Type: "text", Text: string(data)}},
+			IsError: false,
+		}
 
 	case "resolve_target":
 		var args struct {

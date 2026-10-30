@@ -676,3 +676,61 @@ func TestParkAndDraftFromParked(t *testing.T) {
 		t.Errorf("triaged.Status = %q, want triaged", triaged.Status)
 	}
 }
+
+func TestPatchSubcommandLifecycle(t *testing.T) {
+	tempDir := t.TempDir()
+	patchFile := filepath.Join(tempDir, "patches.json")
+	t.Setenv("BUGROUTER_PATCHES_FILE", patchFile)
+
+	store := adapter.NewPatchStore("")
+	if store.Path() != patchFile {
+		t.Fatalf("expected store path %q, got %q", patchFile, store.Path())
+	}
+
+	// 1. Initial list
+	initial, err := store.List()
+	if err != nil {
+		t.Fatalf("initial List failed: %v", err)
+	}
+	if len(initial) != 0 {
+		t.Errorf("expected 0 patches, got %d", len(initial))
+	}
+
+	// 2. Record patch
+	patch, err := store.Record(
+		"github.com/gin-gonic/gin",
+		"go",
+		"github.com/myorg/gin@fix-context",
+		"go.mod",
+		"https://github.com/gin-gonic/gin/issues/999",
+		"Fix data race in Context.Copy",
+	)
+	if err != nil {
+		t.Fatalf("Record failed: %v", err)
+	}
+	if patch.Dependency != "github.com/gin-gonic/gin" {
+		t.Errorf("expected gin dep, got %q", patch.Dependency)
+	}
+
+	// 3. List
+	list, err := store.List()
+	if err != nil {
+		t.Fatalf("List after record failed: %v", err)
+	}
+	if len(list) != 1 || list[0].ID != patch.ID {
+		t.Fatalf("expected 1 patch in list, got %+v", list)
+	}
+
+	// 4. Remove by dep
+	if err := store.Remove("github.com/gin-gonic/gin"); err != nil {
+		t.Fatalf("Remove failed: %v", err)
+	}
+
+	afterRm, err := store.List()
+	if err != nil {
+		t.Fatalf("List after rm failed: %v", err)
+	}
+	if len(afterRm) != 0 {
+		t.Errorf("expected 0 patches after rm, got %d", len(afterRm))
+	}
+}

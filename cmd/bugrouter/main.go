@@ -384,19 +384,35 @@ func main() {
 		workaround := fs.String("workaround", "", "how the anomaly was mitigated or worked around")
 		file := fs.String("file", "", "workspace file path where anomaly was discovered")
 		jsonOut := fs.Bool("json", false, "output JSON handoff payload")
-		if err := fs.Parse(os.Args[2:]); err != nil {
+
+		// Reorder flags and positional args so flags can precede or follow dependency and title
+		var flagArgs []string
+		var posArgs []string
+		for i := 2; i < len(os.Args); i++ {
+			arg := os.Args[i]
+			if strings.HasPrefix(arg, "-") {
+				flagArgs = append(flagArgs, arg)
+				if (arg == "--snippet" || arg == "-snippet" || arg == "--workaround" || arg == "-workaround" || arg == "--file" || arg == "-file") && i+1 < len(os.Args) && !strings.HasPrefix(os.Args[i+1], "-") {
+					i++
+					flagArgs = append(flagArgs, os.Args[i])
+				}
+			} else {
+				posArgs = append(posArgs, arg)
+			}
+		}
+
+		if err := fs.Parse(flagArgs); err != nil {
 			os.Exit(1)
 		}
 
-		args := fs.Args()
-		if len(args) < 2 {
+		if len(posArgs) < 2 {
 			fmt.Fprintln(os.Stderr, "error: park requires <dependency> and <title> arguments")
-			fmt.Fprintln(os.Stderr, "Usage: bugrouter park <dependency> <title> [--snippet <s>] [--workaround <w>] [--file <f>] [--json]")
+			fmt.Fprintln(os.Stderr, "Usage: bugrouter park [--snippet <s>] [--workaround <w>] [--file <f>] [--json] <dependency> <title>")
 			os.Exit(1)
 		}
 
-		dep := args[0]
-		title := args[1]
+		dep := posArgs[0]
+		title := posArgs[1]
 
 		parkStore := adapter.NewParkedStore("")
 		bug, handoff, err := parkStore.Park(dep, title, *snippet, *workaround, *file)
@@ -425,8 +441,99 @@ func main() {
 		fmt.Printf("Resource URI:    %s\n", handoff.ResourceURI)
 		fmt.Printf("CLI Command:     %s\n\n", handoff.CLICommand)
 		fmt.Printf("Spawn Instruction:\n  %s\n\n", handoff.SpawnSessionPrompt)
-		fmt.Printf("Directive:\n  %s\n", handoff.AgentDirective)
+		fmt.Printf("Patch Instructions:\n  %s\n\n", handoff.PatchInstructions)
+		fmt.Println("User Options:")
+		for _, opt := range handoff.UserOptions {
+			fmt.Printf("  %s\n", opt)
+		}
+		fmt.Printf("\nDirective:\n  %s\n", handoff.AgentDirective)
 		return
+
+	case "patch":
+		if len(os.Args) < 3 {
+			fmt.Fprintln(os.Stderr, "Usage: bugrouter patch <list|add|rm> [arguments...]")
+			os.Exit(1)
+		}
+		patchStore := adapter.NewPatchStore("")
+		switch os.Args[2] {
+		case "list":
+			fs := flag.NewFlagSet("patch list", flag.ContinueOnError)
+			jsonOut := fs.Bool("json", false, "output JSON array")
+			if err := fs.Parse(os.Args[3:]); err != nil {
+				os.Exit(1)
+			}
+			patches, err := patchStore.List()
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "error: list patches: %v\n", err)
+				os.Exit(1)
+			}
+			if *jsonOut {
+				enc := json.NewEncoder(os.Stdout)
+				enc.SetIndent("", "  ")
+				if err := enc.Encode(patches); err != nil {
+					fmt.Fprintf(os.Stderr, "error: encode json: %v\n", err)
+					os.Exit(1)
+				}
+				return
+			}
+			if len(patches) == 0 {
+				fmt.Println("No active dependency patches tracked in ledger.")
+				return
+			}
+			fmt.Printf("%-10s %-25s %-10s %-30s %s\n", "ID", "DEPENDENCY", "ECOSYSTEM", "TARGET", "REASON")
+			fmt.Println(strings.Repeat("-", 90))
+			for _, p := range patches {
+				fmt.Printf("%-10s %-25s %-10s %-30s %s\n", p.ID, p.Dependency, p.Ecosystem, p.PatchTarget, p.Reason)
+			}
+			return
+
+		case "add":
+			fs := flag.NewFlagSet("patch add", flag.ContinueOnError)
+			dep := fs.String("dep", "", "dependency name (required)")
+			target := fs.String("target", "", "fork repository URL, branch, or patch file (required)")
+			ecosystem := fs.String("ecosystem", "", "ecosystem identifier (go, npm, cargo, python, custom)")
+			manifest := fs.String("manifest", "", "manifest file (e.g. go.mod, package.json)")
+			issue := fs.String("issue", "", "upstream issue URL being tracked")
+			reason := fs.String("reason", "", "reason for patching locally")
+			if err := fs.Parse(os.Args[3:]); err != nil {
+				os.Exit(1)
+			}
+			if strings.TrimSpace(*dep) == "" || strings.TrimSpace(*target) == "" {
+				fmt.Fprintln(os.Stderr, "error: patch add requires --dep and --target")
+				fmt.Fprintln(os.Stderr, "Usage: bugrouter patch add --dep <d> --target <fork> [--ecosystem <e>] [--issue <url>] [--manifest <m>] [--reason <r>]")
+				os.Exit(1)
+			}
+			r := strings.TrimSpace(*reason)
+			if r == "" {
+				r = "Local patch tracked in bugrouter ledger"
+			}
+			patch, err := patchStore.Record(*dep, *ecosystem, *target, *manifest, *issue, r)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "error: record patch: %v\n", err)
+				os.Exit(1)
+			}
+			fmt.Printf("Recorded dependency patch %s for %s (%s) in patch ledger.\n", patch.ID, patch.Dependency, patch.PatchTarget)
+			return
+
+		case "rm":
+			if len(os.Args) < 4 {
+				fmt.Fprintln(os.Stderr, "error: patch rm requires <id-or-dep>")
+				fmt.Fprintln(os.Stderr, "Usage: bugrouter patch rm <id-or-dep>")
+				os.Exit(1)
+			}
+			target := os.Args[3]
+			if err := patchStore.Remove(target); err != nil {
+				fmt.Fprintf(os.Stderr, "error: remove patch: %v\n", err)
+				os.Exit(1)
+			}
+			fmt.Printf("Removed patch %q from patch ledger.\n", target)
+			return
+
+		default:
+			fmt.Fprintf(os.Stderr, "error: unknown patch subcommand %q\n", os.Args[2])
+			fmt.Fprintln(os.Stderr, "Usage: bugrouter patch <list|add|rm> [arguments...]")
+			os.Exit(1)
+		}
 
 	case "draft":
 		fs := flag.NewFlagSet("draft", flag.ContinueOnError)
@@ -1069,8 +1176,12 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "  version                     Print version information")
 	fmt.Fprintln(os.Stderr, "  resolve [--json] [--no-cache] [--timeout <dur>] <q>")
 	fmt.Fprintln(os.Stderr, "                              Resolve software target to bug tracker")
-	fmt.Fprintln(os.Stderr, "  park <dependency> <title> [--snippet <s>] [--workaround <w>] [--file <f>] [--json]")
+	fmt.Fprintln(os.Stderr, "  park [--snippet <s>] [--workaround <w>] [--file <f>] [--json] <dependency> <title>")
 	fmt.Fprintln(os.Stderr, "                              Instantly park a 3rd-party anomaly in <5ms without hijacking session")
+	fmt.Fprintln(os.Stderr, "  patch list [--json]         List tracked dependency patches and temporary forks")
+	fmt.Fprintln(os.Stderr, "  patch add --dep <d> --target <fork> [--ecosystem <e>] [--issue <url>] [--manifest <m>] [--reason <r>]")
+	fmt.Fprintln(os.Stderr, "                              Record a temporary dependency fork/patch in the ledger")
+	fmt.Fprintln(os.Stderr, "  patch rm <id-or-dep>        Remove a dependency patch from the ledger")
 	fmt.Fprintln(os.Stderr, "  draft [--title <t>] [--summary <s>] [--steps <st>] [--logs <l>] [--from-parked <id>]")
 	fmt.Fprintln(os.Stderr, "        [--verify-cmd <cmd>] [--with-telemetry] [--body-file <path>] [--strict-quality] [--timeout <dur>] [--json] [--no-cache] [<q>]")
 	fmt.Fprintln(os.Stderr, "                              Stage bug report draft and generate submission URLs")

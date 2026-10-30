@@ -6,16 +6,23 @@ This document tracks the long-term architectural trajectory, active implementati
 
 ## 1. Core Product Philosophy
 
-`bugrouter` is built on two fundamental product truths and an unwavering quality standard:
+`bugrouter` is built on four core principles defined by the Principal Architect:
 
-1. **Zero-Hijacking Agentic Workflow (Native Host Handoff):**
-   When an AI coding agent spots a bug in a 3rd-party dependency while working on an engineer's feature, it must **never** hijack the current session to resolve trackers, fetch templates, search duplicates, or draft tickets. Instead, it calls `park_bug`—which writes a local breadcrumb in `<5ms` with zero network calls, emits a native MCP resource notification (`notifications/resources/list_changed`), and exposes an MCP Resource (`bugrouter://parked/<id>`) along with an MCP Prompt (`triage_parked_bug`) and `handoff_prompt`. This allows Claude Desktop, Claude Code, Antigravity, or ChatGPT to natively offer a non-intrusive "Spawn new session to file this bug" action while immediately resuming the engineer's primary task.
+1. **On-Demand Companion (Zero Resident Daemon):**
+   `bugrouter` is designed never to run as a bloated, background-polling daemon burning idle CPU and memory. It operates as a zero-overhead companion invoked only at the precise moment a bug or crash occurs—via fast CLI commands, native Model Context Protocol (MCP) tool invocations, or reading zero-idle OS post-mortem crash records (`coredumpctl`, Windows WER Event ID 1000, macOS DiagnosticReports).
 
-2. **WorkOS-Style Plug-and-Play Dependency Catalog:**
-   Companies and development teams do not need speculative, token-wasting "stack discovery". Engineers already know the downstream dependencies and internal microservices their systems rely on. The Cloud Control Plane Web UI provides a visual, WorkOS-style catalog where engineers click to enable, configure, or toggle dependencies (persisted to `services.json`), with copyable 1-click CLI and MCP commands for parking bugs directly against them.
+2. **Flow Preservation (4-Way Choice):**
+   When an AI coding agent spots a bug or anomaly in a 3rd-party dependency while implementing a feature, it must **never** derail or hijack the engineering session. It presents the developer with 4 clear choices:
+   - **Choice 1: Ignore & continue** the current task without friction.
+   - **Choice 2: Keep parked** in `<5ms` with full contextual breadcrumbs (`park_bug`).
+   - **Choice 3: Spawn a separate triage session** using native MCP Resources and Prompts (`bugrouter://parked/<id>`).
+   - **Choice 4: Fork/patch locally** and maintain visibility in the dependency patch ledger (`bugrouter patch`).
 
-3. **High-Signal, Zero-Slop Tickets (For Agents & Desktop Users Alike):**
-   Whether triggered from a spawned agent session or by an everyday Linux/Windows PC user reporting a desktop application issue (such as a GPU rendering crash in Blender), tickets are strictly scrubbed of secrets, stripped of AI conversational filler and emojis, and formatted with maintainer-grade reproduction steps and verified telemetry.
+3. **Dependency Patch Visibility ("Close to the Eyes"):**
+   When upstream maintainers are slow to respond and teams fork or patch a dependency (`go.mod` `replace`, npm `overrides`/`patches/`, Cargo `[patch]`, Poetry git branch), temporary forks often become forgotten, permanent technical debt. `bugrouter` tracks every local patch in a high-visibility ledger alongside its canonical upstream issue URL and displays it front-and-center in the Web UI so patches can be promptly reverted when upstream releases a fix.
+
+4. **WorkOS-Style Plug-and-Play Dependency Portal:**
+   Companies and development teams do not need speculative, token-wasting "stack discovery". Engineers know the downstream dependencies and internal microservices their systems rely on. The Cloud Control Plane Web UI provides a visual catalog for connecting dependencies (`services.json`) and monitoring all active temporary patches in one unified view.
 
 ---
 
@@ -63,46 +70,51 @@ All milestones and specs below have been fully implemented, verified with race-d
 
 ## 3. Active & Upcoming Milestones
 
-### Milestone 5: Native Session Handoff & WorkOS-Style Dependency Catalog (Active — Spec #11)
-Focuses on the non-intrusive, zero-hijacking agentic workflow and visual downstream service configuration.
+### Milestone 5: Zero-Hijacking MCP Handoff, Tracked Patch Ledger & WorkOS Catalog (Active — Spec #11 / #11.1)
+Focuses on flow preservation during coding sessions, keeping temporary dependency patches visible to engineers, and providing a WorkOS-style dependency connection portal.
 
-- **Spec #11: Native MCP Session Handoff (`park_bug` + MCP Resources/Prompts) & WorkOS-Style Web UI [ACTIVE]**
+- **Spec #11 & #11.1: Zero-Hijacking `park_bug` MCP Handoff, Tracked Dependency Patch Ledger & WorkOS Catalog [ACTIVE]**
   - **Zero-Latency Parked Bug Store (`internal/adapter/parked.go`)**:
-    - `ParkedBug` record with 8-character hex ID (from `crypto/rand`), timestamps, dependency identifier, title, type-safe scrubbed snippets, workaround notes, workspace file locations, and lifecycle status (`parked` -> `triaged`).
-    - `HandoffPayload` containing `ResourceURI` (`bugrouter://parked/<id>`), `MCPPromptName` (`triage_parked_bug`), `CLICommand` (`bugrouter draft --from-parked <id>`), and spawn directives.
+    - `ParkedBug` record with 8-character hex ID (from `crypto/rand`), timestamps, dependency identifier, title, type-safe scrubbed snippets, workaround notes, workspace file locations, and status (`parked` -> `triaged`).
+    - `HandoffPayload` containing `ResourceURI` (`bugrouter://parked/<id>`), `MCPPromptName` (`triage_parked_bug`), `CLICommand` (`bugrouter draft --from-parked <id>`), `PatchInstructions`, `UserOptions` (the 4 flow choices), and clear agent directives.
     - `ParkedStore` providing atomic file persistence in `$XDG_DATA_HOME/bugrouter/parked/<id>.json` with `0600` permissions in `<5ms` with zero network I/O.
-  - **Native MCP Handoff Primitives (`internal/mcp/server.go`)**:
+  - **Tracked Dependency Patch Ledger (`internal/adapter/patch.go`)**:
+    - `DependencyPatch` record storing ID, CreatedAt, Dependency, Ecosystem (`go`, `npm`, `cargo`, `python`, `custom`), PatchTarget (fork URL, branch, patch file), ManifestFile, UpstreamIssueURL, Reason, and Status (`active` / `reverted`).
+    - `PatchStore` providing atomic persistence in `$XDG_DATA_HOME/bugrouter/patches.json` (or `BUGROUTER_PATCHES_FILE`) with `0600` permissions.
+    - Methods `Record`, `List`, and `Remove`.
+  - **Native MCP Handoff & Patch Tools (`internal/mcp/server.go`)**:
     - Advertises `tools: {}`, `resources: { listChanged: true }`, and `prompts: {}` capabilities in `initialize`.
-    - Exposes `park_bug` as the primary tool in `tools/list` for in-coding agents.
-    - Emits JSON-RPC `notifications/resources/list_changed` notification to stdio immediately prior to writing the `tools/call` response.
-    - Exposes `resources/list` and `resources/read` returning `bugrouter://parked/<id>`.
-    - Exposes `prompts/list` and `prompts/get` for `triage_parked_bug` providing copy-ready prompts for spawned sessions.
-  - **WorkOS-Style Plug-and-Play Dependency Catalog (`internal/cloud/server.go`)**:
-    - Embedded Web UI featuring visual "Connected Dependencies & Downstream Services" dashboard.
-    - 1-Click preset connection tiles (Stripe, Supabase, Auth0, Prisma, Next.js, Remix, Redis, Postgres, FFmpeg, Blender) and custom dependency registration modal.
-    - REST API endpoints: `GET /api/v1/services`, `POST /api/v1/services` (auto-classifying targets and atomically saving `0600`), and `DELETE /api/v1/services/{name}`.
-    - Copyable 1-click `bugrouter park <name> "<issue>"` snippets for connected services.
+    - Exposes `park_bug` as tool 1, emitting `notifications/resources/list_changed` before returning tool response.
+    - Exposes `record_dependency_patch` to track local forks directly from MCP agents.
+    - Exposes `resources/list` and `resources/read` for `bugrouter://parked/<id>`.
+    - Exposes `prompts/list` and `prompts/get` for `triage_parked_bug`.
+  - **WorkOS-Style Plug-and-Play Dependency Catalog & Patch Banner (`internal/cloud/server.go`)**:
+    - High-visibility "Active Dependency Patches (Temporary Forks)" banner/table at the top of the Web UI with 1-click modal to track local patches.
+    - Grid of 1-click preset connection tiles (Stripe, Supabase, Auth0, Prisma, Next.js, Remix, Redis, Postgres, FFmpeg, Blender) and custom dependency registration form.
+    - REST API endpoints: `GET/POST/DELETE /api/v1/services` and `GET/POST/DELETE /api/v1/patches`.
   - **CLI Commands (`cmd/bugrouter/main.go`)**:
-    - `bugrouter park <dependency> <title> [--snippet <s>] [--workaround <w>] [--file <f>] [--json]`.
+    - `bugrouter park [--snippet <s>] [--workaround <w>] [--file <f>] [--json] <dependency> <title>` displaying the 4 flow preservation options.
+    - `bugrouter patch list [--json]`, `bugrouter patch add --dep <d> --target <fork> [--ecosystem <e>] [--issue <url>] [--manifest <m>] [--reason <r>]`, and `bugrouter patch rm <id-or-dep>`.
     - `bugrouter draft --from-parked <id>` for hydrating parked bugs in spawned triage sessions.
 
 ---
 
-### Milestone 6: Spawned Triage Session Hydrator & Deterministic Anti-Slop Quality Linter (Upcoming — Spec #12)
-Equips spawned triage sessions to produce maintainer-ready, verified bug tickets with zero AI conversational fluff.
+### Milestone 6: Zero-Daemon Post-Mortem OS Crash Reader & Desktop Telemetry (Upcoming — Spec #12)
+Brings zero-daemon, post-mortem crash inspection to Linux, Windows, and macOS desktop environments without background pollers.
 
-- **Spec #12: Spawned Triage Session Hydrator & Deterministic Anti-Slop Quality Linter [UPCOMING]**
-  - **Spawned Session Hydrator (`bugrouter triage <parked-id>`)**: Reads the parked breadcrumb, re-verifies the workspace context, resolves the canonical upstream tracker, introspects templates, and searches for existing duplicates.
-  - **Deterministic Anti-Slop Quality Linter (`internal/adapter/linter.go`)**: Evaluates draft quality on a 0–100 scale, penalizing AI conversational filler, decorative emojis, em dashes, typographic quotes, and unfilled placeholders (`TODO`, `FIXME`, `<insert>`). Enforces `--strict-quality` gates.
-  - **Bounded Reproduction Verifier (`internal/verifier/verifier.go`)**: Executes reproduction scripts in isolated subshells with output buffering (256 KiB), timeout controls, secret scrubbing, and SHA-256 proof digests.
+- **Spec #12: Zero-Daemon Post-Mortem OS Crash Reader & Desktop App Telemetry [UPCOMING]**
+  - **Post-Mortem OS Crash Readers (`bugrouter crash-log`)**: Zero-daemon inspection reading system crash journals on demand:
+    - Linux: `coredumpctl info` and `journalctl -u ...`
+    - Windows: Windows Error Reporting (WER) and Event Viewer (Application Crash Event ID 1000)
+    - macOS: `/Library/Logs/DiagnosticReports/` and `Console.app` crash logs
+  - **Desktop Application & GPU Telemetry**: Diagnostic capture for GUI applications (such as Photoshop, Blender, DaVinci Resolve) collecting GPU models, display servers (Wayland, X11, DWM), and drivers with zero background daemon overhead.
 
 ---
 
-### Milestone 7: Desktop/PC User Mode & Hardware Telemetry (Upcoming — Spec #13)
-Brings zero-dependency bug routing to desktop operating systems and everyday GUI applications.
+### Milestone 7: Upstream Patch Status Checker & Anti-Slop Quality Linter (Upcoming — Spec #13)
+Equips teams to retire temporary forks as soon as upstream maintains merge fixes, ensuring maintainer-ready reports.
 
-- **Spec #13: Desktop App Resolver, Gitea/Forgejo Support & Hardware Telemetry Collector [UPCOMING]**
-  - **Desktop Package Probes**: Pure deterministic parsers for Windows `winget` and Linux `flatpak` / `snap`.
-  - **Community Forges & Trackers**: Gitea/Forgejo support (such as `projects.blender.org`, `gitea.com`, and self-hosted instances) with issue template introspection, REST API search, and pre-filled deep links.
-  - **Hardware and OS Telemetry Collector (`internal/telemetry`)**: Native, zero-dependency extraction of GPU models, CPU architecture, core counts, OS kernel, desktop environments, and display servers with type-safe scrubbing.
-  - **Interactive Human Bug Wizard (`bugrouter report`)**: Terminal wizard guiding everyday users through structured bug reporting with real-time anti-slop scoring and automatic hardware diagnostics attachment.
+- **Spec #13: Upstream Patch Status Checker & Anti-Slop Quality Linter [UPCOMING]**
+  - **Upstream Patch Status Checker (`bugrouter patch check`)**: Probes tracked `UpstreamIssueURL` states across GitHub, GitLab, and Bugzilla to alert engineers when an active dependency fork can be safely reverted.
+  - **Deterministic Anti-Slop Quality Linter (`internal/adapter/linter.go`)**: Evaluates draft quality on a 0–100 scale, gating AI conversational filler, decorative emojis, em dashes, and unfilled placeholders (`TODO`, `FIXME`, `<insert>`).
+  - **Bounded Reproduction Verifier (`internal/verifier/verifier.go`)**: Executes reproduction scripts in isolated subshells with 256 KiB output caps, timeout handling, secret scrubbing, and SHA-256 proof digests.

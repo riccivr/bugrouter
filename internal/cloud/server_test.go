@@ -1193,3 +1193,195 @@ func TestServerServicesCatalogEndpoints(t *testing.T) {
 		t.Errorf("expected PRESETS and fetchServices in indexHTML script")
 	}
 }
+
+func TestServerPatchEndpoints(t *testing.T) {
+	tempDir := t.TempDir()
+	patchFile := filepath.Join(tempDir, "patches.json")
+	patchStore := adapter.NewPatchStore(patchFile)
+	auditFile := filepath.Join(tempDir, "audit.jsonl")
+	logger := NewAuditLogger(auditFile)
+
+	srv := NewServer(":0", nil, nil).
+		WithPatchStore(patchStore).
+		WithAuditLogger(logger)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	// 1. Initial GET /api/v1/patches returns empty list
+	resp, err := http.Get(ts.URL + "/api/v1/patches")
+	if err != nil {
+		t.Fatalf("GET /api/v1/patches failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d", resp.StatusCode)
+	}
+	var patches []adapter.DependencyPatch
+	if err := json.NewDecoder(resp.Body).Decode(&patches); err != nil {
+		t.Fatalf("decode empty patches: %v", err)
+	}
+	if len(patches) != 0 {
+		t.Errorf("expected 0 patches, got %d", len(patches))
+	}
+
+	// 2. POST /api/v1/patches validation: missing required fields rejected
+	badBody := []byte(`{"dependency": ""}`)
+	reqBad, err := http.NewRequest(http.MethodPost, ts.URL+"/api/v1/patches", bytes.NewReader(badBody))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	reqBad.Header.Set("Content-Type", "application/json")
+	reqBad.Header.Set("X-Bugrouter-Request", "1")
+
+	respBad, err := http.DefaultClient.Do(reqBad)
+	if err != nil {
+		t.Fatalf("POST bad payload: %v", err)
+	}
+	respBad.Body.Close()
+	if respBad.StatusCode != http.StatusBadRequest {
+		t.Errorf("expected 400 Bad Request on empty dependency, got %d", respBad.StatusCode)
+	}
+
+	// 3. POST /api/v1/patches valid payload
+	validBody := []byte(`{
+		"dependency": "sharp",
+		"ecosystem": "npm",
+		"patch_target": "patches/sharp+0.33.0.patch",
+		"manifest_file": "package.json",
+		"upstream_issue_url": "https://github.com/lovell/sharp/issues/1234",
+		"reason": "Fix musl SIGSEGV in libvips"
+	}`)
+	reqValid, err := http.NewRequest(http.MethodPost, ts.URL+"/api/v1/patches", bytes.NewReader(validBody))
+	if err != nil {
+		t.Fatalf("new valid request: %v", err)
+	}
+	reqValid.Header.Set("Content-Type", "application/json")
+	reqValid.Header.Set("X-Bugrouter-Request", "1")
+
+	respValid, err := http.DefaultClient.Do(reqValid)
+	if err != nil {
+		t.Fatalf("POST valid patch failed: %v", err)
+	}
+	defer respValid.Body.Close()
+	if respValid.StatusCode != http.StatusCreated {
+		respBytes, _ := io.ReadAll(respValid.Body)
+		t.Fatalf("expected 201 Created, got %d: %s", respValid.StatusCode, string(respBytes))
+	}
+
+	var recorded adapter.DependencyPatch
+	if err := json.NewDecoder(respValid.Body).Decode(&recorded); err != nil {
+		t.Fatalf("decode recorded patch: %v", err)
+	}
+	if recorded.Dependency != "sharp" {
+		t.Errorf("expected dependency sharp, got %q", recorded.Dependency)
+	}
+	if recorded.PatchTarget != "patches/sharp+0.33.0.patch" {
+		t.Errorf("expected patch target patches/sharp+0.33.0.patch, got %q", recorded.PatchTarget)
+	}
+
+	// Verify file was written with 0600 permissions
+	fi, err := os.Stat(patchFile)
+	if err != nil {
+		t.Fatalf("stat patches.json failed: %v", err)
+	}
+	if perm := fi.Mode().Perm(); perm != 0600 {
+		t.Errorf("expected 0600 permissions, got %04o", perm)
+	}
+
+	// 4. GET /api/v1/patches returns recorded patch
+	respGet, err := http.Get(ts.URL + "/api/v1/patches")
+	if err != nil {
+		t.Fatalf("GET /api/v1/patches failed: %v", err)
+	}
+	defer respGet.Body.Close()
+
+	var patchList []adapter.DependencyPatch
+	if err := json.NewDecoder(respGet.Body).Decode(&patchList); err != nil {
+		t.Fatalf("decode patchList: %v", err)
+	}
+	if len(patchList) != 1 || patchList[0].ID != recorded.ID {
+		t.Fatalf("expected 1 patch %s, got %+v", recorded.ID, patchList)
+	}
+
+	// 5. Audit logger recorded patch.recorded
+	events, err := logger.ListRecent(10)
+	if err != nil {
+		t.Fatalf("ListRecent audit failed: %v", err)
+	}
+	foundRecorded := false
+	for _, ev := range events {
+		if ev.Action == "patch.recorded" && ev.Target == "sharp" {
+			foundRecorded = true
+			break
+		}
+	}
+	if !foundRecorded {
+		t.Errorf("missing patch.recorded audit event: %+v", events)
+	}
+
+	// 6. DELETE /api/v1/patches/{id}
+	reqDel, err := http.NewRequest(http.MethodDelete, ts.URL+"/api/v1/patches/"+recorded.ID, nil)
+	if err != nil {
+		t.Fatalf("new delete request: %v", err)
+	}
+	reqDel.Header.Set("X-Bugrouter-Request", "1")
+
+	respDel, err := http.DefaultClient.Do(reqDel)
+	if err != nil {
+		t.Fatalf("DELETE patch failed: %v", err)
+	}
+	respDel.Body.Close()
+
+	if respDel.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 OK on delete, got %d", respDel.StatusCode)
+	}
+
+	// Verify patch is gone
+	respGet2, err := http.Get(ts.URL + "/api/v1/patches")
+	if err != nil {
+		t.Fatalf("GET /api/v1/patches failed: %v", err)
+	}
+	defer respGet2.Body.Close()
+	var patchList2 []adapter.DependencyPatch
+	if err := json.NewDecoder(respGet2.Body).Decode(&patchList2); err != nil {
+		t.Fatalf("decode patchList2: %v", err)
+	}
+	if len(patchList2) != 0 {
+		t.Errorf("expected 0 patches after delete, got %d", len(patchList2))
+	}
+
+	// 7. DELETE nonexistent returns 404
+	reqDelNon, err := http.NewRequest(http.MethodDelete, ts.URL+"/api/v1/patches/nonexistent", nil)
+	if err != nil {
+		t.Fatalf("new delete nonexistent request: %v", err)
+	}
+	reqDelNon.Header.Set("X-Bugrouter-Request", "1")
+
+	respDelNon, err := http.DefaultClient.Do(reqDelNon)
+	if err != nil {
+		t.Fatalf("DELETE nonexistent failed: %v", err)
+	}
+	respDelNon.Body.Close()
+	if respDelNon.StatusCode != http.StatusNotFound {
+		t.Errorf("expected 404 Not Found, got %d", respDelNon.StatusCode)
+	}
+
+	// 8. Verify indexHTML includes Active Patches banner and modal
+	respHTML, err := http.Get(ts.URL + "/")
+	if err != nil {
+		t.Fatalf("GET / failed: %v", err)
+	}
+	defer respHTML.Body.Close()
+	htmlBytes, err := io.ReadAll(respHTML.Body)
+	if err != nil {
+		t.Fatalf("read html: %v", err)
+	}
+	htmlStr := string(htmlBytes)
+	if !strings.Contains(htmlStr, "Active Dependency Patches (Temporary Forks)") {
+		t.Errorf("expected Active Dependency Patches header in indexHTML")
+	}
+	if !strings.Contains(htmlStr, "add-patch-modal") || !strings.Contains(htmlStr, "fetchPatches") {
+		t.Errorf("expected add-patch-modal and fetchPatches in indexHTML")
+	}
+}

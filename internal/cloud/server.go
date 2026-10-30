@@ -39,6 +39,7 @@ type Server struct {
 	dedupFinder     *dedup.Finder
 	stackDir        string
 	servicesPath    string
+	patchStore      *adapter.PatchStore
 }
 
 // NewServer initializes a Cloud Control Plane server with routes registered.
@@ -54,6 +55,7 @@ func NewServer(addr string, store *adapter.DraftStore, submitter ForgeSubmitter)
 		authToken:    os.Getenv("BUGROUTER_CLOUD_TOKEN"),
 		stackDir:     ".",
 		servicesPath: resolver.ResolveOrgCloudConfigPath(),
+		patchStore:   adapter.NewPatchStore(""),
 	}
 	s.registerRoutes()
 	return s
@@ -62,6 +64,14 @@ func NewServer(addr string, store *adapter.DraftStore, submitter ForgeSubmitter)
 // WithServicesFile sets the services.json file path for the plug-and-play dependency catalog.
 func (s *Server) WithServicesFile(path string) *Server {
 	s.servicesPath = path
+	return s
+}
+
+// WithPatchStore overrides the default dependency patch store for testing or custom configuration.
+func (s *Server) WithPatchStore(store *adapter.PatchStore) *Server {
+	if store != nil {
+		s.patchStore = store
+	}
 	return s
 }
 
@@ -168,6 +178,9 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/v1/services", s.handleListServices)
 	s.mux.HandleFunc("POST /api/v1/services", s.handleUpsertService)
 	s.mux.HandleFunc("DELETE /api/v1/services/{name}", s.handleDeleteService)
+	s.mux.HandleFunc("GET /api/v1/patches", s.handleListPatches)
+	s.mux.HandleFunc("POST /api/v1/patches", s.handleRecordPatch)
+	s.mux.HandleFunc("DELETE /api/v1/patches/{id}", s.handleDeletePatch)
 	s.mux.HandleFunc("GET /api/v1/drafts", s.handleListDrafts)
 	s.mux.HandleFunc("POST /api/v1/drafts", s.handleCreateDraft)
 	s.mux.HandleFunc("POST /api/v1/drafts/{id}/approve", s.handleApproveDraft)
@@ -488,6 +501,153 @@ func writeRegistryAtomic(path string, reg *resolver.OrgCloudRegistry) error {
 	}
 
 	return nil
+}
+
+func (s *Server) handleListPatches(w http.ResponseWriter, r *http.Request) {
+	if s.patchStore == nil {
+		http.Error(w, "patch store not configured", http.StatusInternalServerError)
+		return
+	}
+	patches, err := s.patchStore.List()
+	if err != nil {
+		http.Error(w, fmt.Sprintf("list patches: %v", err), http.StatusInternalServerError)
+		return
+	}
+	if patches == nil {
+		patches = []adapter.DependencyPatch{}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(patches); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+}
+
+type RecordPatchRequest struct {
+	Dependency       string `json:"dependency"`
+	Ecosystem        string `json:"ecosystem"`
+	PatchTarget      string `json:"patch_target"`
+	ManifestFile     string `json:"manifest_file"`
+	UpstreamIssueURL string `json:"upstream_issue_url"`
+	Reason           string `json:"reason"`
+}
+
+func (s *Server) handleRecordPatch(w http.ResponseWriter, r *http.Request) {
+	if s.patchStore == nil {
+		http.Error(w, "patch store not configured", http.StatusInternalServerError)
+		return
+	}
+	var req RecordPatchRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, fmt.Sprintf("invalid json payload: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	req.Dependency = strings.TrimSpace(req.Dependency)
+	req.PatchTarget = strings.TrimSpace(req.PatchTarget)
+	req.Reason = strings.TrimSpace(req.Reason)
+
+	if req.Dependency == "" {
+		http.Error(w, "dependency is required", http.StatusBadRequest)
+		return
+	}
+	if req.PatchTarget == "" {
+		http.Error(w, "patch_target is required", http.StatusBadRequest)
+		return
+	}
+	if req.Reason == "" {
+		http.Error(w, "reason is required", http.StatusBadRequest)
+		return
+	}
+
+	patch, err := s.patchStore.Record(req.Dependency, req.Ecosystem, req.PatchTarget, req.ManifestFile, req.UpstreamIssueURL, req.Reason)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("record patch: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	// Record audit event
+	remoteIP := r.RemoteAddr
+	if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
+		remoteIP = strings.TrimSpace(strings.Split(fwd, ",")[0])
+	}
+	ev := AuditEvent{
+		Timestamp: time.Now().UTC(),
+		Action:    "patch.recorded",
+		DraftID:   patch.ID,
+		Target:    patch.Dependency,
+		Protocol:  resolver.Protocol(patch.Ecosystem),
+		RemoteIP:  remoteIP,
+	}
+	if s.auditLogger != nil {
+		if logErr := s.auditLogger.Record(ev); logErr != nil {
+			fmt.Fprintf(os.Stderr, "audit log record error: %v\n", logErr)
+		}
+	}
+	if s.webhookNotifier != nil {
+		if notifyErr := s.webhookNotifier.Notify(r.Context(), ev); notifyErr != nil {
+			fmt.Fprintf(os.Stderr, "webhook notify error: %v\n", notifyErr)
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	if err := json.NewEncoder(w).Encode(patch); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+}
+
+func (s *Server) handleDeletePatch(w http.ResponseWriter, r *http.Request) {
+	if s.patchStore == nil {
+		http.Error(w, "patch store not configured", http.StatusInternalServerError)
+		return
+	}
+	id := r.PathValue("id")
+	if id == "" {
+		trimmed := strings.TrimPrefix(r.URL.Path, "/api/v1/patches/")
+		id = strings.Trim(trimmed, "/")
+	}
+	id = strings.TrimSpace(id)
+	if id == "" {
+		http.Error(w, "missing patch id in path", http.StatusBadRequest)
+		return
+	}
+
+	if err := s.patchStore.Remove(id); err != nil {
+		http.Error(w, fmt.Sprintf("patch %q not found: %v", id, err), http.StatusNotFound)
+		return
+	}
+
+	// Record audit event
+	remoteIP := r.RemoteAddr
+	if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
+		remoteIP = strings.TrimSpace(strings.Split(fwd, ",")[0])
+	}
+	ev := AuditEvent{
+		Timestamp: time.Now().UTC(),
+		Action:    "patch.removed",
+		DraftID:   id,
+		Target:    id,
+		RemoteIP:  remoteIP,
+	}
+	if s.auditLogger != nil {
+		if logErr := s.auditLogger.Record(ev); logErr != nil {
+			fmt.Fprintf(os.Stderr, "audit log record error: %v\n", logErr)
+		}
+	}
+	if s.webhookNotifier != nil {
+		if notifyErr := s.webhookNotifier.Notify(r.Context(), ev); notifyErr != nil {
+			fmt.Fprintf(os.Stderr, "webhook notify error: %v\n", notifyErr)
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	if err := json.NewEncoder(w).Encode(map[string]any{
+		"status": "deleted",
+		"id":     id,
+	}); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
 }
 
 func (s *Server) handleListDrafts(w http.ResponseWriter, r *http.Request) {
@@ -1070,6 +1230,39 @@ const indexHTML = `<!DOCTYPE html>
     </div>
   </header>
   <main>
+    <!-- Active Dependency Patches (Temporary Forks) Banner -->
+    <div id="patches-container" style="display: none; margin-bottom: 24px;">
+      <div class="card" style="border-left: 4px solid #f59e0b; background: rgba(245, 158, 11, 0.06); padding: 16px;">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+          <div style="display: flex; align-items: center; gap: 8px;">
+            <span style="font-size: 1.1rem;">⚠️</span>
+            <h3 style="margin: 0; color: #f59e0b; font-size: 1rem;">Active Dependency Patches (Temporary Forks)</h3>
+            <span id="patches-badge" style="background: #f59e0b; color: #000; font-weight: bold; font-size: 0.75rem; padding: 2px 8px; border-radius: 12px;">0 Active</span>
+          </div>
+          <button class="btn btn-inspect" style="font-size: 0.8rem; padding: 4px 10px;" onclick="openAddPatchModal()">+ Track Local Patch</button>
+        </div>
+        <p style="margin: 0 0 12px 0; color: var(--muted); font-size: 0.85rem;">
+          These 3rd-party dependencies are currently running on local forks or vendor patches. Keep them close to your eyes so temporary workarounds do not become permanent tech debt.
+        </p>
+        <div id="patches-table-wrapper" style="overflow-x: auto;">
+          <table style="width: 100%; border-collapse: collapse; font-size: 0.85rem;">
+            <thead>
+              <tr style="text-align: left; border-bottom: 1px solid rgba(245, 158, 11, 0.2);">
+                <th style="padding: 6px 8px;">Dependency</th>
+                <th style="padding: 6px 8px;">Ecosystem</th>
+                <th style="padding: 6px 8px;">Patch Target (Fork / Branch / File)</th>
+                <th style="padding: 6px 8px;">Upstream Issue</th>
+                <th style="padding: 6px 8px;">Reason</th>
+                <th style="padding: 6px 8px; text-align: right;">Action</th>
+              </tr>
+            </thead>
+            <tbody id="patches-tbody">
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
     <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
       <div>
         <h2 style="margin: 0;">Connected Dependencies &amp; Downstream Services</h2>
@@ -1144,6 +1337,48 @@ const indexHTML = `<!DOCTYPE html>
         </tbody>
       </table>
     </div>
+  <!-- Add Patch Modal -->
+  <div id="add-patch-modal" class="modal-backdrop">
+    <div class="modal">
+      <div class="modal-header">
+        <h3>Track Dependency Patch (Temporary Fork)</h3>
+        <button class="modal-close" onclick="closeAddPatchModal()">&times;</button>
+      </div>
+      <div class="modal-body">
+        <p style="margin: 0 0 12px 0; color: var(--muted); font-size: 0.85rem;">
+          Track a temporary local fork, branch, or patch so your team never forgets to revert it when upstream releases a fix.
+        </p>
+        <div class="form-group">
+          <label>Dependency Name *</label>
+          <input type="text" id="patch-dep" placeholder="e.g. sharp or github.com/gin-gonic/gin" />
+        </div>
+        <div class="form-group">
+          <label>Patch Target (Fork URL / Branch / File) *</label>
+          <input type="text" id="patch-target" placeholder="e.g. github.com/myorg/sharp@fix-segfault or patches/sharp+0.33.patch" />
+        </div>
+        <div class="form-group">
+          <label>Ecosystem</label>
+          <input type="text" id="patch-eco" placeholder="e.g. go, npm, cargo, python, custom" />
+        </div>
+        <div class="form-group">
+          <label>Manifest File</label>
+          <input type="text" id="patch-manifest" placeholder="e.g. package.json, go.mod, Cargo.toml" />
+        </div>
+        <div class="form-group">
+          <label>Upstream Issue URL</label>
+          <input type="text" id="patch-upstream" placeholder="e.g. https://github.com/lovell/sharp/issues/1234" />
+        </div>
+        <div class="form-group">
+          <label>Reason *</label>
+          <textarea id="patch-reason" rows="2" placeholder="Explain why the dependency was temporarily patched..."></textarea>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-discard" onclick="closeAddPatchModal()">Cancel</button>
+        <button class="btn btn-approve" onclick="submitAddPatch()">Track in Ledger</button>
+      </div>
+    </div>
+  </div>
   </main>
 
   <div id="modal" onclick="closeModal(event)">
@@ -1271,6 +1506,7 @@ const indexHTML = `<!DOCTYPE html>
 
     let currentDrafts = [];
     let currentServices = [];
+    let currentPatches = [];
 
     function getToken() {
       return sessionStorage.getItem('bugrouter_token') || '';
@@ -1293,6 +1529,117 @@ const indexHTML = `<!DOCTYPE html>
         headers['Authorization'] = 'Bearer ' + tok;
       }
       return headers;
+    }
+
+    let currentPatches = [];
+
+    async function fetchPatches() {
+      try {
+        const res = await fetch('/api/v1/patches', { headers: getHeaders() });
+        if (res.ok) {
+          currentPatches = await res.json();
+          renderPatches();
+        }
+      } catch (err) {
+        console.error('fetch patches error', err);
+      }
+    }
+
+    function renderPatches() {
+      const container = document.getElementById('patches-container');
+      const tbody = document.getElementById('patches-tbody');
+      const badge = document.getElementById('patches-badge');
+      if (!container || !tbody) return;
+
+      if (!currentPatches || currentPatches.length === 0) {
+        container.style.display = 'none';
+        return;
+      }
+
+      container.style.display = 'block';
+      if (badge) badge.textContent = currentPatches.length + ' Active';
+
+      tbody.innerHTML = currentPatches.map(p => {
+        const issueLink = p.upstream_issue_url ? '<a href="' + escapeHtml(p.upstream_issue_url) + '" target="_blank" style="color: var(--accent);">' + escapeHtml(p.upstream_issue_url) + '</a>' : '<span style="color: var(--muted);">-</span>';
+        return '<tr style="border-bottom: 1px solid rgba(255,255,255,0.05);">' +
+          '<td style="padding: 8px;"><strong>' + escapeHtml(p.dependency) + '</strong></td>' +
+          '<td style="padding: 8px;"><span class="badge">' + escapeHtml(p.ecosystem || 'custom') + '</span></td>' +
+          '<td style="padding: 8px;"><code>' + escapeHtml(p.patch_target) + '</code></td>' +
+          '<td style="padding: 8px;">' + issueLink + '</td>' +
+          '<td style="padding: 8px; color: var(--muted);">' + escapeHtml(p.reason || '') + '</td>' +
+          '<td style="padding: 8px; text-align: right;">' +
+            '<button class="btn btn-discard" style="padding: 3px 8px; font-size: 0.75rem;" onclick="removePatch('' + escapeHtml(p.id) + '')">Remove</button>' +
+          '</td>' +
+        '</tr>';
+      }).join('');
+    }
+
+    function openAddPatchModal() {
+      const modal = document.getElementById('add-patch-modal');
+      if (modal) modal.classList.add('open');
+    }
+
+    function closeAddPatchModal() {
+      const modal = document.getElementById('add-patch-modal');
+      if (modal) modal.classList.remove('open');
+    }
+
+    async function submitAddPatch() {
+      const dep = document.getElementById('patch-dep').value.trim();
+      const target = document.getElementById('patch-target').value.trim();
+      const eco = document.getElementById('patch-eco').value.trim();
+      const manifest = document.getElementById('patch-manifest').value.trim();
+      const upstream = document.getElementById('patch-upstream').value.trim();
+      const reason = document.getElementById('patch-reason').value.trim();
+
+      if (!dep || !target || !reason) {
+        alert('Dependency, Patch Target, and Reason are required.');
+        return;
+      }
+
+      try {
+        const res = await fetch('/api/v1/patches', {
+          method: 'POST',
+          headers: { ...getHeaders(), 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            dependency: dep,
+            patch_target: target,
+            ecosystem: eco,
+            manifest_file: manifest,
+            upstream_issue_url: upstream,
+            reason: reason
+          })
+        });
+        if (!res.ok) {
+          const err = await res.text();
+          alert('Failed to record patch: ' + err);
+          return;
+        }
+        closeAddPatchModal();
+        await fetchPatches();
+        await fetchAudit();
+      } catch (err) {
+        alert('Network error: ' + err.message);
+      }
+    }
+
+    async function removePatch(id) {
+      if (!confirm('Remove tracked dependency patch from ledger?')) return;
+      try {
+        const res = await fetch('/api/v1/patches/' + encodeURIComponent(id), {
+          method: 'DELETE',
+          headers: getHeaders()
+        });
+        if (!res.ok) {
+          const err = await res.text();
+          alert('Failed to remove patch: ' + err);
+          return;
+        }
+        await fetchPatches();
+        await fetchAudit();
+      } catch (err) {
+        alert('Network error: ' + err.message);
+      }
     }
 
     async function fetchServices() {
@@ -1645,6 +1992,7 @@ const indexHTML = `<!DOCTYPE html>
     }
 
     function refreshQueue() {
+      fetchPatches();
       fetchServices();
       fetchDrafts();
       fetchAudit();
@@ -1788,6 +2136,7 @@ const indexHTML = `<!DOCTYPE html>
       }).join('');
     }
 
+    fetchPatches();
     fetchServices();
     fetchDrafts();
     fetchAudit();

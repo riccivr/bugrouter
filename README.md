@@ -41,9 +41,10 @@ Dependencies: **Standard Library Only (Zero Third-Party Dependencies)**
 - **Anti-Slop Quality Gate**: Evaluates draft quality against AI buzzwords, conversational chatbot filler, em dashes, typographic curly quotes, decorative emojis, and placeholders with strict gating (`--strict-quality`).
 - **Human-in-the-Loop Review Queue**: Embedded Web UI and REST API (`/api/v1/drafts`) for manual triage, review, and one-click dispatch via OAuth/PAT connectors.
 - **Hardened Cloud Security**: SHA-256 pre-hashed constant-time Bearer auth (`crypto/subtle.ConstantTimeCompare`), CSRF origin guards, append-only audit trail (`audit.log`), and HMAC-SHA256 signed webhooks (`X-Bugrouter-Signature`).
-- **Zero-Hijacking Parked Bug Store & Native Host Handoff**: Instantly records 3rd-party dependency bugs in `<5ms` (`bugrouter park` / `park_bug`) with zero network calls, emitting native MCP resource notifications (`notifications/resources/list_changed`), MCP Resources (`bugrouter://parked/<id>`), and MCP Prompts (`triage_parked_bug`) so coding agents can alert engineers or spawn clean triage sessions without derailing active feature tasks.
-- **WorkOS-Style Plug-and-Play Dependency Portal**: Embedded Control Plane Web UI enables teams to click and connect downstream dependencies and internal services (`services.json`) via 1-click preset tiles (Stripe, Supabase, Auth0, Prisma, Next.js, Remix, Redis, Postgres, FFmpeg, Blender) and REST APIs (`GET/POST/DELETE /api/v1/services`), providing copyable 1-click CLI and MCP commands.
-- **Model Context Protocol (MCP)**: Native stdio JSON-RPC 2.0 server (spec `2024-11-05`) advertising tools, resources, and prompts, exposing 12 specialized agent tools.
+- **Zero-Hijacking Parked Bug Store & Native Host Handoff**: Instantly records 3rd-party dependency bugs in `<5ms` (`bugrouter park` / `park_bug`) with zero network calls, presenting 4 flow-preservation choices (ignore, park, spawn separate session, or fork/patch), emitting native MCP resource notifications (`notifications/resources/list_changed`), MCP Resources (`bugrouter://parked/<id>`), and MCP Prompts (`triage_parked_bug`).
+- **Tracked Dependency Patch Ledger**: Keeps temporary local dependency forks and vendor patches (`go.mod` `replace`, npm `overrides`/`patches/`, Cargo `[patch]`, Poetry git branches) high-visibility ("close to the eyes") in `$XDG_DATA_HOME/bugrouter/patches.json` and the Web UI banner so temporary forks are never forgotten.
+- **WorkOS-Style Plug-and-Play Dependency Portal**: Embedded Control Plane Web UI enables teams to click and connect downstream dependencies and internal services (`services.json`) via 1-click preset tiles (Stripe, Supabase, Auth0, Prisma, Next.js, Remix, Redis, Postgres, FFmpeg, Blender) and REST APIs (`GET/POST/DELETE /api/v1/services` and `GET/POST/DELETE /api/v1/patches`).
+- **Model Context Protocol (MCP)**: Native stdio JSON-RPC 2.0 server (spec `2024-11-05`) advertising tools, resources, and prompts, exposing 13 specialized agent tools.
 
 ---
 
@@ -107,6 +108,25 @@ bugrouter park stripe "Webhook signature verification panic on malformed payload
 
 # Hydrate and triage a parked bug in a spawned session
 bugrouter draft --from-parked <parked-id>
+```
+
+### Track Dependency Patches (`bugrouter patch`)
+Keep temporary forks and vendor patches high-visibility so teams can promptly revert them once upstream fixes land:
+```bash
+# List all tracked dependency patches in ledger
+bugrouter patch list
+
+# Track a new local fork or patch
+bugrouter patch add \
+  --dep sharp \
+  --target patches/sharp+0.33.0.patch \
+  --ecosystem npm \
+  --manifest package.json \
+  --issue https://github.com/lovell/sharp/issues/1234 \
+  --reason "Fix musl SIGSEGV in libvips"
+
+# Remove a patch once upstream fixes the issue
+bugrouter patch rm sharp
 ```
 
 ### Draft a Staged Bug Report
@@ -239,11 +259,12 @@ In addition to tools, `bugrouter` advertises `resources: { listChanged: true }` 
 - **Prompts**: Provides `triage_parked_bug` with argument `id`, supplying ready-to-execute prompt templates for spawned triage sessions.
 - **Notifications**: Emits `notifications/resources/list_changed` to the host client immediately before returning `park_bug` responses.
 
-### Available MCP Tools (12 Total)
+### Available MCP Tools (13 Total)
 
 | Tool Name | Parameters | Description |
 | :--- | :--- | :--- |
 | `park_bug` | `dependency` (string), `title` (string), `error_snippet` (string, optional), `workaround_note` (string, optional), `workspace_file` (string, optional) | PREFERRED DURING CODING: Instantly parks a 3rd-party dependency bug in <5ms with zero network calls and returns a native session-handoff payload so you can alert the user to spawn a separate bug-reporting session without derailing your current task. Emits `notifications/resources/list_changed`. |
+| `record_dependency_patch` | `dependency` (string), `patch_target` (string), `reason` (string), `ecosystem` (string, optional), `manifest_file` (string, optional), `upstream_issue_url` (string, optional) | Records a temporary local fork or patch for a 3rd-party dependency in the patch ledger so it stays visible to engineers and can be reverted when upstream fixes the issue. |
 | `resolve_target` | `query` (string) | Resolves a software artifact or dependency query to its canonical bug tracker. |
 | `scrub_text` | `text` (string) | Deterministically redacts secrets, tokens, connection strings, and local username paths. |
 | `introspect_template` | `query` (string) | Discovers and parses upstream bug tracker issue templates or schemas for a target. |

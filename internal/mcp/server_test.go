@@ -131,11 +131,14 @@ body:
 	}
 	res3 := resp3.Result.(map[string]any)
 	tools := res3["tools"].([]any)
-	if len(tools) != 12 {
-		t.Errorf("expected 12 tools, got %d", len(tools))
+	if len(tools) != 13 {
+		t.Errorf("expected 13 tools, got %d", len(tools))
 	}
 	if len(tools) > 0 && tools[0].(map[string]any)["name"] != "park_bug" {
 		t.Errorf("expected first tool to be park_bug, got %v", tools[0].(map[string]any)["name"])
+	}
+	if len(tools) > 1 && tools[1].(map[string]any)["name"] != "record_dependency_patch" {
+		t.Errorf("expected second tool to be record_dependency_patch, got %v", tools[1].(map[string]any)["name"])
 	}
 
 	// Response 4: tools/call scrub_text
@@ -697,5 +700,63 @@ func TestMCPParkBugHandoffResourcesAndPrompts(t *testing.T) {
 	promptText := msgContent["text"].(string)
 	if !strings.Contains(promptText, "draft_bug_report") || !strings.Contains(promptText, "sharp") {
 		t.Errorf("prompts/get text missing draft_bug_report or sharp: %s", promptText)
+	}
+}
+
+func TestMCPRecordDependencyPatch(t *testing.T) {
+	tempDir := t.TempDir()
+	patchFile := filepath.Join(tempDir, "patches.json")
+	patchStore := adapter.NewPatchStore(patchFile)
+
+	server := NewServer(nil, nil).WithPatchStore(patchStore)
+
+	var in bytes.Buffer
+	var out bytes.Buffer
+
+	callMsg := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"record_dependency_patch","arguments":{"dependency":"sharp","patch_target":"patches/sharp+0.33.0.patch","reason":"Fix musl SIGSEGV","ecosystem":"npm","manifest_file":"package.json","upstream_issue_url":"https://github.com/lovell/sharp/issues/1234"}}}` + "\n"
+	in.WriteString(callMsg)
+
+	if err := server.Run(context.Background(), &in, &out); err != nil {
+		t.Fatalf("server.Run failed: %v", err)
+	}
+
+	var resp jsonrpcResponse
+	if err := json.Unmarshal(out.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal response failed: %v", err)
+	}
+
+	resultMap := resp.Result.(map[string]any)
+	if resultMap["isError"] != false {
+		t.Fatalf("expected isError=false, got %+v", resultMap)
+	}
+
+	contentArr := resultMap["content"].([]any)
+	if len(contentArr) != 1 {
+		t.Fatalf("expected 1 content, got %d", len(contentArr))
+	}
+	text := contentArr[0].(map[string]any)["text"].(string)
+
+	var recorded adapter.DependencyPatch
+	if err := json.Unmarshal([]byte(text), &recorded); err != nil {
+		t.Fatalf("unmarshal recorded patch failed: %v", err)
+	}
+
+	if recorded.Dependency != "sharp" {
+		t.Errorf("expected dependency sharp, got %q", recorded.Dependency)
+	}
+	if recorded.PatchTarget != "patches/sharp+0.33.0.patch" {
+		t.Errorf("expected patch target patches/sharp+0.33.0.patch, got %q", recorded.PatchTarget)
+	}
+	if recorded.Ecosystem != "npm" {
+		t.Errorf("expected ecosystem npm, got %q", recorded.Ecosystem)
+	}
+
+	// Verify store state
+	patches, err := patchStore.List()
+	if err != nil {
+		t.Fatalf("patchStore.List failed: %v", err)
+	}
+	if len(patches) != 1 || patches[0].ID != recorded.ID {
+		t.Errorf("expected 1 patch in store, got %+v", patches)
 	}
 }
