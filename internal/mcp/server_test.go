@@ -131,14 +131,17 @@ body:
 	}
 	res3 := resp3.Result.(map[string]any)
 	tools := res3["tools"].([]any)
-	if len(tools) != 14 {
-		t.Errorf("expected 14 tools, got %d", len(tools))
+	if len(tools) != 15 {
+		t.Errorf("expected 15 tools, got %d", len(tools))
 	}
 	if len(tools) > 0 && tools[0].(map[string]any)["name"] != "park_bug" {
 		t.Errorf("expected first tool to be park_bug, got %v", tools[0].(map[string]any)["name"])
 	}
 	if len(tools) > 1 && tools[1].(map[string]any)["name"] != "record_dependency_patch" {
 		t.Errorf("expected second tool to be record_dependency_patch, got %v", tools[1].(map[string]any)["name"])
+	}
+	if len(tools) > 2 && tools[2].(map[string]any)["name"] != "check_dependency_patches" {
+		t.Errorf("expected third tool to be check_dependency_patches, got %v", tools[2].(map[string]any)["name"])
 	}
 
 	// Response 4: tools/call scrub_text
@@ -920,5 +923,62 @@ func TestReadSystemCrashLogTool(t *testing.T) {
 	content, ok := resultMap["content"].([]any)
 	if !ok || len(content) == 0 {
 		t.Fatalf("expected content in result: %+v", resultMap)
+	}
+}
+
+func TestCheckDependencyPatchesTool(t *testing.T) {
+	mockForge := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/repos/lovell/sharp/issues/1234" {
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"state": "closed"}`)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer mockForge.Close()
+
+	tempDir := t.TempDir()
+	patchStore := adapter.NewPatchStore(filepath.Join(tempDir, "patches.json"))
+	_, err := patchStore.Record("sharp", "npm", "patches/sharp.patch", "package.json", mockForge.URL+"/lovell/sharp/issues/1234", "musl SIGSEGV workaround")
+	if err != nil {
+		t.Fatalf("record patch: %v", err)
+	}
+
+	testClient := httpx.NewTestClient(5 * time.Second)
+	server := NewServer(nil, nil).WithPatchStore(patchStore).WithHTTPClient(testClient)
+
+	var in, out bytes.Buffer
+	callMsg := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"check_dependency_patches","arguments":{}}}` + "\n"
+	in.WriteString(callMsg)
+
+	if err := server.Run(context.Background(), &in, &out); err != nil {
+		t.Fatalf("server.Run failed: %v", err)
+	}
+
+	var resp jsonrpcResponse
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out.String())), &resp); err != nil {
+		t.Fatalf("unmarshal response failed: %v", err)
+	}
+
+	resultMap, ok := resp.Result.(map[string]any)
+	if !ok {
+		t.Fatalf("expected map result, got %T: %+v", resp.Result, resp.Result)
+	}
+	if resultMap["isError"] != false {
+		t.Fatalf("expected isError=false, got: %+v", resultMap)
+	}
+
+	content := resultMap["content"].([]any)
+	text := content[0].(map[string]any)["text"].(string)
+
+	var results []adapter.PatchStatusResult
+	if err := json.Unmarshal([]byte(text), &results); err != nil {
+		t.Fatalf("decode patch status results from text %q: %v", text, err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	if results[0].UpstreamState != "closed" || !results[0].CanRevert {
+		t.Errorf("expected UpstreamState='closed' and CanRevert=true, got %+v", results[0])
 	}
 }

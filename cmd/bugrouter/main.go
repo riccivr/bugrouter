@@ -485,7 +485,7 @@ func main() {
 
 	case "patch":
 		if len(os.Args) < 3 {
-			fmt.Fprintln(os.Stderr, "Usage: bugrouter patch <list|add|rm> [arguments...]")
+			fmt.Fprintln(os.Stderr, "Usage: bugrouter patch <list|add|check|rm> [arguments...]")
 			os.Exit(1)
 		}
 		patchStore := adapter.NewPatchStore("")
@@ -518,6 +518,64 @@ func main() {
 			fmt.Println(strings.Repeat("-", 90))
 			for _, p := range patches {
 				fmt.Printf("%-10s %-25s %-10s %-30s %s\n", p.ID, p.Dependency, p.Ecosystem, p.PatchTarget, p.Reason)
+			}
+			return
+
+		case "check":
+			fs := flag.NewFlagSet("patch check", flag.ContinueOnError)
+			jsonOut := fs.Bool("json", false, "output JSON array of patch status results")
+			timeout := fs.Duration("timeout", 15*time.Second, "timeout for checking upstream status")
+			if err := fs.Parse(os.Args[3:]); err != nil {
+				os.Exit(1)
+			}
+			patches, err := patchStore.List()
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "error: list patches: %v\n", err)
+				os.Exit(1)
+			}
+			if len(patches) == 0 {
+				if *jsonOut {
+					fmt.Println("[]")
+				} else {
+					fmt.Println("No active dependency patches tracked in ledger.")
+				}
+				return
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+			defer cancel()
+			client := httpx.NewClient(5 * time.Second)
+			results, err := adapter.CheckPatchUpstreamStatus(ctx, client, patches)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "error: check patches: %v\n", err)
+				os.Exit(1)
+			}
+			if *jsonOut {
+				enc := json.NewEncoder(os.Stdout)
+				enc.SetIndent("", "  ")
+				if err := enc.Encode(results); err != nil {
+					fmt.Fprintf(os.Stderr, "error: encode json: %v\n", err)
+					os.Exit(1)
+				}
+				return
+			}
+			fmt.Printf("%-10s %-25s %-12s %-20s %s\n", "ID", "DEPENDENCY", "STATE", "STATUS", "UPSTREAM ISSUE")
+			fmt.Println(strings.Repeat("-", 95))
+			for _, r := range results {
+				statusStr := "-"
+				if r.CanRevert {
+					statusStr = "[READY TO REVERT]"
+				} else if r.UpstreamState == "open" {
+					statusStr = "Upstream Open"
+				} else if r.UpstreamState == "no_url" {
+					statusStr = "No Upstream URL"
+				} else if r.CheckError != "" {
+					statusStr = "Check Error"
+				}
+				issueURL := r.Patch.UpstreamIssueURL
+				if issueURL == "" {
+					issueURL = "-"
+				}
+				fmt.Printf("%-10s %-25s %-12s %-20s %s\n", r.Patch.ID, r.Patch.Dependency, r.UpstreamState, statusStr, issueURL)
 			}
 			return
 
@@ -565,7 +623,7 @@ func main() {
 
 		default:
 			fmt.Fprintf(os.Stderr, "error: unknown patch subcommand %q\n", os.Args[2])
-			fmt.Fprintln(os.Stderr, "Usage: bugrouter patch <list|add|rm> [arguments...]")
+			fmt.Fprintln(os.Stderr, "Usage: bugrouter patch <list|add|check|rm> [arguments...]")
 			os.Exit(1)
 		}
 
@@ -1356,6 +1414,7 @@ func main() {
 		).WithCache(cacheStore)
 		finder := dedup.NewFinder(httpClient)
 		srv.WithStackScanner(wf, finder, ".")
+		srv.WithIntrospector(introspector.New(httpClient).WithCache(cacheStore))
 
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
@@ -1395,6 +1454,8 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "  patch add --dep <d> --target <fork> [--ecosystem <e>] [--issue <url>] [--manifest <m>] [--reason <r>]")
 	fmt.Fprintln(os.Stderr, "                              Record a temporary dependency fork/patch in the ledger")
 	fmt.Fprintln(os.Stderr, "  patch rm <id-or-dep>        Remove a dependency patch from the ledger")
+	fmt.Fprintln(os.Stderr, "  patch check [--json] [--timeout <dur>]")
+	fmt.Fprintln(os.Stderr, "                              Check upstream issue status for tracked patches and flag revertable forks")
 	fmt.Fprintln(os.Stderr, "  draft [--title <t>] [--summary <s>] [--steps <st>] [--logs <l>] [--from-parked <id>] [--related-dep <pkg>]")
 	fmt.Fprintln(os.Stderr, "        [--verify-cmd <cmd>] [--with-telemetry] [--body-file <path>] [--strict-quality] [--timeout <dur>] [--json] [--no-cache] [<q>]")
 	fmt.Fprintln(os.Stderr, "                              Stage bug report draft and generate submission URLs")

@@ -738,6 +738,54 @@ func TestPatchSubcommandLifecycle(t *testing.T) {
 	}
 }
 
+func TestPatchCheckSubcommand(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.Contains(r.URL.Path, "closed") {
+			fmt.Fprint(w, `{"state": "closed"}`)
+		} else {
+			fmt.Fprint(w, `{"state": "open"}`)
+		}
+	}))
+	defer ts.Close()
+
+	tempDir := t.TempDir()
+	patchFile := filepath.Join(tempDir, "patches.json")
+	t.Setenv("BUGROUTER_PATCHES_FILE", patchFile)
+
+	store := adapter.NewPatchStore(patchFile)
+	_, err := store.Record(
+		"react-dom",
+		"npm",
+		"patches/react-dom.patch",
+		"package.json",
+		ts.URL+"/repos/facebook/react/issues/closed-issue",
+		"Fix hydration mismatch",
+	)
+	if err != nil {
+		t.Fatalf("Record failed: %v", err)
+	}
+
+	patches, err := store.List()
+	if err != nil {
+		t.Fatalf("List failed: %v", err)
+	}
+
+	results, err := adapter.CheckPatchUpstreamStatus(context.Background(), httpx.NewTestClient(5*time.Second), patches)
+	if err != nil {
+		t.Fatalf("CheckPatchUpstreamStatus failed: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	if !results[0].CanRevert {
+		t.Errorf("expected CanRevert true for closed issue, got false")
+	}
+	if results[0].UpstreamState != "closed" {
+		t.Errorf("expected UpstreamState closed, got %q", results[0].UpstreamState)
+	}
+}
+
 func TestRecoverAndParkSelfBug(t *testing.T) {
 	tempDir := t.TempDir()
 

@@ -71,6 +71,7 @@ type Server struct {
 	dedupFinder     *dedup.Finder
 	auditLogger     *cloud.AuditLogger
 	webhookNotifier *cloud.WebhookNotifier
+	httpClient      *httpx.Client
 }
 
 // NewServer creates an MCP server backed by the provided waterfall and draft store.
@@ -86,7 +87,16 @@ func NewServer(wf *resolver.Waterfall, store *adapter.DraftStore) *Server {
 		dedupFinder:     dedup.NewFinder(httpClient),
 		auditLogger:     cloud.NewAuditLogger(""),
 		webhookNotifier: cloud.NewWebhookNotifier(httpClient, "", ""),
+		httpClient:      httpClient,
 	}
+}
+
+// WithHTTPClient overrides the default HTTP client for testing or custom configuration.
+func (s *Server) WithHTTPClient(client *httpx.Client) *Server {
+	if client != nil {
+		s.httpClient = client
+	}
+	return s
 }
 
 // WithParkedStore overrides the default parked bug store for testing or custom configuration.
@@ -443,6 +453,14 @@ func (s *Server) toolDefinitions() []map[string]any {
 			},
 		},
 		{
+			"name":        "check_dependency_patches",
+			"description": "Checks upstream issue/PR tracking status for all recorded temporary dependency patches and flags issues ready to be reverted.",
+			"inputSchema": map[string]any{
+				"type":       "object",
+				"properties": map[string]any{},
+			},
+		},
+		{
 			"name":        "resolve_target",
 			"description": "Resolves a software artifact or dependency query to its canonical bug tracker.",
 			"inputSchema": map[string]any{
@@ -737,6 +755,9 @@ func (s *Server) handleToolCall(ctx context.Context, params toolCallParams, out 
 			Content: []toolContent{{Type: "text", Text: string(data)}},
 			IsError: false,
 		}
+
+	case "check_dependency_patches":
+		return s.handleCheckDependencyPatches(ctx)
 
 	case "resolve_target":
 		var args struct {
@@ -1598,6 +1619,49 @@ func (s *Server) handleReadSystemCrashLog(ctx context.Context, args json.RawMess
 			IsError: true,
 		}
 	}
+	return toolCallResult{
+		Content: []toolContent{{Type: "text", Text: string(data)}},
+		IsError: false,
+	}
+}
+
+func (s *Server) handleCheckDependencyPatches(ctx context.Context) toolCallResult {
+	if s.patchStore == nil {
+		return toolCallResult{
+			Content: []toolContent{{Type: "text", Text: "patch store is not initialized"}},
+			IsError: true,
+		}
+	}
+
+	patches, err := s.patchStore.List()
+	if err != nil {
+		return toolCallResult{
+			Content: []toolContent{{Type: "text", Text: fmt.Sprintf("list patches: %v", err)}},
+			IsError: true,
+		}
+	}
+
+	client := s.httpClient
+	if client == nil {
+		client = httpx.NewClient(10 * time.Second)
+	}
+
+	results, err := adapter.CheckPatchUpstreamStatus(ctx, client, patches)
+	if err != nil {
+		return toolCallResult{
+			Content: []toolContent{{Type: "text", Text: fmt.Sprintf("check patch upstream status: %v", err)}},
+			IsError: true,
+		}
+	}
+
+	data, err := json.MarshalIndent(results, "", "  ")
+	if err != nil {
+		return toolCallResult{
+			Content: []toolContent{{Type: "text", Text: fmt.Sprintf("marshal results: %v", err)}},
+			IsError: true,
+		}
+	}
+
 	return toolCallResult{
 		Content: []toolContent{{Type: "text", Text: string(data)}},
 		IsError: false,

@@ -16,6 +16,8 @@ import (
 
 	"github.com/riccivr/bugrouter/internal/adapter"
 	"github.com/riccivr/bugrouter/internal/dedup"
+	"github.com/riccivr/bugrouter/internal/httpx"
+	"github.com/riccivr/bugrouter/internal/introspector"
 	"github.com/riccivr/bugrouter/internal/resolver"
 	"github.com/riccivr/bugrouter/internal/scrubber"
 	"github.com/riccivr/bugrouter/internal/telemetry"
@@ -37,6 +39,8 @@ type Server struct {
 	httpServer      *http.Server
 	resolver        *resolver.Waterfall
 	dedupFinder     *dedup.Finder
+	introspector    *introspector.Introspector
+	httpClient      *httpx.Client
 	stackDir        string
 	servicesPath    string
 	patchStore      *adapter.PatchStore
@@ -47,6 +51,7 @@ func NewServer(addr string, store *adapter.DraftStore, submitter ForgeSubmitter)
 	if addr == "" {
 		addr = ":8080"
 	}
+	hc := httpx.NewClient(0)
 	s := &Server{
 		mux:          http.NewServeMux(),
 		draftStore:   store,
@@ -56,8 +61,26 @@ func NewServer(addr string, store *adapter.DraftStore, submitter ForgeSubmitter)
 		stackDir:     ".",
 		servicesPath: resolver.ResolveOrgCloudConfigPath(),
 		patchStore:   adapter.NewPatchStore(""),
+		introspector: introspector.New(hc),
+		httpClient:   hc,
 	}
 	s.registerRoutes()
+	return s
+}
+
+// WithIntrospector configures an issue template introspector.
+func (s *Server) WithIntrospector(intro *introspector.Introspector) *Server {
+	if intro != nil {
+		s.introspector = intro
+	}
+	return s
+}
+
+// WithHTTPClient overrides the default HTTP client (e.g. for testing with private/loopback hosts permitted).
+func (s *Server) WithHTTPClient(client *httpx.Client) *Server {
+	if client != nil {
+		s.httpClient = client
+	}
 	return s
 }
 
@@ -179,6 +202,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("POST /api/v1/services", s.handleUpsertService)
 	s.mux.HandleFunc("DELETE /api/v1/services/{name}", s.handleDeleteService)
 	s.mux.HandleFunc("GET /api/v1/patches", s.handleListPatches)
+	s.mux.HandleFunc("POST /api/v1/patches/check", s.handleCheckPatches)
 	s.mux.HandleFunc("POST /api/v1/patches", s.handleRecordPatch)
 	s.mux.HandleFunc("DELETE /api/v1/patches/{id}", s.handleDeletePatch)
 	s.mux.HandleFunc("GET /api/v1/drafts", s.handleListDrafts)
@@ -508,6 +532,10 @@ func (s *Server) handleListPatches(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "patch store not configured", http.StatusInternalServerError)
 		return
 	}
+	if r.URL.Query().Get("check_upstream") == "1" || r.URL.Query().Get("check_upstream") == "true" {
+		s.handleCheckPatches(w, r)
+		return
+	}
 	patches, err := s.patchStore.List()
 	if err != nil {
 		http.Error(w, fmt.Sprintf("list patches: %v", err), http.StatusInternalServerError)
@@ -518,6 +546,35 @@ func (s *Server) handleListPatches(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(patches); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+}
+
+func (s *Server) handleCheckPatches(w http.ResponseWriter, r *http.Request) {
+	if s.patchStore == nil {
+		http.Error(w, "patch store not configured", http.StatusInternalServerError)
+		return
+	}
+	patches, err := s.patchStore.List()
+	if err != nil {
+		http.Error(w, fmt.Sprintf("list patches: %v", err), http.StatusInternalServerError)
+		return
+	}
+	if patches == nil {
+		patches = []adapter.DependencyPatch{}
+	}
+
+	results, err := adapter.CheckPatchUpstreamStatus(r.Context(), s.httpClient, patches)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("check patch upstream status: %v", err), http.StatusInternalServerError)
+		return
+	}
+	if results == nil {
+		results = []adapter.PatchStatusResult{}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(results); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
 }
@@ -746,9 +803,18 @@ func (s *Server) handleCreateDraft(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Introspect issue template and maintainer policy if available
+	var schema *introspector.TemplateSchema
+	if s.introspector != nil && target != nil {
+		if sch, introErr := s.introspector.Introspect(r.Context(), *target); introErr == nil {
+			schema = sch
+		}
+	}
+
 	// Build staged draft
 	draft, err := adapter.BuildDraft(adapter.DraftInput{
 		Target:           *target,
+		Template:         schema,
 		Title:            req.Title,
 		Summary:          req.Summary,
 		StepsToReproduce: req.StepsToReproduce,
@@ -1180,6 +1246,8 @@ const indexHTML = `<!DOCTYPE html>
     .status-pending { background: rgba(210, 153, 34, 0.2); color: var(--warning); }
     .status-submitted { background: rgba(35, 134, 54, 0.2); color: #3fb950; }
     .status-discarded { background: rgba(218, 54, 51, 0.2); color: var(--danger); }
+    .status-companion { background: rgba(88, 166, 255, 0.2); color: var(--accent); }
+    .badge-revert { background: rgba(35, 134, 54, 0.2); color: #3fb950; font-weight: bold; border: 1px solid rgba(35, 134, 54, 0.4); }
     #modal {
       display: none;
       position: fixed;
@@ -1248,7 +1316,10 @@ const indexHTML = `<!DOCTYPE html>
             <h3 style="margin: 0; color: #f59e0b; font-size: 1rem;">Active Dependency Patches (Temporary Forks)</h3>
             <span id="patches-badge" style="background: #f59e0b; color: #000; font-weight: bold; font-size: 0.75rem; padding: 2px 8px; border-radius: 12px;">0 Active</span>
           </div>
-          <button class="btn btn-inspect" style="font-size: 0.8rem; padding: 4px 10px;" onclick="openAddPatchModal()">+ Track Local Patch</button>
+          <div style="display: flex; gap: 8px;">
+            <button class="btn btn-inspect" style="font-size: 0.8rem; padding: 4px 10px;" onclick="checkPatchesStatus()">Check Upstream Status</button>
+            <button class="btn btn-inspect" style="font-size: 0.8rem; padding: 4px 10px;" onclick="openAddPatchModal()">+ Track Local Patch</button>
+          </div>
         </div>
         <p style="margin: 0 0 12px 0; color: var(--muted); font-size: 0.85rem;">
           These 3rd-party dependencies are currently running on local forks or vendor patches. Keep them close to your eyes so temporary workarounds do not become permanent tech debt.
@@ -1550,27 +1621,61 @@ const indexHTML = `<!DOCTYPE html>
       }
     }
 
-        function renderPatches() {
+    async function checkPatchesStatus() {
+      try {
+        const res = await fetch('/api/v1/patches/check', {
+          method: 'POST',
+          headers: getHeaders()
+        });
+        if (res.ok) {
+          const results = await res.json();
+          renderPatches(results);
+        } else {
+          const err = await res.text();
+          alert('Check upstream patches failed: ' + err);
+        }
+      } catch (err) {
+        alert('Network error: ' + err.message);
+      }
+    }
+
+    function renderPatches(statusResults) {
       const container = document.getElementById('patches-container');
       const tbody = document.getElementById('patches-tbody');
       const badge = document.getElementById('patches-badge');
       if (!container || !tbody) return;
 
-      if (!currentPatches || currentPatches.length === 0) {
+      const items = statusResults || (currentPatches ? currentPatches.map(p => ({ patch: p })) : []);
+      if (!items || items.length === 0) {
         container.style.display = 'none';
         return;
       }
 
       container.style.display = 'block';
-      if (badge) badge.textContent = currentPatches.length + ' Active';
+      let readyCount = 0;
+      items.forEach(r => { if (r.can_revert) readyCount++; });
+      if (badge) badge.textContent = items.length + ' Active' + (readyCount > 0 ? ' (' + readyCount + ' Ready to Revert)' : '');
 
-      tbody.innerHTML = currentPatches.map(p => {
-        const issueLink = p.upstream_issue_url ? '<a href="' + escapeHTML(p.upstream_issue_url) + '" target="_blank" style="color: var(--accent);">' + escapeHTML(p.upstream_issue_url) + '</a>' : '<span style="color: var(--muted);">-</span>';
+      tbody.innerHTML = items.map(item => {
+        const p = item.patch || item;
+        const canRevert = !!item.can_revert;
+        const upstreamState = item.upstream_state;
+        let issueLink = '<span style="color: var(--muted);">-</span>';
+        if (p.upstream_issue_url) {
+          issueLink = '<a href="' + escapeHTML(p.upstream_issue_url) + '" target="_blank" style="color: var(--accent);">' + escapeHTML(p.upstream_issue_url) + '</a>';
+        }
+        let stateBadge = '';
+        if (canRevert) {
+          stateBadge = ' <span class="badge badge-revert">Ready to Revert</span>';
+        } else if (upstreamState && upstreamState !== 'no_url') {
+          stateBadge = ' <span class="badge">[' + escapeHTML(upstreamState) + ']</span>';
+        }
+
         return '<tr style="border-bottom: 1px solid rgba(255,255,255,0.05);">' +
           '<td style="padding: 8px;"><strong>' + escapeHTML(p.dependency) + '</strong></td>' +
           '<td style="padding: 8px;"><span class="badge">' + escapeHTML(p.ecosystem || 'custom') + '</span></td>' +
           '<td style="padding: 8px;"><code>' + escapeHTML(p.patch_target) + '</code></td>' +
-          '<td style="padding: 8px;">' + issueLink + '</td>' +
+          '<td style="padding: 8px;">' + issueLink + stateBadge + '</td>' +
           '<td style="padding: 8px; color: var(--muted);">' + escapeHTML(p.reason || '') + '</td>' +
           '<td style="padding: 8px; text-align: right;">' +
             '<button class="btn btn-discard" style="padding: 3px 8px; font-size: 0.75rem;" onclick="removePatch(\'' + escapeHTML(p.id) + '\')">Remove</button>' +
@@ -1865,9 +1970,13 @@ const indexHTML = `<!DOCTYPE html>
         return;
       }
       tbody.innerHTML = currentDrafts.map(d => {
-        const statusClass = d.status === 'submitted' ? 'status-submitted' : (d.status === 'discarded' ? 'status-discarded' : 'status-pending');
+        const isCompanion = d.status === 'companion_only';
+        const statusClass = d.status === 'submitted' ? 'status-submitted' : (d.status === 'discarded' ? 'status-discarded' : (isCompanion ? 'status-companion' : 'status-pending'));
         const targetName = (d.target && d.target.canonical_name) || 'unknown';
         const protocol = (d.target && d.target.tracker && d.target.tracker.protocol) || 'none';
+        const approveBtn = (!isCompanion && d.status !== 'submitted' && d.status !== 'discarded') ? '<button class="btn btn-approve" onclick="approveDraft(\'' + d.id + '\')">Approve</button>' : '';
+        const manualLink = (isCompanion && d.submission_url) ? '<a href="' + escapeHTML(d.submission_url) + '" target="_blank" class="btn btn-approve" style="text-decoration:none; display:inline-block;">Open Form</a>' : '';
+        const discardBtn = (d.status !== 'discarded' && d.status !== 'submitted') ? '<button class="btn btn-discard" onclick="discardDraft(\'' + d.id + '\')">Discard</button>' : '';
         return '<tr>' +
           '<td><code>' + d.id + '</code></td>' +
           '<td>' + escapeHTML(d.title || '') + '</td>' +
@@ -1877,8 +1986,9 @@ const indexHTML = `<!DOCTYPE html>
           '<td>' + new Date(d.created_at).toLocaleString() + '</td>' +
           '<td>' +
             '<button class="btn btn-inspect" onclick="inspectDraft(\'' + d.id + '\')">Inspect</button>' +
-            (d.status !== 'submitted' ? '<button class="btn btn-approve" onclick="approveDraft(\'' + d.id + '\')">Approve</button>' : '') +
-            (d.status !== 'discarded' ? '<button class="btn btn-discard" onclick="discardDraft(\'' + d.id + '\')">Discard</button>' : '') +
+            approveBtn +
+            manualLink +
+            discardBtn +
           '</td>' +
         '</tr>';
       }).join('');
@@ -1888,7 +1998,28 @@ const indexHTML = `<!DOCTYPE html>
       const d = currentDrafts.find(x => x.id === id);
       if (!d) return;
       document.getElementById('modal-title').textContent = 'Draft: ' + d.title;
-      let bodyHtml = '<h4>Target Metadata</h4><p>Target: <b>' + (d.target.canonical_name || '') + '</b> | Protocol: <b>' + (d.target.tracker.protocol || '') + '</b></p>';
+      let bodyHtml = '';
+
+      if (d.status === 'companion_only' || (d.template && d.template.policy && d.template.policy.ai_opt_out)) {
+        const policy = (d.template && d.template.policy) || {};
+        const reason = policy.opt_out_reason || 'Upstream maintainer restricts automated or AI-assisted issue filing';
+        bodyHtml += '<div style="margin-bottom:16px; padding:12px; background:rgba(88,166,255,0.1); border:1px solid var(--accent); border-radius:6px;">' +
+          '<h4 style="margin:0 0 6px 0; color:var(--accent);">Maintainer Empathy &bull; Companion Mode</h4>' +
+          '<p style="margin:0 0 8px 0; font-size:0.85rem;">' + escapeHTML(reason) + '</p>';
+        if (policy.checklist_rules && policy.checklist_rules.length > 0) {
+          bodyHtml += '<p style="margin:4px 0 2px 0; font-weight:600; font-size:0.8rem;">Maintainer Checklist Rules:</p><ul style="margin:0; padding-left:20px; font-size:0.8rem;">';
+          for (const rule of policy.checklist_rules) {
+            bodyHtml += '<li>' + escapeHTML(rule) + '</li>';
+          }
+          bodyHtml += '</ul>';
+        }
+        if (d.submission_url) {
+          bodyHtml += '<div style="margin-top:10px;"><a href="' + escapeHTML(d.submission_url) + '" target="_blank" class="btn btn-approve" style="text-decoration:none; display:inline-block;">Open Submission Form (Manual Filing)</a></div>';
+        }
+        bodyHtml += '</div>';
+      }
+
+      bodyHtml += '<h4>Target Metadata</h4><p>Target: <b>' + (d.target.canonical_name || '') + '</b> | Protocol: <b>' + (d.target.tracker.protocol || '') + '</b></p>';
       if (d.submission_url) {
         const u = d.submission_url;
         if (u.startsWith('https://') || u.startsWith('http://') || u.startsWith('mailto:')) {
@@ -1909,6 +2040,18 @@ const indexHTML = `<!DOCTYPE html>
             '<a href="' + escapeHTML(dup.url) + '" target="_blank" style="color:var(--accent);">' + escapeHTML(dup.title || dup.id) + '</a>' :
             escapeHTML(dup.title || dup.id);
           bodyHtml += '<li>[' + escapeHTML(dup.state || 'unknown') + '] ' + link + ' <span class="badge">' + scorePct + ' match</span></li>';
+        }
+        bodyHtml += '</ul></div>';
+      }
+      if (d.related_issues && d.related_issues.length > 0) {
+        const relDep = d.related_dependency ? ' (' + escapeHTML(d.related_dependency) + ')' : '';
+        bodyHtml += '<div style="margin-top:12px; padding:12px; background:rgba(88,166,255,0.08); border:1px solid rgba(88,166,255,0.3); border-radius:6px;">';
+        bodyHtml += '<h4 style="margin:0 0 8px 0; color:var(--accent);">Correlated Evidence' + relDep + '</h4><ul style="margin:0; padding-left:20px;">';
+        for (const rel of d.related_issues) {
+          const link = (rel.url && (rel.url.startsWith('https://') || rel.url.startsWith('http://'))) ?
+            '<a href="' + escapeHTML(rel.url) + '" target="_blank" style="color:var(--accent);">' + escapeHTML(rel.title || rel.id) + '</a>' :
+            escapeHTML(rel.title || rel.id);
+          bodyHtml += '<li>[#' + escapeHTML(rel.id) + '] ' + link + ' (' + escapeHTML(rel.state || 'unknown') + ')</li>';
         }
         bodyHtml += '</ul></div>';
       }

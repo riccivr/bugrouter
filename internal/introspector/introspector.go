@@ -32,6 +32,9 @@ type Introspector struct {
 
 // New creates an introspector backed by the provided HTTP client and default API endpoints.
 func New(client *httpx.Client) *Introspector {
+	if client == nil {
+		client = httpx.NewClient(0)
+	}
 	return &Introspector{
 		client: client,
 		endpoints: Endpoints{

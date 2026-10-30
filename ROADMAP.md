@@ -8,141 +8,108 @@ This document tracks the long-term architectural trajectory, active implementati
 
 `bugrouter` is built on four core principles defined by the Principal Architect:
 
-1. **On-Demand Companion (Zero Resident Daemon):**
-   `bugrouter` is designed never to run as a bloated, background-polling daemon burning idle CPU and memory. It operates as a zero-overhead companion invoked only at the precise moment a bug or crash occurs—via fast CLI commands, native Model Context Protocol (MCP) tool invocations, or reading zero-idle OS post-mortem crash records (`coredumpctl`, Windows WER Event ID 1000, macOS DiagnosticReports).
+1. **Zero External Dependencies & Modern C99-Spirit Go:**
+   Implemented exclusively with the Go standard library (`net/http`, `os/exec`, `crypto/subtle`, `encoding/json`). Zero `node_modules`, zero third-party Go modules, zero supply-chain attack surface. Bounded memory execution (`io.LimitReader`), strict per-request timeouts, and type-level security guarantees.
 
-2. **Flow Preservation (4-Way Choice):**
-   When an AI coding agent spots a bug or anomaly in a 3rd-party dependency while implementing a feature, it must **never** derail or hijack the engineering session. It presents the developer with 4 clear choices:
+2. **Maintainer Empathy & AI Opt-Out Guard (Zero Maintainer Harassment):**
+   Open-source maintainers must never be inundated with unverified or automated AI-generated bug spam. `bugrouter` automatically scans upstream issue templates and `CONTRIBUTING.md` policies for AI/LLM opt-out rules. If an upstream repository restricts AI submissions, `bugrouter` **blocks automated API submission 100% of the time**, switches into **Companion Mode** (`companion_only`), strips automated branding footers, surfaces maintainer checklist rules, and provides pre-filled deep links for human engineers to review and file respectful, human-authored reports manually.
+
+3. **Anti-Context-Hijacking via `<5ms` Native Session Handoff (`park_bug`):**
+   When an AI coding agent spots a bug or anomaly in a 3rd-party dependency while implementing a feature, derailing into ticket filing destroys its in-context reasoning. `bugrouter park` / `park_bug` records the issue locally in `<5ms` with zero network I/O, presenting 4 clear flow preservation choices:
    - **Choice 1: Ignore & continue** the current task without friction.
    - **Choice 2: Keep parked** in `<5ms` with full contextual breadcrumbs (`park_bug`).
    - **Choice 3: Spawn a separate triage session** using native MCP Resources and Prompts (`bugrouter://parked/<id>`).
    - **Choice 4: Fork/patch locally** and maintain visibility in the dependency patch ledger (`bugrouter patch`).
 
-3. **Dependency Patch Visibility ("Close to the Eyes"):**
-   When upstream maintainers are slow to respond and teams fork or patch a dependency (`go.mod` `replace`, npm `overrides`/`patches/`, Cargo `[patch]`, Poetry git branch), temporary forks often become forgotten, permanent technical debt. `bugrouter` tracks every local patch in a high-visibility ledger alongside its canonical upstream issue URL and displays it front-and-center in the Web UI so patches can be promptly reverted when upstream releases a fix.
-
-4. **WorkOS-Style Plug-and-Play Dependency Portal:**
-   Companies and development teams do not need speculative, token-wasting "stack discovery". Engineers know the downstream dependencies and internal microservices their systems rely on. The Cloud Control Plane Web UI provides a visual catalog for connecting dependencies (`services.json`) and monitoring all active temporary patches in one unified view.
+4. **Dependency Patch Ledger with Automated Upstream Status Checks (`patch check`):**
+   When upstream maintainers take time to fix bugs, development teams frequently fork or vendor-patch dependencies (`go.mod` `replace`, npm `overrides`/`patches/`, Cargo `[patch]`). These temporary forks often become permanent technical debt. `bugrouter` tracks every temporary patch alongside its upstream issue URL in a high-visibility ledger and provides automated upstream status checks (`bugrouter patch check`) to notify engineers the instant an upstream bug is closed and the fork is **[READY TO REVERT]**.
 
 ---
 
-## 2. Completed Milestones Ledger (Milestones 1–4, Specs #01–#10.1)
+## 2. Chronological Milestones Ledger (Milestones 1–8)
 
-All milestones and specs below have been fully implemented, verified with race-detector tests, and merged into the core engine:
+All milestones below are fully implemented, verified with race-detector tests, and merged into the core engine under CalVer `2026.10.0`.
 
-### Milestone 1: Zero-Dependency Core Resolver & Contract [COMPLETED]
-- **Spec #01: Zero-Dependency Core Resolver & Contract [COMPLETED]**
-  - Bootstrapped CalVer versioning (`2026.10.0`), bounded `httpx.Client`, and initial `resolver.Target` abstraction.
-- **Spec #02: Classification Engine, DirectProbe & OSPackageProbe [COMPLETED]**
-  - Added URL normalization, forge classification (GitHub, GitLab, Codeberg, SourceHut), and Debian/Ubuntu package queries (`dpkg`, `apt`).
-- **Spec #03: Workspace Probe, Registry Probe & Web Domain Discovery [COMPLETED]**
-  - Implemented Node.js `node_modules` and Go `go.mod` parsing, concurrent registry probing for npm, PyPI, and Crates.io, and web discovery via RFC 9116 `security.txt` and `/.well-known/bug-report`.
+### Milestone 1: Core Foundation, Waterfall Resolver, Deterministic Scrubber [COMPLETED]
+- [x] **Spec #01: Zero-Dependency Core Resolver & Contract**: Bootstrapped CalVer versioning (`2026.10.0`), bounded `httpx.Client`, and initial `resolver.Target` abstraction.
+- [x] **Spec #02: Classification Engine, DirectProbe & OSPackageProbe**: Added URL normalization, forge classification (GitHub, GitLab, Codeberg, SourceHut), and Debian/Ubuntu package queries (`dpkg`, `apt`).
+- [x] **Spec #03: Workspace Probe, Registry Probe & Web Domain Discovery**: Implemented Node.js `node_modules` and Go `go.mod` parsing, concurrent registry probing for npm, PyPI, and Crates.io, and web discovery via RFC 9116 `security.txt` and `/.well-known/bug-report`.
+- [x] **Spec #04: Type-Safe Secret Scrubber**: Implemented immutable `ScrubbedText`, regex redaction for AWS, GitHub, Slack, OpenAI, PEM keys, and URI credentials, and local draft staging in `$XDG_DATA_HOME/bugrouter/drafts` with `0600` permissions.
 
-### Milestone 2: Type-Safe Secret Scrubber, Issue Template Introspector & Staged Drafts [COMPLETED]
-- **Spec #04: Type-Safe Secret Scrubber & Draft Engine [COMPLETED]**
-  - Implemented immutable `ScrubbedText`, regex redaction for AWS, GitHub, Slack, OpenAI, PEM keys, and URI credentials, and local draft staging in `$XDG_DATA_HOME/bugrouter/drafts` with `0600` permissions.
-- **Spec #05: Upstream Issue Template Introspector [COMPLETED]**
-  - Built zero-dependency YAML and Markdown issue template parsers, Bugzilla REST schema discovery, and query parameter pre-fill adaptation.
-- **Spec #06: WorkOS-Style Org Discovery & Cloud Control Plane [COMPLETED]**
-  - Added Layer 0 `OrgCloudProbe` for enterprise `services.json`, embedded review queue Web UI, and authenticated OAuth connectors (GitHub, GitLab, Jira, Linear).
-- **Spec #06.1: Control Plane Hardening & Post-M2 Remediation [COMPLETED]**
-  - Bound forge client with `httpx.PostBytes` SSRF protection, hardened draft IDs against directory traversal, and decoupled Jira and Linear protocols.
+### Milestone 2: Upstream Template Introspector, Duplicate Search Engine, Quality Scorer [COMPLETED]
+- [x] **Spec #05: Upstream Issue Template Introspector**: Built zero-dependency YAML and Markdown issue template parsers, Bugzilla REST schema discovery, and query parameter pre-fill adaptation.
+- [x] **Spec #07: Upstream Issue Deduplicator & Polyglot Manifests**: Added Rust `Cargo.toml`/`Cargo.lock` and Python `pyproject.toml` parsing, Fedora/RHEL `rpm` and Arch `pacman` probes, and token overlap duplicate detection for GitHub, GitLab, and Bugzilla.
+- [x] **Spec #07.1: Deduplication Hardening & Python PEP Normalization**: Fixed TOML inline table scanning, implemented PEP 503/508 package name normalization, and derived enterprise forge API base URLs.
+- [x] **Spec #11.A: Deterministic Anti-Slop Quality Linter**: Built `LintDraft` calculating 0–100 quality scores, gating AI buzzwords, chatbot tells, decorative emojis, em dashes, and unfilled placeholders with `--strict-quality`.
 
-### Milestone 3: Polyglot Manifests, Upstream Deduplication & Linux Package Probes [COMPLETED]
-- **Spec #07: Upstream Issue Deduplicator & Polyglot Manifests [COMPLETED]**
-  - Added Rust `Cargo.toml`/`Cargo.lock` and Python `pyproject.toml` parsing, Fedora/RHEL `rpm` and Arch `pacman` probes, and token overlap duplicate detection for GitHub, GitLab, and Bugzilla.
-- **Spec #07.1: Deduplication Hardening & Python PEP Normalization [COMPLETED]**
-  - Fixed TOML inline table scanning, implemented PEP 503/508 package name normalization, and derived enterprise forge API base URLs.
+### Milestone 3: Staged Draft Adapter, Human-in-the-Loop Review CLI, Authenticated Cloud Control Plane [COMPLETED]
+- [x] **Spec #06: WorkOS-Style Org Discovery & Cloud Control Plane**: Added Layer 0 `OrgCloudProbe` for enterprise `services.json`, embedded review queue Web UI, and authenticated OAuth connectors (GitHub, GitLab, Jira, Linear).
+- [x] **Spec #06.1: Control Plane Hardening & Post-M2 Remediation**: Bound forge client with `httpx.PostBytes` SSRF protection, hardened draft IDs against directory traversal, and decoupled Jira and Linear protocols.
+- [x] **Spec #08: Control Plane Security, Audit Logger & Webhooks**: Implemented constant-time Bearer token authentication with SHA-256 pre-hashing, CSRF origin verification, append-only JSONL audit logging (`audit.log`), and HMAC-SHA256 signed webhook dispatching (`X-Bugrouter-Signature`).
+- [x] **Spec #09 & #09.1: Production Readiness & Scrubber Precision**: Refined secret scrubber thresholds (>= 6 chars, preserving booleans and nil), added `--timeout` context bounds, `--body-file` stdin markdown parsing, and end-to-end integration tests.
 
-### Milestone 4: Cloud Control Plane Security, Audit Trails, Production Readiness & Credential Boundaries [COMPLETED]
-- **Spec #08: Control Plane Security, Audit Logger & Webhooks [COMPLETED]**
-  - Implemented constant-time Bearer token authentication with SHA-256 pre-hashing, CSRF origin verification, append-only JSONL audit logging (`audit.log`), and HMAC-SHA256 signed webhook dispatching (`X-Bugrouter-Signature`).
-- **Spec #09: v1.0 Production Readiness, CLI Polish & Golden Path [COMPLETED]**
-  - Refined secret scrubber thresholds (>= 6 chars, preserving booleans and nil), added `--timeout` context bounds, `--body-file` stdin markdown parsing, and end-to-end integration tests.
-- **Spec #09.1: Red-Team Remediation & Scrubber Precision [COMPLETED]**
-  - Removed private host environment bypasses, shared bounded HTTP clients across CLI workflows, and preserved quoted strings during redaction.
-- **Spec #10: CLI/README Parity, MCP Audit Trail & Private Repo Auth [COMPLETED]**
-  - Aligned CLI version formatting, added idempotent draft approval guards returning HTTP 409 Conflict, and added environment token authentication for private GitHub and GitLab repositories.
-- **Spec #10.1: Credential Boundary Remediation [COMPLETED]**
-  - Removed GitLab token leaks to Bugzilla endpoints, added automated cross-host redirect credential stripping in `httpx.Client`, and restricted GitHub token forwarding to verified API and raw download hostnames.
+### Milestone 4: Native Session Handoff (`bugrouter park`), WorkOS-Style Services Catalog, Zero-Dependency Telemetry [COMPLETED]
+- [x] **Spec #11: Zero-Hijacking `park_bug` MCP Handoff & WorkOS Services Catalog**:
+  - Implemented `<5ms` zero-network-call `ParkedStore` (`ParkedBug`, `HandoffPayload`) with 8-character hex IDs and atomic `0600` persistence in `$XDG_DATA_HOME/bugrouter/parked/<id>.json`.
+  - Added `park_bug` as first tool in `internal/mcp/server.go`, emitting `notifications/resources/list_changed` before returning tool response, and serving `bugrouter://parked/<id>` and `triage_parked_bug` prompts.
+  - Built WorkOS-style catalog API (`GET/POST/DELETE /api/v1/services`) and 1-click preset connection tiles in Cloud UI.
+  - Added `bugrouter park` CLI subcommand and `--from-parked <id>` draft hydration.
+- [x] **Spec #14: Zero-Dependency Hardware & OS Telemetry**:
+  - Implemented `telemetry.Collect` gathering OS, kernel, CPU, GPU models, driver versions, display servers, and desktop environments across Linux, macOS, and Windows with type-safe scrubbing.
+  - Added `bugrouter telemetry [--json]` subcommand and attached telemetry to `## Environment` sections in bug drafts.
 
----
+### Milestone 5: Deterministic Reproduction Verifier (`bugrouter verify`), Workspace Stack Radar (`bugrouter stack`) [COMPLETED]
+- [x] **Spec #12: Bounded Reproduction Validator**:
+  - Built `internal/verifier/verifier.go` (`Verify`, `VerifyOptions`, `VerificationProof`), executing reproduction shell commands under bounded timeouts (default 15s) and 256 KiB output buffers, capturing/scrubbing output, matching exit codes, and generating deterministic SHA-256 proof digests.
+  - Integrated `VerificationProof` into drafts with `## Verified Reproduction` section and +10 quality bonus.
+  - Added `bugrouter verify` / `bugrouter agent verify` CLI subcommands and `verify_reproduction` MCP tool.
+- [x] **Spec #13 & #13.1: Workspace Tech Stack Scanner & Downstream Bug Radar**:
+  - Implemented `internal/resolver/stack.go` scanning workspace dependencies across `services.json`, `go.mod`, `package.json`, `Cargo.toml`, and `pyproject.toml` with concurrent resolution.
+  - Implemented `internal/dedup/radar.go` querying canonical upstream trackers (GitHub, GitLab, Bugzilla, Gitea) for active open bugs affecting local dependency versions.
+  - Added `bugrouter stack` CLI subcommand, `/api/v1/stack` REST endpoint, "Connected Tech Stack & Downstream Radar" Web UI tab, and `scan_workspace_stack` MCP tool.
 
-## 3. Active & Upcoming Milestones
-
-### Milestone 5: Zero-Hijacking MCP Handoff, Tracked Patch Ledger & WorkOS Catalog (Active — Spec #11 / #11.1)
-Focuses on flow preservation during coding sessions, keeping temporary dependency patches visible to engineers, and providing a WorkOS-style dependency connection portal.
-
-- **Spec #11 & #11.1: Zero-Hijacking `park_bug` MCP Handoff, Tracked Dependency Patch Ledger & WorkOS Catalog [ACTIVE]**
-  - **Zero-Latency Parked Bug Store (`internal/adapter/parked.go`)**:
-    - `ParkedBug` record with 8-character hex ID (from `crypto/rand`), timestamps, dependency identifier, title, type-safe scrubbed snippets, workaround notes, workspace file locations, and status (`parked` -> `triaged`).
-    - `HandoffPayload` containing `ResourceURI` (`bugrouter://parked/<id>`), `MCPPromptName` (`triage_parked_bug`), `CLICommand` (`bugrouter draft --from-parked <id>`), `PatchInstructions`, `UserOptions` (the 4 flow choices), and clear agent directives.
-    - `ParkedStore` providing atomic file persistence in `$XDG_DATA_HOME/bugrouter/parked/<id>.json` with `0600` permissions in `<5ms` with zero network I/O.
-  - **Tracked Dependency Patch Ledger (`internal/adapter/patch.go`)**:
-    - `DependencyPatch` record storing ID, CreatedAt, Dependency, Ecosystem (`go`, `npm`, `cargo`, `python`, `custom`), PatchTarget (fork URL, branch, patch file), ManifestFile, UpstreamIssueURL, Reason, and Status (`active` / `reverted`).
-    - `PatchStore` providing atomic persistence in `$XDG_DATA_HOME/bugrouter/patches.json` (or `BUGROUTER_PATCHES_FILE`) with `0600` permissions.
-    - Methods `Record`, `List`, and `Remove`.
-  - **Native MCP Handoff & Patch Tools (`internal/mcp/server.go`)**:
-    - Advertises `tools: {}`, `resources: { listChanged: true }`, and `prompts: {}` capabilities in `initialize`.
-    - Exposes `park_bug` as tool 1, emitting `notifications/resources/list_changed` before returning tool response.
-    - Exposes `record_dependency_patch` to track local forks directly from MCP agents.
-    - Exposes `resources/list` and `resources/read` for `bugrouter://parked/<id>`.
-    - Exposes `prompts/list` and `prompts/get` for `triage_parked_bug`.
-  - **WorkOS-Style Plug-and-Play Dependency Catalog & Patch Banner (`internal/cloud/server.go`)**:
-    - High-visibility "Active Dependency Patches (Temporary Forks)" banner/table at the top of the Web UI with 1-click modal to track local patches.
-    - Grid of 1-click preset connection tiles (Stripe, Supabase, Auth0, Prisma, Next.js, Remix, Redis, Postgres, FFmpeg, Blender) and custom dependency registration form.
-    - REST API endpoints: `GET/POST/DELETE /api/v1/services` and `GET/POST/DELETE /api/v1/patches`.
-  - **CLI Commands (`cmd/bugrouter/main.go`)**:
-    - `bugrouter park [--snippet <s>] [--workaround <w>] [--file <f>] [--json] <dependency> <title>` displaying the 4 flow preservation options.
-    - `bugrouter patch list [--json]`, `bugrouter patch add --dep <d> --target <fork> [--ecosystem <e>] [--issue <url>] [--manifest <m>] [--reason <r>]`, and `bugrouter patch rm <id-or-dep>`.
-    - `bugrouter draft --from-parked <id>` for hydrating parked bugs in spawned triage sessions.
-
-- **Spec #11.2: Web UI Patch Ledger Red-Team Remediation [COMPLETED]**
-  - Eliminated duplicate `let currentPatches = [];` declaration in `indexHTML` script scope that triggered fatal JavaScript `SyntaxError`.
-  - Fixed helper function casing from `escapeHtml` to `escapeHTML` and fixed attribute single-quote escaping in `renderPatches()` removal buttons.
-  - Replaced undefined CSS classes (`.modal-backdrop`, `.open`) on `#add-patch-modal` with fixed inline overlay styling and updated JS toggle handlers.
-  - Added regression test assertions in `internal/cloud/server_test.go` ensuring script validity and modal overlay styling.
-
----
-
-### Milestone 6: Maintainer Empathy & Opt-Out Guard, Self-Hosting Dogfooding, and Cross-Dependency Evidence Dossiers (Spec #12) [COMPLETED]
-Eliminates friction with open-source maintainers, enables instant offline dogfooding of bugrouter itself, and correlates multi-package interaction bugs.
-
-- **Spec #12: Maintainer Empathy & Opt-Out Guard, Self-Hosting Dogfooding, and Cross-Dependency Evidence Dossiers [COMPLETED]**
-  - **Constitutional Error-Handling Cleanup (`internal/cloud/server_test.go`)**:
-    - Replaced all blank identifier assignments (`respBytes, _ := io.ReadAll(...)`) with explicit error handling in `TestServerServicesCatalogEndpoints` and `TestServerPatchEndpoints`.
-  - **Maintainer Empathy & AI Opt-Out Guard (`internal/introspector`, `internal/adapter`, `internal/cloud`, `internal/mcp`)**:
-    - `MaintainerPolicy` schema (`AIOptOut`, `OptOutReason`, `ChecklistRules`) wired into `TemplateSchema`.
-    - `ParseMaintainerPolicy` scanning templates and `CONTRIBUTING.md` / `.github/CONTRIBUTING.md` for AI/bot restrictions (`"no ai"`, `"no llm"`, `"do not submit ai"`, `"no automated issue"`, `"ai-generated issues"`, `"ban ai"`, `"no bot"`) and up to 5 checklist rules.
-    - Automatic **Companion Mode** (`draft.Status = "companion_only"`): suppresses `*Staged via bugrouter/...*` footer so human engineers can file manual reports.
-    - Automated API submission hard-blocked in `ForgeClient.Submit`, Cloud Server (`/api/v1/drafts/{id}/approve`), and MCP (`approve_draft`).
-  - **Self-Hosting Dogfooding (`internal/resolver`, `cmd/bugrouter`)**:
-    - Intrinsic offline `<1ms` resolution in `DirectProbe` for `"bugrouter"` and `"self"` targeting canonical repo `https://github.com/riccivr/bugrouter`.
-    - Top-level panic recovery with auto-parking breadcrumb (`recoverAndParkSelfBug`) in `main()` printing `bugrouter draft --from-parked <id>` to `os.Stderr`.
-  - **Cross-Dependency Evidence Dossiers (`--related-dep`) (`internal/adapter`, `cmd/bugrouter`, `internal/mcp`)**:
-    - Added `RelatedDependency` to `ParkedBug` and variadic `relatedDep ...string` support to `ParkedStore.Park`.
-    - Added `RelatedDependency` and `RelatedIssues` to `DraftInput` and `StagedDraft`, rendering correlated issues under `## Correlated Evidence (<dep>)`.
-    - Added `--related-dep <pkg>` to `bugrouter park` and `bugrouter draft` (with automatic hydration from parked bugs) and `related_dependency` parameter to MCP `park_bug` and `draft_bug_report`.
-
----
-
-### Milestone 7: Zero-Daemon Post-Mortem OS Crash Reader & Desktop Telemetry (Upcoming — Spec #13)
-Brings zero-daemon, post-mortem crash inspection to Linux, Windows, and macOS desktop environments without background pollers.
-
-- **Spec #13: Zero-Daemon Post-Mortem OS Crash Reader & Desktop App Telemetry [ACTIVE]**
-  - **Post-Mortem OS Crash Readers (`bugrouter crash-log`, MCP `read_system_crash_log`) [COMPLETED]**: Zero-daemon inspection reading system crash journals on demand:
+### Milestone 6: Native OS Crash Log Ingestion (`bugrouter triage` + WER / coredumpctl / DiagnosticReports) [COMPLETED]
+- [x] **Spec #12.A: Zero-Daemon Post-Mortem OS Crash Reader**:
+  - Implemented `internal/resolver/crashlog.go` (`ReadLatestCrash`) reading native OS post-mortem journals on demand without background pollers:
     - Linux: `coredumpctl info` and directory scanning `/var/crash`, `/var/lib/systemd/coredump`
     - Windows: Windows Error Reporting (WER) and Event Viewer (Application Crash Event ID 1000) via bounded PowerShell query
     - macOS: `/Library/Logs/DiagnosticReports/` and `~/Library/Logs/DiagnosticReports/` sorted by modification time
-    - Integrated with deterministic crash attribution, secret scrubbing, and machine-parseable JSON envelopes.
-  - **Desktop Application & GPU Telemetry [COMPLETED]**: Diagnostic capture for GUI applications (such as Photoshop, Blender, DaVinci Resolve) collecting GPU models, driver versions, display servers (Wayland, X11, DWM), and desktop environments (GNOME, KDE Plasma, XFCE, macOS Aqua, Windows DWM) with zero background daemon overhead and bounded secret scrubbing.
+  - Added `bugrouter crash-log [--json] [--query <target>]` CLI subcommand and `read_system_crash_log` MCP tool.
+- [x] **Spec #11.B: Crash Log Auto-Attribution**:
+  - Implemented `ExtractTargetsFromLog` in `internal/resolver/trace.go`, parsing Go, Node.js, Python, Rust, and native segfault traces to identify culprit symbols and suspect packages.
+  - Added `bugrouter triage` / `bugrouter agent triage` CLI subcommands and `triage_crash_log` MCP tool.
+
+### Milestone 7: Maintainer Empathy & Opt-Out Guard (`companion_only` mode, `CONTRIBUTING.md` checklist parsing) [COMPLETED]
+- [x] **Spec #12: Maintainer Empathy & Opt-Out Guard**:
+  - Added `MaintainerPolicy` struct (`AIOptOut`, `OptOutReason`, `ChecklistRules`) to `TemplateSchema`.
+  - Implemented `ParseMaintainerPolicy` in `internal/introspector/parser.go`, scanning case-insensitively for upstream maintainer opt-out phrases (`"no ai"`, `"no llm"`, `"do not submit ai"`, `"no automated issue"`, `"ai-generated issues"`, `"ban ai"`, `"no bot"`) and extracting up to 5 prerequisite checklist rules.
+  - Fetched `CONTRIBUTING.md` and `.github/CONTRIBUTING.md` in `introspectGitHub` and `introspectGitea`.
+  - Switched `adapter.BuildDraft` into **Companion Mode** when maintainers opt out (`draft.Status = "companion_only"`), omitting the `*Staged via bugrouter/...*` footer.
+  - Hardened automated API submission refusal in `ForgeClient.Submit`, `Server.handleApproveDraft`, and `mcp.approve_draft`.
+- [x] **Spec #12: Self-Hosting Dogfooding & Cross-Dependency Evidence Dossiers**:
+  - Added intrinsic `<1ms` offline self-resolution in `DirectProbe.Resolve` for `"bugrouter"` and `"self"`.
+  - Added top-level panic recovery with auto-parking breadcrumb (`recoverAndParkSelfBug`) in `main()`.
+  - Added `RelatedDependency` and `RelatedIssues` to `DraftInput` and `StagedDraft`, compiling correlated upstream tickets under `## Correlated Evidence (<dep>)`.
+
+### Milestone 8: Upstream Patch Status Checker (`bugrouter patch check`), Cloud UI Companion Mode & Full 15 MCP Tools Integration [COMPLETED]
+- [x] **Upstream Patch Status Checker Engine (`internal/adapter/patch_check.go`)**:
+  - Implemented `CheckPatchUpstreamStatus` querying upstream tracker issue states across GitHub (`GET /repos/...`), GitLab (`GET /api/v4/projects/.../issues/...`), Gitea (`GET /api/v1/repos/.../issues/...`), and Bugzilla (`GET /rest/bug/...`), returning `PatchStatusResult` with `UpstreamState` and `CanRevert: true` when closed.
+  - Bounded concurrency with a 5-worker semaphore and per-request timeouts.
+- [x] **CLI Subcommand (`cmd/bugrouter/main.go`)**:
+  - Extended `bugrouter patch` to support `bugrouter patch check [--json] [--timeout <dur>]`, displaying each tracked patch, its upstream issue URL, state, and clear `[READY TO REVERT]` status.
+- [x] **Cloud Control Plane & Companion Mode UI (`internal/cloud/server.go`)**:
+  - Wired `introspector` into `handleCreateDraft` so drafts created via Web UI respect maintainer opt-outs and trigger `companion_only` status.
+  - Added `POST /api/v1/patches/check` and `GET /api/v1/patches?check_upstream=1` endpoints.
+  - Added "Check Upstream Status" button and green `Ready to Revert` badges to the Active Dependency Patches banner in `indexHTML`.
+  - Added `.status-companion` styling, disabled `Approve` button for `companion_only` drafts, rendered Maintainer Empathy banner with `opt_out_reason`, checklist rules, and manual submission link, and rendered `Correlated Evidence`.
+- [x] **Full 15 MCP Tools Integration (`internal/mcp/server.go`)**:
+  - Added `check_dependency_patches` as the 15th MCP tool.
+  - Verified exact tool count of 15 tools with comprehensive test suite.
 
 ---
 
-### Milestone 7: Upstream Patch Status Checker & Anti-Slop Quality Linter (Upcoming — Spec #13)
-Equips teams to retire temporary forks as soon as upstream maintains merge fixes, ensuring maintainer-ready reports.
+## 3. Future & Planned Milestones
 
-- **Spec #13: Upstream Patch Status Checker & Anti-Slop Quality Linter [UPCOMING]**
-  - **Upstream Patch Status Checker (`bugrouter patch check`)**: Probes tracked `UpstreamIssueURL` states across GitHub, GitLab, and Bugzilla to alert engineers when an active dependency fork can be safely reverted.
-  - **Deterministic Anti-Slop Quality Linter (`internal/adapter/linter.go`)**: Evaluates draft quality on a 0–100 scale, gating AI conversational filler, decorative emojis, em dashes, and unfilled placeholders (`TODO`, `FIXME`, `<insert>`).
-  - **Bounded Reproduction Verifier (`internal/verifier/verifier.go`)**: Executes reproduction scripts in isolated subshells with 256 KiB output caps, timeout handling, secret scrubbing, and SHA-256 proof digests.
+### Milestone 9: GitHub Actions Matrix, CI/CD Pipeline & Automated CalVer Release [PLANNED]
+- **Release Automation**: Multi-platform release matrix (Linux `amd64`/`arm64`, macOS `amd64`/`arm64`, Windows `amd64`) producing standalone static binaries with SHA-256 checksums.
+- **GitHub Action (`action.yml`)**: Composite GitHub Action enabling CI runners to automatically check tracked dependency patches (`bugrouter patch check`) and fail PRs if temporary forks have been fixed upstream.

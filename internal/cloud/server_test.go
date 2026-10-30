@@ -20,6 +20,7 @@ import (
 
 	"github.com/riccivr/bugrouter/internal/adapter"
 	"github.com/riccivr/bugrouter/internal/httpx"
+	"github.com/riccivr/bugrouter/internal/introspector"
 	"github.com/riccivr/bugrouter/internal/resolver"
 	"github.com/riccivr/bugrouter/internal/version"
 )
@@ -1212,7 +1213,8 @@ func TestServerPatchEndpoints(t *testing.T) {
 
 	srv := NewServer(":0", nil, nil).
 		WithPatchStore(patchStore).
-		WithAuditLogger(logger)
+		WithAuditLogger(logger).
+		WithHTTPClient(httpx.NewTestClient(5 * time.Second))
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 
@@ -1406,5 +1408,183 @@ func TestServerPatchEndpoints(t *testing.T) {
 	}
 	if !strings.Contains(htmlStr, `id="add-patch-modal" style="display: none; position: fixed;`) {
 		t.Errorf("expected #add-patch-modal to have overlay styling in indexHTML")
+	}
+	if !strings.Contains(htmlStr, "Check Upstream Status") || !strings.Contains(htmlStr, "checkPatchesStatus") {
+		t.Errorf("expected Check Upstream Status button and checkPatchesStatus function in indexHTML")
+	}
+	if !strings.Contains(htmlStr, ".status-companion") || !strings.Contains(htmlStr, ".badge-revert") {
+		t.Errorf("expected .status-companion and .badge-revert styles in indexHTML")
+	}
+	if !strings.Contains(htmlStr, "Maintainer Empathy &bull; Companion Mode") {
+		t.Errorf("expected Maintainer Empathy Companion Mode banner logic in indexHTML")
+	}
+	if !strings.Contains(htmlStr, "Correlated Evidence") {
+		t.Errorf("expected Correlated Evidence rendering logic in indexHTML")
+	}
+
+	// 10. Check upstream status API: POST /api/v1/patches/check and GET /api/v1/patches?check_upstream=1
+	upstreamServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/repos/lovell/sharp/issues/1234" {
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"state": "closed"}`)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer upstreamServer.Close()
+
+	// Record a patch pointing to the upstream test server
+	_, err = patchStore.Record("sharp", "npm", "patches/sharp.patch", "package.json", upstreamServer.URL+"/lovell/sharp/issues/1234", "musl fix")
+	if err != nil {
+		t.Fatalf("record patch for upstream check: %v", err)
+	}
+
+	// Test POST /api/v1/patches/check
+	reqCheck, err := http.NewRequest(http.MethodPost, ts.URL+"/api/v1/patches/check", nil)
+	if err != nil {
+		t.Fatalf("new check request: %v", err)
+	}
+	reqCheck.Header.Set("X-Bugrouter-Request", "1")
+
+	respCheck, err := http.DefaultClient.Do(reqCheck)
+	if err != nil {
+		t.Fatalf("POST /api/v1/patches/check failed: %v", err)
+	}
+	defer respCheck.Body.Close()
+
+	if respCheck.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 OK on /api/v1/patches/check, got %d", respCheck.StatusCode)
+	}
+
+	var results []adapter.PatchStatusResult
+	if err := json.NewDecoder(respCheck.Body).Decode(&results); err != nil {
+		t.Fatalf("decode patch status results: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	if results[0].UpstreamState != "closed" || !results[0].CanRevert {
+		t.Errorf("expected upstream state 'closed' and CanRevert true, got %+v", results[0])
+	}
+
+	// Test GET /api/v1/patches?check_upstream=1
+	respGetCheck, err := http.Get(ts.URL + "/api/v1/patches?check_upstream=1")
+	if err != nil {
+		t.Fatalf("GET /api/v1/patches?check_upstream=1 failed: %v", err)
+	}
+	defer respGetCheck.Body.Close()
+
+	if respGetCheck.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 OK on GET with check_upstream=1, got %d", respGetCheck.StatusCode)
+	}
+	var getResults []adapter.PatchStatusResult
+	if err := json.NewDecoder(respGetCheck.Body).Decode(&getResults); err != nil {
+		t.Fatalf("decode getResults: %v", err)
+	}
+	if len(getResults) != 1 || !getResults[0].CanRevert {
+		t.Errorf("expected 1 result with CanRevert=true, got %+v", getResults)
+	}
+}
+
+func TestServerCompanionOnlyAndOptOut(t *testing.T) {
+	tempDir := t.TempDir()
+	store := adapter.NewDraftStore(tempDir)
+
+	mockForge := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/repos/strict-org/closed-repo/contents/.github/ISSUE_TEMPLATE":
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprintf(w, `[{"name": "bug_report.yml", "download_url": "http://%s/raw/bug.yml", "type": "file"}]`, r.Host)
+		case "/raw/bug.yml":
+			w.Header().Set("Content-Type", "text/plain")
+			fmt.Fprint(w, `
+name: Bug Report
+description: Do not submit AI-generated issues or automated bug reports.
+title: "[BUG]: "
+body:
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer mockForge.Close()
+
+	client := httpx.NewTestClient(time.Second)
+	intro := introspector.New(client).WithEndpoints(introspector.Endpoints{
+		GitHubAPIBaseURL: mockForge.URL,
+	})
+
+	srv := NewServer(":0", store, nil).WithIntrospector(intro)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	// 1. POST /api/v1/drafts for target with maintainer AI opt-out
+	createReq := CreateDraftRequest{
+		Query:            "https://github.com/strict-org/closed-repo",
+		Title:            "Memory leak in buffer allocation",
+		Summary:          "Buffer leak detected when processing large payload chunks.",
+		StepsToReproduce: "1. Send 10MB chunk\n2. Observe memory retained",
+	}
+	bodyBytes, err := json.Marshal(createReq)
+	if err != nil {
+		t.Fatalf("marshal createReq: %v", err)
+	}
+
+	req, err := http.NewRequest(http.MethodPost, ts.URL+"/api/v1/drafts", bytes.NewReader(bodyBytes))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Bugrouter-Request", "1")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST /api/v1/drafts failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("expected 201 Created, got %d", resp.StatusCode)
+	}
+
+	var created adapter.StagedDraft
+	if err := json.NewDecoder(resp.Body).Decode(&created); err != nil {
+		t.Fatalf("decode created draft: %v", err)
+	}
+
+	// Verify status is companion_only
+	if created.Status != "companion_only" {
+		t.Errorf("created.Status = %q, want 'companion_only'", created.Status)
+	}
+	if created.Template == nil || created.Template.Policy == nil || !created.Template.Policy.AIOptOut {
+		t.Errorf("expected draft template policy with AIOptOut=true, got %+v", created.Template)
+	}
+
+	// 2. Attempt to approve draft: MUST return 403 Forbidden
+	approveReq, err := http.NewRequest(http.MethodPost, fmt.Sprintf("%s/api/v1/drafts/%s/approve", ts.URL, created.ID), nil)
+	if err != nil {
+		t.Fatalf("new approve request: %v", err)
+	}
+	approveReq.Header.Set("X-Bugrouter-Request", "1")
+
+	respApprove, err := http.DefaultClient.Do(approveReq)
+	if err != nil {
+		t.Fatalf("approve request failed: %v", err)
+	}
+	defer respApprove.Body.Close()
+
+	if respApprove.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected 403 Forbidden for companion_only draft approval, got %d", respApprove.StatusCode)
+	}
+	respApproveBytes, err := io.ReadAll(respApprove.Body)
+	if err != nil {
+		t.Fatalf("read approve body: %v", err)
+	}
+	if !strings.Contains(string(respApproveBytes), "maintainer policy opt-out") {
+		t.Errorf("expected body to mention maintainer policy opt-out, got: %s", string(respApproveBytes))
 	}
 }

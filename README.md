@@ -8,46 +8,36 @@ Dependencies: **Standard Library Only (Zero Third-Party Dependencies)**
 
 ---
 
-## 1. Overview
+## 1. Core Product Principles
 
-`bugrouter` is an autonomous, zero-dependency Go CLI daemon and Model Context Protocol (MCP) server that connects AI coding agents and development workflows directly to the correct upstream issue trackers. When an agent or developer encounters a bug, crash, or failing dependency, `bugrouter`:
+`bugrouter` is built on four constitutional principles designed to balance developer productivity, agent autonomy, and open-source maintainer empathy:
 
-1. **Resolves** the artifact or error to its canonical upstream tracker via a 6-layer waterfall engine.
-2. **Scrubs** sensitive API keys, private keys, database credentials, authorization tokens, and personal home paths at the type level.
-3. **Introspects** upstream issue templates (GitHub Issue Forms, GitLab Markdown templates, Bugzilla schemas).
-4. **Detects Duplicates** against existing upstream issues via token-overlap scoring to prevent ticket flooding.
-5. **Stages Structured Drafts** locally in `$XDG_DATA_HOME/bugrouter/drafts` with strict permissions (`0600`) and generates deep-link pre-fill URLs or authenticated API submissions.
-6. **Hardens Control Plane Operations** through an embedded Web UI with constant-time Bearer token authentication, CSRF origin verification, append-only JSONL audit logs, and SSRF-guarded HMAC webhook notifications.
+1. **Zero External Dependencies & Modern C99-Spirit Go**:
+   Implemented exclusively with the Go standard library (`net/http`, `os/exec`, `crypto/subtle`, `encoding/json`). Zero `node_modules`, zero third-party Go modules, zero supply-chain attack surface. Bounded memory execution (`io.LimitReader`), strict per-request timeouts, and type-level security guarantees.
+
+2. **Maintainer Empathy & AI Opt-Out Guard (Zero Maintainer Harassment)**:
+   Open-source maintainers must never be inundated with unverified or automated AI-generated bug spam. `bugrouter` automatically scans upstream issue templates and `CONTRIBUTING.md` policies for AI/LLM opt-out rules. If an upstream repository restricts AI submissions, `bugrouter` **blocks automated API submission 100% of the time**, switches into **Companion Mode** (`companion_only`), strips automated branding footers, surfaces maintainer checklist rules, and provides pre-filled deep links for human engineers to review and file respectful, human-authored reports manually.
+
+3. **Anti-Context-Hijacking via `<5ms` Native Session Handoff (`park_bug`)**:
+   When an AI coding agent discovers a bug or anomaly in a 3rd-party library while implementing a feature, derailing into ticket filing destroys its in-context reasoning. `bugrouter park` / `park_bug` records the issue locally in `<5ms` with zero network I/O, emitting native Model Context Protocol (MCP) resource notifications (`notifications/resources/list_changed`), MCP Resources (`bugrouter://parked/<id>`), and MCP Prompts (`triage_parked_bug`) so the user can spin up a dedicated triage agent without hijacking the primary workflow.
+
+4. **Dependency Patch Ledger with Automated Upstream Status Checks (`patch check`)**:
+   When upstream maintainers take time to fix bugs, development teams frequently fork or vendor-patch dependencies (`go.mod` `replace`, npm `overrides`/`patches/`, Cargo `[patch]`). These temporary forks often become permanent technical debt. `bugrouter` tracks every temporary patch alongside its upstream issue URL in a high-visibility ledger and provides automated upstream status checks (`bugrouter patch check`) to notify engineers the instant an upstream bug is closed and the fork is **[READY TO REVERT]**.
 
 ---
 
-## 2. Key Features
+## 2. Overview & System Architecture
 
-- **Zero External Dependencies**: Pure Go 1.22+ standard library implementation. No transitive dependency bloat or supply chain exposure.
-- **6-Layer Resolution Waterfall**:
-  1. `org-cloud`: Enterprise service catalog and monorepo ownership records (`services.json`).
-  2. `direct-url`: Exact GitHub, GitLab, Codeberg, Gitea/Forgejo, and SourceHut repository URLs and paths.
-  3. `workspace`: Local dependency manifests (`node_modules`, `go.mod`, `Cargo.toml`/`Cargo.lock`, `pyproject.toml`).
-  4. `os-pkg`: Operating system and desktop package managers (Debian/Ubuntu `dpkg`/`apt`, Fedora/RHEL `rpm`, Arch `pacman`, Linux `flatpak`, `snap`, Windows `winget`).
-  5. `registry`: Concurrent queries across ecosystem registries (`npm`, `PyPI`, `Crates.io`).
-  6. `web-domain`: RFC 9116 `security.txt` and `.well-known/bug-report` discovery.
-- **Desktop App Resolver & Community Forges**: Resolves desktop GUI applications from Flatpak, Snap, and Winget metadata, and classifies community Gitea/Forgejo trackers (such as `projects.blender.org`) with pre-filled deep links and REST API issue introspection.
-- **Zero-Dependency Hardware Telemetry**: Automatically collects OS kernel, CPU model, core count, GPU models, desktop environments, and display servers with type-safe credential scrubbing and Markdown formatting.
-- **Type-Safe Scrubber**: Produces immutable `scrubber.ScrubbedText`. Redacts AWS keys, GitHub PATs, Slack/Stripe/OpenAI tokens, PEM private keys, URI credentials, and local home directory paths (`/home/*`, `/Users/*`). Preserves short configuration literals (`true`, `false`, `null`, `nil`).
-- **Upstream Issue Template Introspection**: Discovers and maps GitHub YAML Issue Forms (`body` textareas/inputs), GitLab markdown templates (`issuable_template`), and Bugzilla product schemas.
-- **Upstream Duplicate Detection**: Searches GitHub, GitLab, and Bugzilla trackers using title keyword extraction and stop word filtering, calculating scored token overlap.
-- **Deterministic Crash & Stack Trace Attribution**: Parses raw crash logs and stack traces across Go, Python, Node.js, Rust, and native binaries to identify culprit files, line numbers, and candidate upstream dependencies.
-- **Reproduction Verifier & Proof Engine**: Runs bounded reproduction commands under isolated contexts with 256 KiB output caps, timeout handling, exit code matching, candidate extraction, and SHA-256 cryptographic proof digests.
-- **Anti-Slop Quality Gate**: Evaluates draft quality against AI buzzwords, conversational chatbot filler, em dashes, typographic curly quotes, decorative emojis, and placeholders with strict gating (`--strict-quality`).
-- **Human-in-the-Loop Review Queue**: Embedded Web UI and REST API (`/api/v1/drafts`) for manual triage, review, and one-click dispatch via OAuth/PAT connectors.
-- **Hardened Cloud Security**: SHA-256 pre-hashed constant-time Bearer auth (`crypto/subtle.ConstantTimeCompare`), CSRF origin guards, append-only audit trail (`audit.log`), and HMAC-SHA256 signed webhooks (`X-Bugrouter-Signature`).
-- **Zero-Hijacking Parked Bug Store & Native Host Handoff**: Instantly records 3rd-party dependency bugs in `<5ms` (`bugrouter park` / `park_bug`) with zero network calls, presenting 4 flow-preservation choices (ignore, park, spawn separate session, or fork/patch), emitting native MCP resource notifications (`notifications/resources/list_changed`), MCP Resources (`bugrouter://parked/<id>`), and MCP Prompts (`triage_parked_bug`).
-- **Tracked Dependency Patch Ledger**: Keeps temporary local dependency forks and vendor patches (`go.mod` `replace`, npm `overrides`/`patches/`, Cargo `[patch]`, Poetry git branches) high-visibility ("close to the eyes") in `$XDG_DATA_HOME/bugrouter/patches.json` and the Web UI banner so temporary forks are never forgotten.
-- **WorkOS-Style Plug-and-Play Dependency Portal**: Embedded Control Plane Web UI enables teams to click and connect downstream dependencies and internal services (`services.json`) via 1-click preset tiles (Stripe, Supabase, Auth0, Prisma, Next.js, Remix, Redis, Postgres, FFmpeg, Blender) and REST APIs (`GET/POST/DELETE /api/v1/services` and `GET/POST/DELETE /api/v1/patches`).
-- **Maintainer Empathy & AI Opt-Out Guard**: Automatically introspects issue templates and `CONTRIBUTING.md` for AI/LLM opt-out policies. When restricted, operates in **Companion Mode** (`companion_only`), omitting automated attribution footers, extracting prerequisite checklist rules, and hard-blocking automated API submissions so developers file respectful, human-authored reports.
-- **Intrinsic Self-Hosting Dogfooding & Panic Breadcrumbs**: Resolves `bugrouter` and `self` offline in `<1ms` targeting its canonical repository, and intercepts unexpected panics at runtime to automatically park diagnostic crash breadcrumbs for instant triage.
-- **Cross-Dependency Evidence Dossiers (`--related-dep`)**: When bugs stem from complex interactions between two libraries (e.g. browser extensions or SaaS scripts mutating shared state), queries the secondary dependency's tracker and compiles correlated prior-art tickets under `## Correlated Evidence (<dep>)`.
-- **Model Context Protocol (MCP)**: Native stdio JSON-RPC 2.0 server (spec `2024-11-05`) advertising tools, resources, and prompts, exposing 13 specialized agent tools.
+When an agent or developer encounters a bug, crash, or failing dependency, `bugrouter`:
+
+1. **Resolves** the artifact or error to its canonical upstream tracker via a 6-layer waterfall engine (`org-cloud` -> `direct-url` -> `workspace` -> `os-pkg` -> `registry` -> `web-domain`).
+2. **Scrubs** sensitive API keys, private keys, database credentials, authorization tokens, and personal home paths at the type level (`scrubber.ScrubbedText`).
+3. **Introspects** upstream issue templates (GitHub YAML Issue Forms, GitLab Markdown templates, Gitea/Codeberg schemas, Bugzilla products) and parses maintainer policies (`CONTRIBUTING.md`).
+4. **Detects Duplicates** against existing upstream issues via token-overlap scoring to prevent ticket flooding.
+5. **Verifies Reproductions** via deterministic, isolated command execution producing SHA-256 proof digests.
+6. **Compiles Evidence Dossiers** with hardware/OS telemetry (`## Environment`) and cross-dependency interaction prior art (`## Correlated Evidence`).
+7. **Stages Structured Drafts** locally in `$XDG_DATA_HOME/bugrouter/drafts` with strict permissions (`0600`) and generates deep-link pre-fill URLs or authenticated API submissions.
+8. **Hardens Control Plane Operations** through an embedded Web UI with constant-time Bearer token authentication, CSRF origin verification, append-only JSONL audit logs, and SSRF-guarded HMAC webhook notifications.
 
 ---
 
@@ -74,18 +64,19 @@ make test
 
 ---
 
-## 4. CLI Quickstart
+## 4. CLI Subcommand Reference
 
-The `bugrouter` binary includes subcommands for every stage of the bug routing lifecycle:
+The `bugrouter` CLI provides dedicated commands for every phase of the bug routing lifecycle:
 
-### Check Version
+### `bugrouter version`
+Displays the CalVer version, commit, and platform target:
 ```bash
 bugrouter version
 # Output: bugrouter 2026.10.0 (linux/amd64)
 ```
 
-### Resolve Upstream Tracker
-Resolve any package name, binary name, repository, or domain to its canonical tracker:
+### `bugrouter resolve <target>`
+Resolves any package name, binary name, repository, or domain to its canonical tracker via the 6-layer waterfall:
 ```bash
 # Resolve a Python package
 bugrouter resolve requests
@@ -100,8 +91,99 @@ bugrouter resolve bugrouter
 bugrouter resolve nginx --timeout 5s --no-cache
 ```
 
-### Park a 3rd-Party Bug & Native Session Handoff (`bugrouter park`)
-When an agent or engineer spots a 3rd-party bug while coding, park it immediately in `<5ms` without network calls or context hijacking:
+### `bugrouter introspect <target>`
+Discovers and displays upstream issue templates, YAML forms, and maintainer empathy policies:
+```bash
+bugrouter introspect https://github.com/expressjs/express
+bugrouter introspect requests --json
+```
+
+### `bugrouter dedup <target> <title>`
+Queries upstream trackers (GitHub, GitLab, Bugzilla, Gitea) for existing duplicate bug reports:
+```bash
+bugrouter dedup express "Null pointer dereference on startup"
+bugrouter dedup requests "SSL connection timeout" --json
+```
+
+### `bugrouter draft <target>`
+Stages a structured bug ticket with automatic secret redaction, template mapping, duplicate detection, and quality scoring:
+```bash
+# Draft using CLI flags with cross-dependency evidence
+bugrouter draft react-dom \
+  --title "Hydration mismatch caused by third-party DOM mutation" \
+  --summary "Browser extension injects data attributes before hydration completes" \
+  --steps "1. Install extension\n2. Reload page" \
+  --related-dep "https://github.com/grammarly/extension"
+
+# Draft from a Markdown body file (or stdin via -) with strict quality enforcement
+cat error.log | bugrouter draft payment-service --body-file - --strict-quality
+
+# Draft with automated reproduction verification command
+bugrouter draft my-app \
+  --title "Buffer overflow in request parser" \
+  --summary "Request parser aborts with non-zero exit code on large payload" \
+  --steps "1. Send 10MB chunked POST payload\n2. Observe panic" \
+  --verify-cmd "./test/repro.sh"
+
+# Hydrate draft from a previously parked bug
+bugrouter draft --from-parked <parked-id>
+```
+
+### `bugrouter scrub`
+Deterministically scrubs secrets, tokens, connection strings, and username home paths from raw text:
+```bash
+echo "DATABASE_URL=postgres://user:pass@localhost:5432/db" | bugrouter scrub
+bugrouter scrub --input "Authorization: Bearer ghp_1234567890abcdef in /home/alice"
+```
+
+### `bugrouter telemetry`
+Collects zero-dependency operating system, GPU, driver, and desktop environment diagnostics:
+```bash
+# Formatted Markdown output
+bugrouter telemetry
+
+# Raw JSON output
+bugrouter telemetry --json
+```
+
+### `bugrouter triage` / `bugrouter agent triage`
+Parses raw crash logs or stack traces (Go, Node.js, Python, Rust, native binaries), attributes suspect packages, introspects templates, and searches duplicates:
+```bash
+# Triage a crash log file
+bugrouter triage --log-file ./panic.log
+
+# Triage piped crash log from stdin
+npm test 2>&1 | bugrouter triage --log-file -
+
+# Triage with explicit query override
+bugrouter triage --log-file ./trace.log --query "requests"
+```
+
+### `bugrouter verify` / `bugrouter agent verify`
+Executes a bounded reproduction command under isolated contexts with 256 KiB output caps, timeout handling, exit code matching, candidate extraction, and cryptographic proof digests:
+```bash
+# Run reproduction verification command
+bugrouter verify --cmd "npm test"
+
+# Verify command with specific expected exit code and custom timeout
+bugrouter verify --cmd "pytest tests/test_crash.py" --expect-exit 1 --timeout 30s
+```
+
+### `bugrouter stack`
+Scans workspace manifests (`services.json`, `go.mod`, `package.json`, `Cargo.toml`, `pyproject.toml`), catalogs dependencies, and optionally queries upstream trackers for open bugs matching installed versions:
+```bash
+# Scan workspace dependencies
+bugrouter stack
+
+# Scan specific directory and output JSON
+bugrouter stack --dir ./frontend --json
+
+# Scan workspace and query upstream trackers for active bugs matching dependencies
+bugrouter stack --check-upstream
+```
+
+### `bugrouter park <dependency> <title>`
+Instantly parks a 3rd-party dependency bug in `<5ms` without network calls or context hijacking, displaying the 4 flow preservation choices:
 ```bash
 # Park a dependency bug encountered mid-task (<5ms, zero network calls)
 bugrouter park sharp "v0.33.0 fails with SIGSEGV on musl alpine" \
@@ -112,13 +194,10 @@ bugrouter park sharp "v0.33.0 fails with SIGSEGV on musl alpine" \
 
 # Park and output machine-readable JSON handoff payload
 bugrouter park stripe "Webhook signature verification panic on malformed payload" --json
-
-# Hydrate and triage a parked bug in a spawned session
-bugrouter draft --from-parked <parked-id>
 ```
 
-### Track Dependency Patches (`bugrouter patch`)
-Keep temporary forks and vendor patches high-visibility so teams can promptly revert them once upstream fixes land:
+### `bugrouter patch <list|add|check|rm>`
+Manages the tracked dependency patch ledger so temporary local forks and vendor patches stay visible and are promptly reverted when fixed upstream:
 ```bash
 # List all tracked dependency patches in ledger
 bugrouter patch list
@@ -132,98 +211,32 @@ bugrouter patch add \
   --issue https://github.com/lovell/sharp/issues/1234 \
   --reason "Fix musl SIGSEGV in libvips"
 
+# Check upstream issue status across GitHub, GitLab, Gitea, and Bugzilla
+bugrouter patch check
+# Output:
+# Dependency | Ecosystem | Patch Target                | Upstream State | Status
+# sharp      | npm       | patches/sharp+0.33.0.patch  | closed         | [READY TO REVERT]
+
 # Remove a patch once upstream fixes the issue
 bugrouter patch rm sharp
 ```
 
-### Draft a Staged Bug Report
-Stage a structured bug ticket with automatic secret redaction, template mapping, and duplicate detection:
+### `bugrouter crash-log`
+Reads the latest native OS post-mortem crash record (`coredumpctl`, `/var/crash`, Windows WER/Event 1000, macOS `DiagnosticReports`) on demand with zero resident daemon overhead:
 ```bash
-# Draft using CLI flags with cross-dependency interaction evidence
-bugrouter draft react-dom \
-  --title "Hydration mismatch caused by third-party DOM mutation" \
-  --summary "Browser extension injects data attributes before hydration completes" \
-  --steps "1. Install extension\n2. Reload page" \
-  --related-dep "https://github.com/grammarly/extension"
-
-# Draft using a Markdown body file with strict quality enforcement
-cat error.log | bugrouter draft payment-service --body-file - --strict-quality
-
-# Draft with automated reproduction verification command
-bugrouter draft my-app \
-  --title "Buffer overflow in request parser" \
-  --summary "Request parser aborts with non-zero exit code on large payload" \
-  --steps "1. Send 10MB chunked POST payload\n2. Observe panic" \
-  --verify-cmd "./test/repro.sh"
+bugrouter crash-log
+bugrouter crash-log --json --query "my-native-bin"
 ```
 
-### Interactive Guided Human Bug Wizard (`bugrouter report`)
-Everyday developers and desktop users can use the interactive wizard to report bugs step-by-step with real-time Anti-Slop quality evaluation, automatic hardware/OS telemetry collection, duplicate detection, and pre-filled submission links:
+### `bugrouter report <target>`
+Launches an interactive guided CLI wizard prompting step-by-step with real-time Anti-Slop quality evaluation, automatic hardware telemetry attachment, and pre-filled submission links:
 ```bash
-# Launch interactive wizard
 bugrouter report blender
-
-# Pre-fill specific fields via flags and prompt for the remainder
-bugrouter report https://github.com/myorg/myapp --title "Memory leak in worker connection pool"
-
-# Generate structured JSON for scripting
-bugrouter report --json --title "Crash on launch" --summary "Process aborts immediately" --steps "Launch app" myapp
+bugrouter report https://github.com/myorg/myapp --title "Memory leak in connection pool"
 ```
 
-### Autonomous Agent Mode (`bugrouter agent`)
-Autonomous tooling and subcommands designed specifically for AI coding agents and CI runners:
-
-#### 1. Crash Log Triage (`bugrouter agent triage`)
-Single-shot triage of raw crash logs or stack traces to extract candidates, resolve trackers, introspect schemas, and detect duplicates:
-```bash
-# Triage a crash log file and output structured JSON envelope
-bugrouter agent triage --log-file ./panic.log
-
-# Triage piped crash log from stdin
-npm test 2>&1 | bugrouter agent triage --log-file -
-
-# Triage with explicit target override
-bugrouter agent triage --log-file ./traceback.log --query "requests"
-```
-
-#### 2. Agentic Self-Verification (`bugrouter agent verify`)
-Executes a bounded reproduction command, captures and scrubs output, matches exit codes, and returns deterministic cryptographic verification evidence:
-```bash
-# Verify reproduction command and print JSON proof
-bugrouter agent verify --cmd "npm test"
-
-# Verify command with specific expected exit code and custom timeout
-bugrouter agent verify --cmd "python -m pytest tests/test_crash.py" --expect-exit 1 --timeout 30s
-```
-
-### Workspace Tech Stack & Downstream Radar (`bugrouter stack`)
-Scan workspace dependency manifests (`go.mod`, `package.json`, `Cargo.toml`, `pyproject.toml`, and enterprise `services.json`) to catalog dependencies and detect active upstream bugs:
-```bash
-# Scan workspace dependencies
-bugrouter stack
-
-# Scan specific directory and output JSON
-bugrouter stack --dir ./frontend --json
-
-# Scan workspace and query upstream trackers for active bugs matching dependencies
-bugrouter stack --check-upstream
-```
-
-### Hardware & OS Telemetry (`bugrouter telemetry`)
-Inspect zero-dependency local operating system and hardware diagnostics:
-```bash
-# Print formatted Markdown telemetry list
-bugrouter telemetry
-
-# Output machine-parseable JSON
-bugrouter telemetry --json
-
-# Stage a draft with attached telemetry
-bugrouter draft blender --title "EEVEE viewport crash on Linux" --with-telemetry
-```
-
-### Serve Cloud Control Plane
-Start the embedded review queue Web UI and control plane daemon:
+### `bugrouter serve`
+Starts the embedded review queue Web UI and Cloud Control Plane daemon:
 ```bash
 # Start local review server
 bugrouter serve --addr :8080
@@ -231,19 +244,20 @@ bugrouter serve --addr :8080
 # Start with Bearer authentication, audit logging, and webhook dispatch
 bugrouter serve \
   --addr :8080 \
-  --auth-token "super-secret-token-123" \
+  --auth-token "secret-token" \
   --audit-log /var/log/bugrouter/audit.log \
   --webhook-url https://hooks.slack.com/services/... \
   --webhook-secret "hmac-signing-secret"
 ```
 
-Open `http://localhost:8080` in your browser to access the Human-in-the-Loop review dashboard, the "New Guided Report" composer modal (with hardware telemetry attachment and strict anti-slop gating), the "Connected Tech Stack & Downstream Radar" panel, and recent audit trail. Programmatic draft staging is also exposed via `POST /api/v1/drafts`.
+### `bugrouter mcp`
+Starts the zero-dependency JSON-RPC 2.0 stdio Model Context Protocol (MCP) server.
 
 ---
 
 ## 5. Model Context Protocol (MCP) Integration
 
-`bugrouter` runs as a native stdio Model Context Protocol (MCP) server for Claude Desktop, Cline, Cursor, Antigravity, and other MCP-compliant AI agents.
+`bugrouter` runs as a native stdio Model Context Protocol (MCP) server (spec `2024-11-05`) for Claude Desktop, Cline, Cursor, Antigravity, and autonomous AI agents.
 
 ### Client Configuration
 
@@ -261,32 +275,52 @@ Add `bugrouter` to your MCP client configuration (e.g., `claude_desktop_config.j
 ```
 
 ### MCP Capabilities, Resources & Prompts
-In addition to tools, `bugrouter` advertises `resources: { listChanged: true }` and `prompts: {}`:
-- **Resources**: Exposes parked bug records as `bugrouter://parked/<id>` (`application/json`), allowing host models to read full context.
+- **Resources**: Exposes parked bug records as `bugrouter://parked/<id>` (`application/json`), allowing host models to inspect context.
 - **Prompts**: Provides `triage_parked_bug` with argument `id`, supplying ready-to-execute prompt templates for spawned triage sessions.
 - **Notifications**: Emits `notifications/resources/list_changed` to the host client immediately before returning `park_bug` responses.
 
-### Available MCP Tools (13 Total)
+### Complete 15 MCP Tools Reference
 
 | Tool Name | Parameters | Description |
 | :--- | :--- | :--- |
-| `park_bug` | `dependency` (string), `title` (string), `error_snippet` (string, optional), `workaround_note` (string, optional), `workspace_file` (string, optional) | PREFERRED DURING CODING: Instantly parks a 3rd-party dependency bug in <5ms with zero network calls and returns a native session-handoff payload so you can alert the user to spawn a separate bug-reporting session without derailing your current task. Emits `notifications/resources/list_changed`. |
-| `record_dependency_patch` | `dependency` (string), `patch_target` (string), `reason` (string), `ecosystem` (string, optional), `manifest_file` (string, optional), `upstream_issue_url` (string, optional) | Records a temporary local fork or patch for a 3rd-party dependency in the patch ledger so it stays visible to engineers and can be reverted when upstream fixes the issue. |
-| `resolve_target` | `query` (string) | Resolves a software artifact or dependency query to its canonical bug tracker. |
-| `scrub_text` | `text` (string) | Deterministically redacts secrets, tokens, connection strings, and local username paths. |
-| `introspect_template` | `query` (string) | Discovers and parses upstream bug tracker issue templates or schemas for a target. |
-| `search_duplicates` | `query` (string), `title` (string) | Searches upstream issue tracker (GitHub, GitLab, Bugzilla) for existing duplicate bug reports. |
-| `draft_bug_report` | `query` (string), `title` (string), `summary` (string, optional), `steps_to_reproduce` (string, optional), `logs` (string, optional), `strict_quality` (bool, optional), `verify_cmd` (string, optional), `include_telemetry` (bool, optional) | Resolves target, scrubs credentials, introspects template, finds duplicates, runs optional self-verification, stages draft to disk, and returns structured ticket. |
-| `list_staged_drafts` | `status` (string, optional) | Lists all staged bug drafts pending review or approval (`pending_review`, `submitted`, `discarded`). |
-| `approve_draft` | `id` (string) | Approves and submits a staged draft to its upstream tracker via authenticated OAuth connectors. |
-| `triage_crash_log` | `log` (string), `title` (string, optional), `query` (string, optional) | Analyzes raw crash logs or stack traces, deterministically attributes failures to upstream dependencies, introspects templates, checks duplicates, and returns structured agent triage envelopes. |
-| `verify_reproduction` | `command` (string), `timeout_seconds` (integer, optional), `expect_exit` (integer, optional) | Executes a bounded reproduction command, captures and scrubs stdout/stderr, extracts faulting package candidates, and returns a deterministic VerificationProof. |
-| `scan_workspace_stack` | `dir` (string, optional), `check_upstream` (bool, optional) | Scans workspace dependency manifests (`go.mod`, `package.json`, `Cargo.toml`, `pyproject.toml`, `services.json`), resolves upstream trackers, and optionally queries upstream issues for active bugs. |
-| `collect_system_telemetry` | (none) | Collects zero-dependency local operating system and hardware diagnostics (CPU, GPU, kernel, desktop environment, display server). |
+| `park_bug` | `dependency` (string, req), `title` (string, req), `error_snippet` (string, opt), `workaround_note` (string, opt), `workspace_file` (string, opt), `related_dependency` (string, opt) | PREFERRED DURING CODING: Instantly parks a 3rd-party dependency bug in <5ms with zero network calls and returns a native session-handoff payload so you can alert the user to spawn a separate bug-reporting session without derailing your current task. Emits `notifications/resources/list_changed`. |
+| `record_dependency_patch` | `dependency` (string, req), `patch_target` (string, req), `reason` (string, req), `ecosystem` (string, opt), `manifest_file` (string, opt), `upstream_issue_url` (string, opt) | Records a temporary local fork or patch for a 3rd-party dependency in the patch ledger so it stays visible to engineers and can be reverted when upstream fixes the issue. |
+| `check_dependency_patches` | *(none)* | Checks upstream issue/PR tracking status for all recorded temporary dependency patches across GitHub, GitLab, Gitea, and Bugzilla, highlighting issues ready to be reverted. |
+| `read_system_crash_log` | `query` (string, opt), `title` (string, opt) | Reads the latest native OS post-mortem crash record (Linux coredumpctl/var-crash, Windows WER/Event 1000, macOS DiagnosticReports), extracts suspect binary and trace candidates, scrubs PII, and returns structured triage context. |
+| `resolve_target` | `query` (string, req) | Resolves a software artifact or dependency query to its canonical bug tracker via the 6-layer waterfall engine. |
+| `scrub_text` | `text` (string, req) | Deterministically scrubs secrets, tokens, connection strings, and PII home paths from text. |
+| `introspect_template` | `query` (string, req) | Discovers and parses upstream bug tracker issue templates or schemas for a target, detecting maintainer AI opt-out policies and checklist rules. |
+| `search_duplicates` | `query` (string, req), `title` (string, req) | Searches upstream issue tracker (GitHub, GitLab, Bugzilla, Gitea) for existing duplicate bug reports using token overlap scoring. |
+| `draft_bug_report` | `query` (string, req), `title` (string, req), `summary` (string, opt), `steps_to_reproduce` (string, opt), `logs` (string, opt), `strict_quality` (bool, opt), `verify_cmd` (string, opt), `include_telemetry` (bool, opt), `related_dependency` (string, opt) | Resolves target, scrubs credentials, introspects templates, checks duplicates, stages draft to disk, compiles cross-dependency evidence, enforces maintainer policies, and returns structured ticket. |
+| `list_staged_drafts` | `status` (string, opt) | Lists all staged bug drafts pending review or approval (`pending_review`, `companion_only`, `submitted`, `discarded`). |
+| `approve_draft` | `id` (string, req) | Approves and submits a staged draft to its upstream tracker via authenticated OAuth connectors (refuses automated submission if maintainer has opted out of AI/bot reports). |
+| `triage_crash_log` | `log` (string, req), `title` (string, opt), `query` (string, opt) | Analyzes raw crash logs or stack traces, deterministically attributes failures to upstream dependencies, introspects templates, checks duplicates, and returns structured agent triage envelopes. |
+| `verify_reproduction` | `command` (string, req), `timeout_seconds` (integer, opt), `expect_exit` (integer, opt) | Executes a bounded reproduction command, captures and scrubs stdout/stderr, extracts faulting package candidates, and returns a deterministic VerificationProof with SHA-256 digest. |
+| `scan_workspace_stack` | `dir` (string, opt), `check_upstream` (bool, opt) | Scans workspace dependency manifests (`go.mod`, `package.json`, `Cargo.toml`, `pyproject.toml`, `services.json`), resolves upstream trackers, and optionally queries upstream issues for active bugs. |
+| `collect_system_telemetry` | *(none)* | Collects zero-dependency local operating system and hardware diagnostics (CPU, GPU models, driver versions, kernel, desktop environment, display server). |
 
 ---
 
-## 6. Enterprise Service Catalog (`services.json`)
+## 6. Cloud Control Plane & Review Queue
+
+The embedded Cloud Control Plane (`bugrouter serve`) provides a single-pane-of-glass operations console:
+
+1. **Active Dependency Patches (Temporary Forks) Banner**:
+   Displays active local patches, manifests, fork branches, and upstream issue links. Features a **"Check Upstream Status"** button that queries upstream trackers and marks closed upstream bugs with a prominent green `Ready to Revert` badge.
+2. **WorkOS-Style Plug-and-Play Services Catalog**:
+   One-click connection cards for common ecosystem dependencies (Stripe, Supabase, Auth0, Prisma, Next.js, Remix, Redis, Postgres, FFmpeg, Blender) plus a custom registration form backed by `services.json`.
+3. **Human-in-the-Loop Review Queue**:
+   Staged drafts pending approval with live status tags (`pending_review`, `submitted`, `discarded`, `companion_only`). For `companion_only` drafts, the `Approve` button is automatically disabled to protect upstream maintainers, and an explicit **Maintainer Empathy** banner guides engineers to file manually.
+4. **Guided Report Composer**:
+   "New Guided Report" modal allowing human engineers to compose reports with automated hardware telemetry attachment and strict Anti-Slop quality validation.
+5. **Connected Tech Stack & Downstream Radar**:
+   Live inventory of workspace dependencies with upstream open issue alerts.
+6. **Append-Only Audit Trail**:
+   Structured log of all triage, dispatch, patch, and service operations.
+
+---
+
+## 7. Enterprise Service Catalog (`services.json`)
 
 Internal private services and monorepo packages can be routed directly to internal issue trackers using an enterprise service catalog file.
 
@@ -331,12 +365,12 @@ Internal private services and monorepo packages can be routed directly to intern
 
 ---
 
-## 7. Security Architecture & Boundary Guarantees
+## 8. Security Architecture & Boundary Guarantees
 
 - **Supply Chain Hardening**: Strict zero-dependency standard library design. No `node_modules`, no external Go modules.
-- **SSRF & DNS Rebinding Protection**: All outbound HTTP traffic passes through `httpx.Client`. Private IPv4/IPv6 address blocks (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `127.0.0.0/8`, `169.254.0.0/16`, `::1`, `fc00::/7`, `fe80::/10`) are strictly blocked at dial time. Outbound request bodies are capped at 2 MiB, and redirect chains are limited to 5 hops.
+- **SSRF & DNS Rebinding Protection**: All outbound HTTP traffic passes through `httpx.Client`. Private IPv4/IPv6 address blocks (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `127.0.0.0/8`, `169.254.0.0/16`, `::1`, `fc00::/7`, `fe80::/10`) are strictly blocked at dial time. Outbound request bodies are capped at 2 MiB, and redirect chains are limited to 5 hops with automatic credential stripping on cross-host redirects.
 - **Type-Level PII Scrubber**: Sensitive data is sanitized before leaving agent boundaries. `scrubber.ScrubbedText` ensures raw secrets cannot be accidentally serialized or leaked into ticket drafts.
-- **Safe Path Operations**: Draft identifiers are strictly validated against `^[a-zA-Z0-9_-]+$` to prevent directory traversal. Draft files are stored with permissions `0600`.
+- **Safe Path Operations**: Draft identifiers are strictly validated against `^[a-zA-Z0-9_-]+$` to prevent directory traversal. Draft and patch files are stored with permissions `0600`.
 - **Constant-Time Authentication**: Control plane Bearer tokens are pre-hashed with SHA-256 and compared using `crypto/subtle.ConstantTimeCompare` to eliminate timing side channels.
 - **CSRF Mutation Guard**: All state-modifying requests (`POST /api/v1/...`) enforce strict origin matching against the request `Host` header and require either an `Authorization: Bearer` header or `X-Bugrouter-Request: 1`.
-- **Audit Logging & Webhooks**: Append-only JSONL audit logs guarantee an immutable record of all draft triage actions. Webhook notifications are signed via HMAC-SHA256 (`X-Bugrouter-Signature`) and executed with bounded timeouts.\n
+- **Audit Logging & Webhooks**: Append-only JSONL audit logs guarantee an immutable record of all draft triage actions. Webhook notifications are signed via HMAC-SHA256 (`X-Bugrouter-Signature`) and executed with bounded timeouts.
