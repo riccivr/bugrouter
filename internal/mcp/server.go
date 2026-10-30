@@ -1535,26 +1535,28 @@ func (s *Server) handleReadSystemCrashLog(ctx context.Context, args json.RawMess
 	}
 
 	var resolvedTarget *resolver.Target
-	if strings.TrimSpace(input.Query) != "" {
-		t, err := s.resolver.Resolve(ctx, strings.TrimSpace(input.Query))
-		if err == nil && t != nil {
-			resolvedTarget = t
-		}
-	}
-
-	if resolvedTarget == nil && suspect != "" {
-		t, err := s.resolver.Resolve(ctx, suspect)
-		if err == nil && t != nil {
-			resolvedTarget = t
-		}
-	}
-
-	if resolvedTarget == nil {
-		for _, c := range candidates {
-			t, err := s.resolver.Resolve(ctx, c.Query)
+	if s.resolver != nil {
+		if strings.TrimSpace(input.Query) != "" {
+			t, err := s.resolver.Resolve(ctx, strings.TrimSpace(input.Query))
 			if err == nil && t != nil {
 				resolvedTarget = t
-				break
+			}
+		}
+
+		if resolvedTarget == nil && suspect != "" {
+			t, err := s.resolver.Resolve(ctx, suspect)
+			if err == nil && t != nil {
+				resolvedTarget = t
+			}
+		}
+
+		if resolvedTarget == nil {
+			for _, c := range candidates {
+				t, err := s.resolver.Resolve(ctx, c.Query)
+				if err == nil && t != nil {
+					resolvedTarget = t
+					break
+				}
 			}
 		}
 	}
@@ -1563,9 +1565,11 @@ func (s *Server) handleReadSystemCrashLog(ctx context.Context, args json.RawMess
 	var dups []dedup.ExistingIssue
 
 	if resolvedTarget != nil {
-		tmpl, err := s.introspector.Introspect(ctx, *resolvedTarget)
-		if err == nil {
-			schema = tmpl
+		if s.introspector != nil {
+			tmpl, err := s.introspector.Introspect(ctx, *resolvedTarget)
+			if err == nil {
+				schema = tmpl
+			}
 		}
 
 		searchTitle := input.Title
