@@ -1338,44 +1338,42 @@ const indexHTML = `<!DOCTYPE html>
       </table>
     </div>
   <!-- Add Patch Modal -->
-  <div id="add-patch-modal" class="modal-backdrop">
-    <div class="modal">
-      <div class="modal-header">
-        <h3>Track Dependency Patch (Temporary Fork)</h3>
-        <button class="modal-close" onclick="closeAddPatchModal()">&times;</button>
-      </div>
-      <div class="modal-body">
-        <p style="margin: 0 0 12px 0; color: var(--muted); font-size: 0.85rem;">
-          Track a temporary local fork, branch, or patch so your team never forgets to revert it when upstream releases a fix.
-        </p>
-        <div class="form-group">
-          <label>Dependency Name *</label>
-          <input type="text" id="patch-dep" placeholder="e.g. sharp or github.com/gin-gonic/gin" />
+  <div id="add-patch-modal" style="display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.7); align-items: center; justify-content: center; z-index: 1000;" onclick="closeAddPatchModal(event)">
+    <div style="background: var(--card); border: 1px solid var(--border); border-radius: 8px; max-width: 600px; width: 90%; max-height: 85vh; overflow-y: auto; padding: 24px;" onclick="event.stopPropagation()">
+      <h3 style="margin-top:0; color:var(--heading);">Track Dependency Patch (Temporary Fork)</h3>
+      <p style="margin: 0 0 12px 0; color: var(--muted); font-size: 0.85rem;">
+        Track a temporary local fork, branch, or patch so your team never forgets to revert it when upstream releases a fix.
+      </p>
+      <div id="add-patch-error" style="display:none; color:var(--danger); margin-bottom:12px; font-size:0.85rem;"></div>
+      <div style="display:flex; flex-direction:column; gap:12px;">
+        <div>
+          <label style="font-size:0.8rem; color:var(--muted);">Dependency Name *</label>
+          <input type="text" id="patch-dep" placeholder="e.g. sharp or github.com/gin-gonic/gin" style="width:100%; box-sizing:border-box; background:var(--input-bg); border:1px solid var(--border); color:var(--text); padding:8px; border-radius:4px;" />
         </div>
-        <div class="form-group">
-          <label>Patch Target (Fork URL / Branch / File) *</label>
-          <input type="text" id="patch-target" placeholder="e.g. github.com/myorg/sharp@fix-segfault or patches/sharp+0.33.patch" />
+        <div>
+          <label style="font-size:0.8rem; color:var(--muted);">Patch Target (Fork URL / Branch / File) *</label>
+          <input type="text" id="patch-target" placeholder="e.g. github.com/myorg/sharp@fix-segfault or patches/sharp+0.33.patch" style="width:100%; box-sizing:border-box; background:var(--input-bg); border:1px solid var(--border); color:var(--text); padding:8px; border-radius:4px;" />
         </div>
-        <div class="form-group">
-          <label>Ecosystem</label>
-          <input type="text" id="patch-eco" placeholder="e.g. go, npm, cargo, python, custom" />
+        <div>
+          <label style="font-size:0.8rem; color:var(--muted);">Ecosystem (optional, e.g. go, npm, cargo, python, custom)</label>
+          <input type="text" id="patch-eco" placeholder="e.g. npm" style="width:100%; box-sizing:border-box; background:var(--input-bg); border:1px solid var(--border); color:var(--text); padding:8px; border-radius:4px;" />
         </div>
-        <div class="form-group">
-          <label>Manifest File</label>
-          <input type="text" id="patch-manifest" placeholder="e.g. package.json, go.mod, Cargo.toml" />
+        <div>
+          <label style="font-size:0.8rem; color:var(--muted);">Manifest File (optional)</label>
+          <input type="text" id="patch-manifest" placeholder="e.g. package.json, go.mod, Cargo.toml" style="width:100%; box-sizing:border-box; background:var(--input-bg); border:1px solid var(--border); color:var(--text); padding:8px; border-radius:4px;" />
         </div>
-        <div class="form-group">
-          <label>Upstream Issue URL</label>
-          <input type="text" id="patch-upstream" placeholder="e.g. https://github.com/lovell/sharp/issues/1234" />
+        <div>
+          <label style="font-size:0.8rem; color:var(--muted);">Upstream Issue URL (optional)</label>
+          <input type="text" id="patch-upstream" placeholder="e.g. https://github.com/lovell/sharp/issues/1234" style="width:100%; box-sizing:border-box; background:var(--input-bg); border:1px solid var(--border); color:var(--text); padding:8px; border-radius:4px;" />
         </div>
-        <div class="form-group">
-          <label>Reason *</label>
-          <textarea id="patch-reason" rows="2" placeholder="Explain why the dependency was temporarily patched..."></textarea>
+        <div>
+          <label style="font-size:0.8rem; color:var(--muted);">Reason *</label>
+          <textarea id="patch-reason" rows="2" placeholder="Explain why the dependency was temporarily patched..." style="width:100%; box-sizing:border-box; background:var(--input-bg); border:1px solid var(--border); color:var(--text); padding:8px; border-radius:4px; font-family:inherit;"></textarea>
         </div>
-      </div>
-      <div class="modal-footer">
-        <button class="btn btn-discard" onclick="closeAddPatchModal()">Cancel</button>
-        <button class="btn btn-approve" onclick="submitAddPatch()">Track in Ledger</button>
+        <div style="display:flex; justify-content:flex-end; gap:8px; margin-top:8px;">
+          <button class="btn btn-discard" onclick="closeAddPatchModal()">Cancel</button>
+          <button class="btn btn-approve" id="btn-save-patch" onclick="submitAddPatch()">Track in Ledger</button>
+        </div>
       </div>
     </div>
   </div>
@@ -1531,8 +1529,6 @@ const indexHTML = `<!DOCTYPE html>
       return headers;
     }
 
-    let currentPatches = [];
-
     async function fetchPatches() {
       try {
         const res = await fetch('/api/v1/patches', { headers: getHeaders() });
@@ -1545,7 +1541,7 @@ const indexHTML = `<!DOCTYPE html>
       }
     }
 
-    function renderPatches() {
+        function renderPatches() {
       const container = document.getElementById('patches-container');
       const tbody = document.getElementById('patches-tbody');
       const badge = document.getElementById('patches-badge');
@@ -1560,28 +1556,35 @@ const indexHTML = `<!DOCTYPE html>
       if (badge) badge.textContent = currentPatches.length + ' Active';
 
       tbody.innerHTML = currentPatches.map(p => {
-        const issueLink = p.upstream_issue_url ? '<a href="' + escapeHtml(p.upstream_issue_url) + '" target="_blank" style="color: var(--accent);">' + escapeHtml(p.upstream_issue_url) + '</a>' : '<span style="color: var(--muted);">-</span>';
+        const issueLink = p.upstream_issue_url ? '<a href="' + escapeHTML(p.upstream_issue_url) + '" target="_blank" style="color: var(--accent);">' + escapeHTML(p.upstream_issue_url) + '</a>' : '<span style="color: var(--muted);">-</span>';
         return '<tr style="border-bottom: 1px solid rgba(255,255,255,0.05);">' +
-          '<td style="padding: 8px;"><strong>' + escapeHtml(p.dependency) + '</strong></td>' +
-          '<td style="padding: 8px;"><span class="badge">' + escapeHtml(p.ecosystem || 'custom') + '</span></td>' +
-          '<td style="padding: 8px;"><code>' + escapeHtml(p.patch_target) + '</code></td>' +
+          '<td style="padding: 8px;"><strong>' + escapeHTML(p.dependency) + '</strong></td>' +
+          '<td style="padding: 8px;"><span class="badge">' + escapeHTML(p.ecosystem || 'custom') + '</span></td>' +
+          '<td style="padding: 8px;"><code>' + escapeHTML(p.patch_target) + '</code></td>' +
           '<td style="padding: 8px;">' + issueLink + '</td>' +
-          '<td style="padding: 8px; color: var(--muted);">' + escapeHtml(p.reason || '') + '</td>' +
+          '<td style="padding: 8px; color: var(--muted);">' + escapeHTML(p.reason || '') + '</td>' +
           '<td style="padding: 8px; text-align: right;">' +
-            '<button class="btn btn-discard" style="padding: 3px 8px; font-size: 0.75rem;" onclick="removePatch('' + escapeHtml(p.id) + '')">Remove</button>' +
+            '<button class="btn btn-discard" style="padding: 3px 8px; font-size: 0.75rem;" onclick="removePatch(\'' + escapeHTML(p.id) + '\')">Remove</button>' +
           '</td>' +
         '</tr>';
       }).join('');
     }
 
     function openAddPatchModal() {
-      const modal = document.getElementById('add-patch-modal');
-      if (modal) modal.classList.add('open');
+      const errEl = document.getElementById('add-patch-error');
+      if (errEl) errEl.style.display = 'none';
+      document.getElementById('patch-dep').value = '';
+      document.getElementById('patch-target').value = '';
+      document.getElementById('patch-eco').value = '';
+      document.getElementById('patch-manifest').value = '';
+      document.getElementById('patch-upstream').value = '';
+      document.getElementById('patch-reason').value = '';
+      document.getElementById('add-patch-modal').style.display = 'flex';
     }
 
-    function closeAddPatchModal() {
-      const modal = document.getElementById('add-patch-modal');
-      if (modal) modal.classList.remove('open');
+    function closeAddPatchModal(e) {
+      if (e && e.target !== document.getElementById('add-patch-modal')) return;
+      document.getElementById('add-patch-modal').style.display = 'none';
     }
 
     async function submitAddPatch() {

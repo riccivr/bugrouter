@@ -97,6 +97,12 @@ Focuses on flow preservation during coding sessions, keeping temporary dependenc
     - `bugrouter patch list [--json]`, `bugrouter patch add --dep <d> --target <fork> [--ecosystem <e>] [--issue <url>] [--manifest <m>] [--reason <r>]`, and `bugrouter patch rm <id-or-dep>`.
     - `bugrouter draft --from-parked <id>` for hydrating parked bugs in spawned triage sessions.
 
+- **Spec #11.2: Web UI Patch Ledger Red-Team Remediation [COMPLETED]**
+  - Eliminated duplicate `let currentPatches = [];` declaration in `indexHTML` script scope that triggered fatal JavaScript `SyntaxError`.
+  - Fixed helper function casing from `escapeHtml` to `escapeHTML` and fixed attribute single-quote escaping in `renderPatches()` removal buttons.
+  - Replaced undefined CSS classes (`.modal-backdrop`, `.open`) on `#add-patch-modal` with fixed inline overlay styling and updated JS toggle handlers.
+  - Added regression test assertions in `internal/cloud/server_test.go` ensuring script validity and modal overlay styling.
+
 ---
 
 ### Milestone 6: Zero-Daemon Post-Mortem OS Crash Reader & Desktop Telemetry (Upcoming — Spec #12)

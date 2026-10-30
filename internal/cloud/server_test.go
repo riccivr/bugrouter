@@ -1384,4 +1384,15 @@ func TestServerPatchEndpoints(t *testing.T) {
 	if !strings.Contains(htmlStr, "add-patch-modal") || !strings.Contains(htmlStr, "fetchPatches") {
 		t.Errorf("expected add-patch-modal and fetchPatches in indexHTML")
 	}
+
+	// 9. Red-team verification: no duplicate let currentPatches, no lowercase escapeHtml, overlay modal style
+	if count := strings.Count(htmlStr, "let currentPatches"); count != 1 {
+		t.Errorf("expected exactly 1 'let currentPatches' declaration in indexHTML, got %d", count)
+	}
+	if strings.Contains(htmlStr, "escapeHtml(") {
+		t.Errorf("found undefined lowercase escapeHtml in indexHTML")
+	}
+	if !strings.Contains(htmlStr, `id="add-patch-modal" style="display: none; position: fixed;`) {
+		t.Errorf("expected #add-patch-modal to have overlay styling in indexHTML")
+	}
 }

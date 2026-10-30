@@ -1,7 +1,7 @@
 # ARCHITECTURE_STATE.md — bugrouter System Architecture & Handoff
 
 Current CalVer: **2026.10.0**  
-Status: **Milestone 5 Spec #11.1 Completed** (Zero-Hijacking `park_bug` MCP Handoff + Tracked Dependency Patch Ledger + WorkOS Catalog UI + 13 MCP Tools)
+Status: **Milestone 5 Spec #11.2 Completed** (Web UI Patch Ledger Red-Team Remediation + 13 MCP Tools)
 
 ---
 
@@ -218,3 +218,9 @@ TemplateSchema                             PotentialDuplicates
 - Added `/api/v1/patches` REST endpoints (`GET`, `POST`, `DELETE`) in `internal/cloud/server.go` and high-visibility "Active Dependency Patches (Temporary Forks)" banner/table with 1-click modal in `indexHTML`.
 - Added `bugrouter patch` subcommand (`list`, `add`, `rm`) in `cmd/bugrouter/main.go` and flexible flag parsing for `bugrouter park`.
 - Updated `ROADMAP.md` documenting Milestones 5, 6, and 7.
+
+### Spec #11.2: Web UI Patch Ledger Red-Team Remediation (COMPLETED)
+- **Eliminated duplicate variable declaration in `indexHTML`:** Removed duplicate `let currentPatches = [];` declaration in `<script>` scope that caused a fatal JavaScript `SyntaxError: Identifier 'currentPatches' has already been declared`.
+- **Fixed helper function casing and attribute quote escaping in `renderPatches()`:** Replaced undefined `escapeHtml` with defined `escapeHTML` helper, and fixed quote escaping on the `onclick="removePatch(\'\' + escapeHTML(p.id) + \'\')"` action button to prevent JS attribute syntax errors.
+- **Fixed modal overlay styling for `#add-patch-modal`:** Replaced undefined CSS classes (`.modal-backdrop`, `.open`) with inline overlay styles (`style="display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.7); align-items: center; justify-content: center; z-index: 1000;"`), matching `#add-service-modal`, and wired `display = 'flex'` / `'none'` in `openAddPatchModal` and `closeAddPatchModal`.
+- **Added Red-Team unit test verification:** Added explicit assertions in `TestServerPatchEndpoints` in `internal/cloud/server_test.go` ensuring zero duplicate declarations, zero lowercase `escapeHtml`, and valid fixed overlay styling in `indexHTML`.
