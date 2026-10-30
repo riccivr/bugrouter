@@ -172,7 +172,7 @@ func ClassifyTracker(bugsURL, bugsEmail, repoURL string) (TrackerInfo, string) {
 				}, normRepo
 			}
 
-			isJiraHost := strings.HasSuffix(host, ".atlassian.net") || host == "atlassian.net" || strings.HasPrefix(host, "jira.") || strings.Contains(host, "jira")
+			isJiraHost := strings.HasSuffix(host, ".atlassian.net") || host == "atlassian.net" || strings.HasPrefix(host, "jira.") || strings.Contains(host, "jira") || strings.Contains(u.Path, "/jira/")
 			if strings.HasSuffix(host, ".atlassian.net") || strings.HasPrefix(host, "jira.") || (isJiraHost && (strings.Contains(u.Path, "/rest/api/") || strings.Contains(u.Path, "/browse/"))) {
 				return TrackerInfo{
 					Protocol: ProtocolJira,
