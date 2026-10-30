@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
+	"runtime/debug"
 	"strings"
 	"syscall"
 	"time"
@@ -298,7 +299,36 @@ func runGuidedReport(ctx context.Context, in io.Reader, out io.Writer, httpClien
 	return draft, stagedPath, nil
 }
 
+// recoverAndParkSelfBug records internal bugrouter panic diagnostics into the parked store.
+func recoverAndParkSelfBug(r any, stack []byte, storeDir string) (*adapter.ParkedBug, error) {
+	if r == nil {
+		return nil, nil
+	}
+	parkStore := adapter.NewParkedStore(storeDir)
+	title := fmt.Sprintf("internal panic in bugrouter %s: %v", version.Version, r)
+	snippet := string(stack)
+	workaround := fmt.Sprintf("os=%s arch=%s", runtime.GOOS, runtime.GOARCH)
+	bug, _, err := parkStore.Park("bugrouter", title, snippet, workaround, "")
+	if err != nil {
+		return nil, fmt.Errorf("park self bug: %w", err)
+	}
+	return bug, nil
+}
+
 func main() {
+	defer func() {
+		if r := recover(); r != nil {
+			stack := debug.Stack()
+			bug, parkErr := recoverAndParkSelfBug(r, stack, "")
+			if parkErr != nil {
+				fmt.Fprintf(os.Stderr, "internal panic: %v\n%s\nfailed to park self bug: %v\n", r, string(stack), parkErr)
+			} else if bug != nil {
+				fmt.Fprintf(os.Stderr, "internal panic: %v\n%s\nParked breadcrumb bug %s.\nTo draft an upstream ticket, run:\n  bugrouter draft --from-parked %s\n", r, string(stack), bug.ID, bug.ID)
+			}
+			os.Exit(1)
+		}
+	}()
+
 	if len(os.Args) < 2 {
 		printUsage()
 		os.Exit(1)
@@ -383,6 +413,7 @@ func main() {
 		snippet := fs.String("snippet", "", "error snippet or stack trace")
 		workaround := fs.String("workaround", "", "how the anomaly was mitigated or worked around")
 		file := fs.String("file", "", "workspace file path where anomaly was discovered")
+		relatedDep := fs.String("related-dep", "", "secondary/related dependency causing interaction anomaly")
 		jsonOut := fs.Bool("json", false, "output JSON handoff payload")
 
 		// Reorder flags and positional args so flags can precede or follow dependency and title
@@ -392,7 +423,7 @@ func main() {
 			arg := os.Args[i]
 			if strings.HasPrefix(arg, "-") {
 				flagArgs = append(flagArgs, arg)
-				if (arg == "--snippet" || arg == "-snippet" || arg == "--workaround" || arg == "-workaround" || arg == "--file" || arg == "-file") && i+1 < len(os.Args) && !strings.HasPrefix(os.Args[i+1], "-") {
+				if (arg == "--snippet" || arg == "-snippet" || arg == "--workaround" || arg == "-workaround" || arg == "--file" || arg == "-file" || arg == "--related-dep" || arg == "-related-dep") && i+1 < len(os.Args) && !strings.HasPrefix(os.Args[i+1], "-") {
 					i++
 					flagArgs = append(flagArgs, os.Args[i])
 				}
@@ -407,7 +438,7 @@ func main() {
 
 		if len(posArgs) < 2 {
 			fmt.Fprintln(os.Stderr, "error: park requires <dependency> and <title> arguments")
-			fmt.Fprintln(os.Stderr, "Usage: bugrouter park [--snippet <s>] [--workaround <w>] [--file <f>] [--json] <dependency> <title>")
+			fmt.Fprintln(os.Stderr, "Usage: bugrouter park [--snippet <s>] [--workaround <w>] [--file <f>] [--related-dep <pkg>] [--json] <dependency> <title>")
 			os.Exit(1)
 		}
 
@@ -415,7 +446,7 @@ func main() {
 		title := posArgs[1]
 
 		parkStore := adapter.NewParkedStore("")
-		bug, handoff, err := parkStore.Park(dep, title, *snippet, *workaround, *file)
+		bug, handoff, err := parkStore.Park(dep, title, *snippet, *workaround, *file, *relatedDep)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: park bug: %v\n", err)
 			os.Exit(1)
@@ -437,6 +468,9 @@ func main() {
 		fmt.Printf("Bug parked successfully in <5ms!\n")
 		fmt.Printf("Parked ID:       %s\n", bug.ID)
 		fmt.Printf("Dependency:      %s\n", bug.Dependency)
+		if bug.RelatedDependency != "" {
+			fmt.Printf("Related Dep:     %s\n", bug.RelatedDependency)
+		}
 		fmt.Printf("Title:           %s\n", bug.Title)
 		fmt.Printf("Resource URI:    %s\n", handoff.ResourceURI)
 		fmt.Printf("CLI Command:     %s\n\n", handoff.CLICommand)
@@ -543,6 +577,7 @@ func main() {
 		logs := fs.String("logs", "", "error logs or console output")
 		bodyFile := fs.String("body-file", "", "path to markdown body file or '-' for stdin")
 		fromParked := fs.String("from-parked", "", "hydrate draft from previously parked bug ID")
+		relatedDep := fs.String("related-dep", "", "secondary/related dependency to query for correlated stack evidence")
 		timeout := fs.Duration("timeout", 15*time.Second, "request and probe timeout duration")
 		strictQuality := fs.Bool("strict-quality", false, "reject draft if quality checks fail")
 		verifyCmd := fs.String("verify-cmd", "", "run bounded command to verify reproduction and attach proof")
@@ -577,6 +612,9 @@ func main() {
 			}
 			if *steps == "" && parkedBug.WorkspaceFile != "" {
 				*steps = fmt.Sprintf("Observed in %s", parkedBug.WorkspaceFile)
+			}
+			if *relatedDep == "" && parkedBug.RelatedDependency != "" {
+				*relatedDep = parkedBug.RelatedDependency
 			}
 		}
 
@@ -675,16 +713,30 @@ func main() {
 			sysTelemetry = &t
 		}
 
+		var relatedIssues []dedup.ExistingIssue
+		if *relatedDep != "" {
+			relTarget, relErr := resolveTarget(ctx, httpClient, *relatedDep, *noCache)
+			if relErr == nil && relTarget != nil {
+				searchQuery := scrubber.Scrub(*title + " " + *summary)
+				relDups, err := finder.FindDuplicates(ctx, *relTarget, searchQuery)
+				if err == nil {
+					relatedIssues = relDups
+				}
+			}
+		}
+
 		draft, err := adapter.BuildDraft(adapter.DraftInput{
-			Target:           *target,
-			Title:            *title,
-			Summary:          *summary,
-			StepsToReproduce: *steps,
-			Logs:             *logs,
-			Template:         schema,
-			Duplicates:       dups,
-			Verification:     proof,
-			Telemetry:        sysTelemetry,
+			Target:            *target,
+			Title:             *title,
+			Summary:           *summary,
+			StepsToReproduce:  *steps,
+			Logs:              *logs,
+			Template:          schema,
+			Duplicates:        dups,
+			Verification:      proof,
+			Telemetry:         sysTelemetry,
+			RelatedDependency: *relatedDep,
+			RelatedIssues:     relatedIssues,
 		})
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: build draft: %v\n", err)
@@ -1176,13 +1228,13 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "  version                     Print version information")
 	fmt.Fprintln(os.Stderr, "  resolve [--json] [--no-cache] [--timeout <dur>] <q>")
 	fmt.Fprintln(os.Stderr, "                              Resolve software target to bug tracker")
-	fmt.Fprintln(os.Stderr, "  park [--snippet <s>] [--workaround <w>] [--file <f>] [--json] <dependency> <title>")
+	fmt.Fprintln(os.Stderr, "  park [--snippet <s>] [--workaround <w>] [--file <f>] [--related-dep <pkg>] [--json] <dependency> <title>")
 	fmt.Fprintln(os.Stderr, "                              Instantly park a 3rd-party anomaly in <5ms without hijacking session")
 	fmt.Fprintln(os.Stderr, "  patch list [--json]         List tracked dependency patches and temporary forks")
 	fmt.Fprintln(os.Stderr, "  patch add --dep <d> --target <fork> [--ecosystem <e>] [--issue <url>] [--manifest <m>] [--reason <r>]")
 	fmt.Fprintln(os.Stderr, "                              Record a temporary dependency fork/patch in the ledger")
 	fmt.Fprintln(os.Stderr, "  patch rm <id-or-dep>        Remove a dependency patch from the ledger")
-	fmt.Fprintln(os.Stderr, "  draft [--title <t>] [--summary <s>] [--steps <st>] [--logs <l>] [--from-parked <id>]")
+	fmt.Fprintln(os.Stderr, "  draft [--title <t>] [--summary <s>] [--steps <st>] [--logs <l>] [--from-parked <id>] [--related-dep <pkg>]")
 	fmt.Fprintln(os.Stderr, "        [--verify-cmd <cmd>] [--with-telemetry] [--body-file <path>] [--strict-quality] [--timeout <dur>] [--json] [--no-cache] [<q>]")
 	fmt.Fprintln(os.Stderr, "                              Stage bug report draft and generate submission URLs")
 	fmt.Fprintln(os.Stderr, "  report [--title <t>] [--summary <s>] [--steps <st>] [--expected <ex>] [--actual <ac>] [--logs <l>]")

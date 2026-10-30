@@ -17,14 +17,15 @@ import (
 
 // ParkedBug represents a 3rd-party anomaly parked during coding without context hijacking.
 type ParkedBug struct {
-	ID             string                `json:"id"`
-	CreatedAt      time.Time             `json:"created_at"`
-	Dependency     string                `json:"dependency"`
-	Title          string                `json:"title"`
-	ErrorSnippet   scrubber.ScrubbedText `json:"error_snippet,omitempty"`
-	WorkaroundNote scrubber.ScrubbedText `json:"workaround_note,omitempty"`
-	WorkspaceFile  string                `json:"workspace_file,omitempty"`
-	Status         string                `json:"status"` // "parked" or "triaged"
+	ID                string                `json:"id"`
+	CreatedAt         time.Time             `json:"created_at"`
+	Dependency        string                `json:"dependency"`
+	Title             string                `json:"title"`
+	ErrorSnippet      scrubber.ScrubbedText `json:"error_snippet,omitempty"`
+	WorkaroundNote    scrubber.ScrubbedText `json:"workaround_note,omitempty"`
+	WorkspaceFile     string                `json:"workspace_file,omitempty"`
+	RelatedDependency string                `json:"related_dependency,omitempty"`
+	Status            string                `json:"status"` // "parked" or "triaged"
 }
 
 // HandoffPayload provides host agents with native MCP handoff directives, user options, and spawn instructions.
@@ -64,7 +65,7 @@ func (s *ParkedStore) Dir() string {
 }
 
 // Park records a 3rd-party bug anomaly in <5ms with zero network I/O.
-func (s *ParkedStore) Park(dep, title, snippet, workaround, file string) (*ParkedBug, HandoffPayload, error) {
+func (s *ParkedStore) Park(dep, title, snippet, workaround, file string, relatedDep ...string) (*ParkedBug, HandoffPayload, error) {
 	dep = strings.TrimSpace(dep)
 	title = sanitizeTitle(title)
 
@@ -81,15 +82,21 @@ func (s *ParkedStore) Park(dep, title, snippet, workaround, file string) (*Parke
 	}
 	id := hex.EncodeToString(b)
 
+	var rel string
+	if len(relatedDep) > 0 {
+		rel = strings.TrimSpace(relatedDep[0])
+	}
+
 	bug := &ParkedBug{
-		ID:             id,
-		CreatedAt:      time.Now().UTC(),
-		Dependency:     dep,
-		Title:          title,
-		ErrorSnippet:   scrubber.Scrub(snippet),
-		WorkaroundNote: scrubber.Scrub(workaround),
-		WorkspaceFile:  file,
-		Status:         "parked",
+		ID:                id,
+		CreatedAt:         time.Now().UTC(),
+		Dependency:        dep,
+		Title:             title,
+		ErrorSnippet:      scrubber.Scrub(snippet),
+		WorkaroundNote:    scrubber.Scrub(workaround),
+		WorkspaceFile:     file,
+		RelatedDependency: rel,
+		Status:            "parked",
 	}
 
 	if err := s.Save(bug); err != nil {

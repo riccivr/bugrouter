@@ -105,15 +105,37 @@ Focuses on flow preservation during coding sessions, keeping temporary dependenc
 
 ---
 
-### Milestone 6: Zero-Daemon Post-Mortem OS Crash Reader & Desktop Telemetry (Upcoming — Spec #12)
+### Milestone 6: Maintainer Empathy & Opt-Out Guard, Self-Hosting Dogfooding, and Cross-Dependency Evidence Dossiers (Spec #12) [COMPLETED]
+Eliminates friction with open-source maintainers, enables instant offline dogfooding of bugrouter itself, and correlates multi-package interaction bugs.
+
+- **Spec #12: Maintainer Empathy & Opt-Out Guard, Self-Hosting Dogfooding, and Cross-Dependency Evidence Dossiers [COMPLETED]**
+  - **Constitutional Error-Handling Cleanup (`internal/cloud/server_test.go`)**:
+    - Replaced all blank identifier assignments (`respBytes, _ := io.ReadAll(...)`) with explicit error handling in `TestServerServicesCatalogEndpoints` and `TestServerPatchEndpoints`.
+  - **Maintainer Empathy & AI Opt-Out Guard (`internal/introspector`, `internal/adapter`, `internal/cloud`, `internal/mcp`)**:
+    - `MaintainerPolicy` schema (`AIOptOut`, `OptOutReason`, `ChecklistRules`) wired into `TemplateSchema`.
+    - `ParseMaintainerPolicy` scanning templates and `CONTRIBUTING.md` / `.github/CONTRIBUTING.md` for AI/bot restrictions (`"no ai"`, `"no llm"`, `"do not submit ai"`, `"no automated issue"`, `"ai-generated issues"`, `"ban ai"`, `"no bot"`) and up to 5 checklist rules.
+    - Automatic **Companion Mode** (`draft.Status = "companion_only"`): suppresses `*Staged via bugrouter/...*` footer so human engineers can file manual reports.
+    - Automated API submission hard-blocked in `ForgeClient.Submit`, Cloud Server (`/api/v1/drafts/{id}/approve`), and MCP (`approve_draft`).
+  - **Self-Hosting Dogfooding (`internal/resolver`, `cmd/bugrouter`)**:
+    - Intrinsic offline `<1ms` resolution in `DirectProbe` for `"bugrouter"` and `"self"` targeting canonical repo `https://github.com/riccivr/bugrouter`.
+    - Top-level panic recovery with auto-parking breadcrumb (`recoverAndParkSelfBug`) in `main()` printing `bugrouter draft --from-parked <id>` to `os.Stderr`.
+  - **Cross-Dependency Evidence Dossiers (`--related-dep`) (`internal/adapter`, `cmd/bugrouter`, `internal/mcp`)**:
+    - Added `RelatedDependency` to `ParkedBug` and variadic `relatedDep ...string` support to `ParkedStore.Park`.
+    - Added `RelatedDependency` and `RelatedIssues` to `DraftInput` and `StagedDraft`, rendering correlated issues under `## Correlated Evidence (<dep>)`.
+    - Added `--related-dep <pkg>` to `bugrouter park` and `bugrouter draft` (with automatic hydration from parked bugs) and `related_dependency` parameter to MCP `park_bug` and `draft_bug_report`.
+
+---
+
+### Milestone 7: Zero-Daemon Post-Mortem OS Crash Reader & Desktop Telemetry (Upcoming — Spec #13)
 Brings zero-daemon, post-mortem crash inspection to Linux, Windows, and macOS desktop environments without background pollers.
 
-- **Spec #12: Zero-Daemon Post-Mortem OS Crash Reader & Desktop App Telemetry [UPCOMING]**
-  - **Post-Mortem OS Crash Readers (`bugrouter crash-log`)**: Zero-daemon inspection reading system crash journals on demand:
-    - Linux: `coredumpctl info` and `journalctl -u ...`
-    - Windows: Windows Error Reporting (WER) and Event Viewer (Application Crash Event ID 1000)
-    - macOS: `/Library/Logs/DiagnosticReports/` and `Console.app` crash logs
-  - **Desktop Application & GPU Telemetry**: Diagnostic capture for GUI applications (such as Photoshop, Blender, DaVinci Resolve) collecting GPU models, display servers (Wayland, X11, DWM), and drivers with zero background daemon overhead.
+- **Spec #13: Zero-Daemon Post-Mortem OS Crash Reader & Desktop App Telemetry [ACTIVE]**
+  - **Post-Mortem OS Crash Readers (`bugrouter crash-log`, MCP `read_system_crash_log`) [COMPLETED]**: Zero-daemon inspection reading system crash journals on demand:
+    - Linux: `coredumpctl info` and directory scanning `/var/crash`, `/var/lib/systemd/coredump`
+    - Windows: Windows Error Reporting (WER) and Event Viewer (Application Crash Event ID 1000) via bounded PowerShell query
+    - macOS: `/Library/Logs/DiagnosticReports/` and `~/Library/Logs/DiagnosticReports/` sorted by modification time
+    - Integrated with deterministic crash attribution, secret scrubbing, and machine-parseable JSON envelopes.
+  - **Desktop Application & GPU Telemetry [COMPLETED]**: Diagnostic capture for GUI applications (such as Photoshop, Blender, DaVinci Resolve) collecting GPU models, driver versions, display servers (Wayland, X11, DWM), and desktop environments (GNOME, KDE Plasma, XFCE, macOS Aqua, Windows DWM) with zero background daemon overhead and bounded secret scrubbing.
 
 ---
 

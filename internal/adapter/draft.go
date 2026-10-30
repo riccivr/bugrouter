@@ -26,18 +26,20 @@ import (
 
 // DraftInput holds raw issue details provided by users or agent processes.
 type DraftInput struct {
-	Target           resolver.Target
-	Title            string
-	Summary          string
-	StepsToReproduce string
-	ExpectedBehavior string
-	ActualBehavior   string
-	Logs             string
-	Severity         string
-	Template         *introspector.TemplateSchema
-	Duplicates       []dedup.ExistingIssue
-	Verification     *verifier.VerificationProof
-	Telemetry        *telemetry.SystemTelemetry
+	Target            resolver.Target
+	Title             string
+	Summary           string
+	StepsToReproduce  string
+	ExpectedBehavior  string
+	ActualBehavior    string
+	Logs              string
+	Severity          string
+	Template          *introspector.TemplateSchema
+	Duplicates        []dedup.ExistingIssue
+	Verification      *verifier.VerificationProof
+	Telemetry         *telemetry.SystemTelemetry
+	RelatedDependency string
+	RelatedIssues     []dedup.ExistingIssue
 }
 
 // StagedDraft represents a redacted and formatted issue ready for review or submission.
@@ -55,6 +57,8 @@ type StagedDraft struct {
 	Quality             QualityReport                `json:"quality"`
 	Verification        *verifier.VerificationProof  `json:"verification,omitempty"`
 	Telemetry           *telemetry.SystemTelemetry   `json:"telemetry,omitempty"`
+	RelatedDependency   string                       `json:"related_dependency,omitempty"`
+	RelatedIssues       []dedup.ExistingIssue        `json:"related_issues,omitempty"`
 }
 
 func generateDraftID() (string, error) {
@@ -176,6 +180,8 @@ func BuildDraft(in DraftInput) (*StagedDraft, error) {
 		severity = "normal"
 	}
 
+	isCompanionOnly := in.Template != nil && in.Template.Policy != nil && in.Template.Policy.AIOptOut
+
 	var markdownBody scrubber.ScrubbedText
 	if in.Template != nil && in.Template.Format != introspector.FormatBugzillaSchema && len(in.Template.Fields) > 0 {
 		var sb strings.Builder
@@ -189,11 +195,24 @@ func BuildDraft(in DraftInput) (*StagedDraft, error) {
 			}
 			sb.WriteString(fmt.Sprintf("### %s\n\n%s\n\n", f.Label, val))
 		}
+		if len(in.RelatedIssues) > 0 {
+			relName := in.RelatedDependency
+			if relName == "" {
+				relName = "Related Dependency"
+			}
+			sb.WriteString(fmt.Sprintf("## Correlated Evidence (%s)\n\n", relName))
+			for _, iss := range in.RelatedIssues {
+				sb.WriteString(fmt.Sprintf("- [#%s](%s): %s (%s)\n", iss.ID, iss.URL, iss.Title, iss.State))
+			}
+			sb.WriteString("\n")
+		}
 		if in.Verification != nil {
 			sb.WriteString(fmt.Sprintf("## Verified Reproduction\n\n- **Reproduced:** %t (exit code %d, %dms)\n- **Command:** `%s`\n- **Proof Digest:** `sha256:%s`\n\n",
 				in.Verification.Reproduced, in.Verification.ExitCode, in.Verification.DurationMs, in.Verification.Command, in.Verification.ProofDigest))
 		}
-		sb.WriteString(fmt.Sprintf("*Staged via bugrouter/%s*\n", version.Version))
+		if !isCompanionOnly {
+			sb.WriteString(fmt.Sprintf("*Staged via bugrouter/%s*\n", version.Version))
+		}
 		markdownBody = scrubber.ScrubbedText(sb.String())
 	} else {
 		var sb strings.Builder
@@ -231,6 +250,17 @@ func BuildDraft(in DraftInput) (*StagedDraft, error) {
 		} else {
 			sb.WriteString("None provided.\n\n")
 		}
+		if len(in.RelatedIssues) > 0 {
+			relName := in.RelatedDependency
+			if relName == "" {
+				relName = "Related Dependency"
+			}
+			sb.WriteString(fmt.Sprintf("## Correlated Evidence (%s)\n\n", relName))
+			for _, iss := range in.RelatedIssues {
+				sb.WriteString(fmt.Sprintf("- [#%s](%s): %s (%s)\n", iss.ID, iss.URL, iss.Title, iss.State))
+			}
+			sb.WriteString("\n")
+		}
 		sb.WriteString("## Environment\n\n")
 		sb.WriteString(fmt.Sprintf("- **Target:** %s\n", canonicalName))
 		sb.WriteString(fmt.Sprintf("- **Version:** %s\n", localVersion))
@@ -244,7 +274,9 @@ func BuildDraft(in DraftInput) (*StagedDraft, error) {
 			sb.WriteString(fmt.Sprintf("## Verified Reproduction\n\n- **Reproduced:** %t (exit code %d, %dms)\n- **Command:** `%s`\n- **Proof Digest:** `sha256:%s`\n\n",
 				in.Verification.Reproduced, in.Verification.ExitCode, in.Verification.DurationMs, in.Verification.Command, in.Verification.ProofDigest))
 		}
-		sb.WriteString(fmt.Sprintf("*Staged via bugrouter/%s*\n", version.Version))
+		if !isCompanionOnly {
+			sb.WriteString(fmt.Sprintf("*Staged via bugrouter/%s*\n", version.Version))
+		}
 
 		markdownBody = scrubber.ScrubbedText(sb.String())
 	}
@@ -346,10 +378,15 @@ func BuildDraft(in DraftInput) (*StagedDraft, error) {
 		submissionURL = trackerURL
 	}
 
+	status := "pending_review"
+	if isCompanionOnly {
+		status = "companion_only"
+	}
+
 	draft := &StagedDraft{
 		ID:                  id,
 		CreatedAt:           time.Now().UTC(),
-		Status:              "pending_review",
+		Status:              status,
 		Target:              in.Target,
 		Title:               scrubbedTitle,
 		MarkdownBody:        markdownBody,
@@ -360,6 +397,8 @@ func BuildDraft(in DraftInput) (*StagedDraft, error) {
 		Quality:             LintDraft(in),
 		Verification:        in.Verification,
 		Telemetry:           in.Telemetry,
+		RelatedDependency:   in.RelatedDependency,
+		RelatedIssues:       in.RelatedIssues,
 	}
 	return draft, nil
 }
@@ -373,6 +412,13 @@ type ForgeSubmitter interface {
 func (d *StagedDraft) Submit(ctx context.Context, submitter ForgeSubmitter) (string, error) {
 	if submitter == nil {
 		return "", errors.New("forge submitter cannot be nil")
+	}
+	if d.Status == "companion_only" || (d.Template != nil && d.Template.Policy != nil && d.Template.Policy.AIOptOut) {
+		reason := "upstream restrictions"
+		if d.Template != nil && d.Template.Policy != nil && d.Template.Policy.OptOutReason != "" {
+			reason = d.Template.Policy.OptOutReason
+		}
+		return "", fmt.Errorf("maintainer policy opt-out: upstream repository restricts automated/AI submissions (%s); use draft as a local human companion only", reason)
 	}
 	issueURL, err := submitter.Submit(ctx, d)
 	if err != nil {

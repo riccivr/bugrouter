@@ -82,3 +82,30 @@ func TestDirectProbe(t *testing.T) {
 		}
 	}
 }
+
+func TestDirectProbeSelfBugrouter(t *testing.T) {
+	probe := NewDirectProbe()
+	ctx := context.Background()
+
+	for _, q := range []string{"bugrouter", "BugRouter", "BUGROUTER", "self", "Self", "SELF"} {
+		target, err := probe.Resolve(ctx, q)
+		if err != nil {
+			t.Fatalf("Resolve(%q) failed: %v", q, err)
+		}
+		if target.CanonicalName != "bugrouter" {
+			t.Errorf("CanonicalName = %q, want bugrouter", target.CanonicalName)
+		}
+		if target.Layer != LayerWorkspace {
+			t.Errorf("Layer = %q, want %q", target.Layer, LayerWorkspace)
+		}
+		if target.RepositoryURL != "https://github.com/riccivr/bugrouter" {
+			t.Errorf("RepositoryURL = %q, want https://github.com/riccivr/bugrouter", target.RepositoryURL)
+		}
+		if target.Tracker.Protocol != ProtocolGitHub {
+			t.Errorf("Tracker.Protocol = %q, want %q", target.Tracker.Protocol, ProtocolGitHub)
+		}
+		if target.Tracker.URL != "https://github.com/riccivr/bugrouter/issues" {
+			t.Errorf("Tracker.URL = %q, want https://github.com/riccivr/bugrouter/issues", target.Tracker.URL)
+		}
+	}
+}

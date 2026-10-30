@@ -508,6 +508,9 @@ func TestTelemetryCommandIntegration(t *testing.T) {
 		t.Fatalf("expected Telemetry attached to draft")
 	}
 	body := string(draft.MarkdownBody)
+	if !strings.Contains(body, "## Environment") {
+		t.Errorf("expected ## Environment in draft markdown body: %s", body)
+	}
 	if !strings.Contains(body, "- **OS**:") {
 		t.Errorf("expected - **OS**: in draft markdown body: %s", body)
 	}
@@ -732,5 +735,53 @@ func TestPatchSubcommandLifecycle(t *testing.T) {
 	}
 	if len(afterRm) != 0 {
 		t.Errorf("expected 0 patches after rm, got %d", len(afterRm))
+	}
+}
+
+func TestRecoverAndParkSelfBug(t *testing.T) {
+	tempDir := t.TempDir()
+
+	// 1. When panic is nil, returns nil
+	nilBug, nilErr := recoverAndParkSelfBug(nil, nil, tempDir)
+	if nilErr != nil {
+		t.Fatalf("unexpected error on nil panic: %v", nilErr)
+	}
+	if nilBug != nil {
+		t.Fatalf("expected nil bug on nil panic, got: %+v", nilBug)
+	}
+
+	// 2. Recover unexpected panic and park breadcrumb
+	panicVal := "nil pointer dereference at runtime"
+	stack := []byte("goroutine 1 [running]:\ncmd/bugrouter/main.go:300 +0x123")
+
+	bug, err := recoverAndParkSelfBug(panicVal, stack, tempDir)
+	if err != nil {
+		t.Fatalf("recoverAndParkSelfBug failed: %v", err)
+	}
+	if bug == nil {
+		t.Fatalf("expected parked bug, got nil")
+	}
+
+	if bug.Dependency != "bugrouter" {
+		t.Errorf("Dependency = %q, want bugrouter", bug.Dependency)
+	}
+	if !strings.Contains(bug.Title, "internal panic in bugrouter") || !strings.Contains(bug.Title, panicVal) {
+		t.Errorf("Title = %q, missing panic details", bug.Title)
+	}
+	if !strings.Contains(string(bug.ErrorSnippet), "goroutine 1 [running]") {
+		t.Errorf("ErrorSnippet missing stack trace: %s", bug.ErrorSnippet)
+	}
+	if !strings.Contains(string(bug.WorkaroundNote), "os=") {
+		t.Errorf("WorkaroundNote missing os/arch: %s", bug.WorkaroundNote)
+	}
+
+	// 3. Verify it was written to disk and can be reloaded
+	store := adapter.NewParkedStore(tempDir)
+	reloaded, err := store.Get(bug.ID)
+	if err != nil {
+		t.Fatalf("Get parked bug %s failed: %v", bug.ID, err)
+	}
+	if reloaded.Title != bug.Title {
+		t.Errorf("reloaded title = %q, want %q", reloaded.Title, bug.Title)
 	}
 }

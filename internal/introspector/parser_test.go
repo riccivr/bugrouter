@@ -338,3 +338,46 @@ func TestParseBugzillaRESTSchemaEmpty(t *testing.T) {
 		}
 	}
 }
+
+func TestParseMaintainerPolicyAndCompanionMode(t *testing.T) {
+	contributingMD := `
+# Contributing Guidelines
+
+Please read before opening an issue:
+- [ ] Checked existing issues for duplicates
+- [ ] Must provide a minimal reproducible example
+- [ ] Before opening an issue test against main branch
+
+IMPORTANT: Do not submit AI-generated bug reports or bot submissions.
+`
+
+	policy := ParseMaintainerPolicy(contributingMD)
+	if policy == nil {
+		t.Fatalf("expected maintainer policy, got nil")
+	}
+	if !policy.AIOptOut {
+		t.Errorf("expected AIOptOut=true, got false")
+	}
+	expectedReason := "IMPORTANT: Do not submit AI-generated bug reports or bot submissions."
+	if policy.OptOutReason != expectedReason {
+		t.Errorf("OptOutReason = %q, want %q", policy.OptOutReason, expectedReason)
+	}
+	if len(policy.ChecklistRules) < 3 {
+		t.Errorf("expected at least 3 checklist rules, got %d: %v", len(policy.ChecklistRules), policy.ChecklistRules)
+	}
+
+	schema, err := ParseMarkdownTemplate("bug.md", resolver.ProtocolGitHub, []byte(contributingMD))
+	if err != nil {
+		t.Fatalf("ParseMarkdownTemplate error: %v", err)
+	}
+	if schema.Policy == nil || !schema.Policy.AIOptOut {
+		t.Errorf("expected schema.Policy.AIOptOut=true, got %+v", schema.Policy)
+	}
+
+	cleanMD := `# Normal Contributing
+Please be polite and file clear bugs.
+`
+	if p := ParseMaintainerPolicy(cleanMD); p != nil {
+		t.Errorf("expected nil policy for clean text, got %+v", p)
+	}
+}

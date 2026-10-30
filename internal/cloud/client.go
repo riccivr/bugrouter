@@ -99,6 +99,14 @@ func (c *ForgeClient) Submit(ctx context.Context, draft *adapter.StagedDraft) (s
 		return "", errors.New("draft cannot be nil")
 	}
 
+	if draft.Status == "companion_only" || (draft.Template != nil && draft.Template.Policy != nil && draft.Template.Policy.AIOptOut) {
+		reason := "upstream restrictions"
+		if draft.Template != nil && draft.Template.Policy != nil && draft.Template.Policy.OptOutReason != "" {
+			reason = draft.Template.Policy.OptOutReason
+		}
+		return "", fmt.Errorf("maintainer policy opt-out: upstream repository restricts automated/AI submissions (%s); use draft as a local human companion only", reason)
+	}
+
 	protocol := draft.Target.Tracker.Protocol
 	switch protocol {
 	case resolver.ProtocolGitHub:

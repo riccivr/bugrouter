@@ -68,6 +68,74 @@ func normalizeHeadingID(text string) string {
 	return strings.Trim(raw, "_")
 }
 
+// ParseMaintainerPolicy extracts AI opt-out restrictions and checklist rules from template or markdown text.
+func ParseMaintainerPolicy(raw string) *MaintainerPolicy {
+	trimmedRaw := strings.TrimSpace(raw)
+	if trimmedRaw == "" {
+		return nil
+	}
+
+	optOutPhrases := []string{
+		"no ai",
+		"no llm",
+		"do not submit ai",
+		"no automated issue",
+		"no automated bug",
+		"ai-generated issues",
+		"ban ai",
+		"no bot",
+	}
+
+	lines := strings.Split(raw, "\n")
+	var policy MaintainerPolicy
+
+	for _, rawLine := range lines {
+		line := strings.TrimRight(rawLine, "\r\n")
+		trimmedLine := strings.TrimSpace(line)
+		if trimmedLine == "" {
+			continue
+		}
+		lower := strings.ToLower(trimmedLine)
+
+		if !policy.AIOptOut {
+			for _, phrase := range optOutPhrases {
+				if strings.Contains(lower, phrase) {
+					policy.AIOptOut = true
+					policy.OptOutReason = trimmedLine
+					break
+				}
+			}
+		}
+
+		if len(policy.ChecklistRules) < 5 {
+			isChecklist := strings.HasPrefix(trimmedLine, "- [ ]") ||
+				strings.Contains(lower, "before opening an issue") ||
+				strings.Contains(lower, "must provide") ||
+				strings.Contains(lower, "must include") ||
+				strings.Contains(lower, "please include")
+
+			if isChecklist {
+				alreadyExists := false
+				for _, r := range policy.ChecklistRules {
+					if r == trimmedLine {
+						alreadyExists = true
+						break
+					}
+				}
+				if !alreadyExists {
+					policy.ChecklistRules = append(policy.ChecklistRules, trimmedLine)
+				}
+			}
+		}
+	}
+
+	if !policy.AIOptOut && len(policy.ChecklistRules) == 0 {
+		return nil
+	}
+
+	return &policy
+}
+
 // ParseGitHubYAMLForm parses GitHub issue form definitions into a TemplateSchema.
 func ParseGitHubYAMLForm(fileName string, data []byte) (*TemplateSchema, error) {
 	schema := &TemplateSchema{
@@ -250,6 +318,9 @@ func ParseGitHubYAMLForm(fileName string, data []byte) (*TemplateSchema, error) 
 	}
 
 	flushField()
+	if pol := ParseMaintainerPolicy(string(data)); pol != nil {
+		schema.Policy = pol
+	}
 	return schema, nil
 }
 
@@ -379,6 +450,10 @@ func ParseMarkdownTemplate(fileName string, protocol resolver.Protocol, data []b
 
 	if schema.Name == "" {
 		schema.Name = strings.TrimSuffix(fileName, ".md")
+	}
+
+	if pol := ParseMaintainerPolicy(string(data)); pol != nil {
+		schema.Policy = pol
 	}
 
 	return schema, nil

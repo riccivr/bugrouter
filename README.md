@@ -44,6 +44,9 @@ Dependencies: **Standard Library Only (Zero Third-Party Dependencies)**
 - **Zero-Hijacking Parked Bug Store & Native Host Handoff**: Instantly records 3rd-party dependency bugs in `<5ms` (`bugrouter park` / `park_bug`) with zero network calls, presenting 4 flow-preservation choices (ignore, park, spawn separate session, or fork/patch), emitting native MCP resource notifications (`notifications/resources/list_changed`), MCP Resources (`bugrouter://parked/<id>`), and MCP Prompts (`triage_parked_bug`).
 - **Tracked Dependency Patch Ledger**: Keeps temporary local dependency forks and vendor patches (`go.mod` `replace`, npm `overrides`/`patches/`, Cargo `[patch]`, Poetry git branches) high-visibility ("close to the eyes") in `$XDG_DATA_HOME/bugrouter/patches.json` and the Web UI banner so temporary forks are never forgotten.
 - **WorkOS-Style Plug-and-Play Dependency Portal**: Embedded Control Plane Web UI enables teams to click and connect downstream dependencies and internal services (`services.json`) via 1-click preset tiles (Stripe, Supabase, Auth0, Prisma, Next.js, Remix, Redis, Postgres, FFmpeg, Blender) and REST APIs (`GET/POST/DELETE /api/v1/services` and `GET/POST/DELETE /api/v1/patches`).
+- **Maintainer Empathy & AI Opt-Out Guard**: Automatically introspects issue templates and `CONTRIBUTING.md` for AI/LLM opt-out policies. When restricted, operates in **Companion Mode** (`companion_only`), omitting automated attribution footers, extracting prerequisite checklist rules, and hard-blocking automated API submissions so developers file respectful, human-authored reports.
+- **Intrinsic Self-Hosting Dogfooding & Panic Breadcrumbs**: Resolves `bugrouter` and `self` offline in `<1ms` targeting its canonical repository, and intercepts unexpected panics at runtime to automatically park diagnostic crash breadcrumbs for instant triage.
+- **Cross-Dependency Evidence Dossiers (`--related-dep`)**: When bugs stem from complex interactions between two libraries (e.g. browser extensions or SaaS scripts mutating shared state), queries the secondary dependency's tracker and compiles correlated prior-art tickets under `## Correlated Evidence (<dep>)`.
 - **Model Context Protocol (MCP)**: Native stdio JSON-RPC 2.0 server (spec `2024-11-05`) advertising tools, resources, and prompts, exposing 13 specialized agent tools.
 
 ---
@@ -90,6 +93,9 @@ bugrouter resolve requests
 # Resolve a local OS binary with JSON output
 bugrouter resolve curl --json
 
+# Self-hosting resolution (<1ms, offline)
+bugrouter resolve bugrouter
+
 # Resolve with custom timeout and disable disk cache
 bugrouter resolve nginx --timeout 5s --no-cache
 ```
@@ -101,7 +107,8 @@ When an agent or engineer spots a 3rd-party bug while coding, park it immediatel
 bugrouter park sharp "v0.33.0 fails with SIGSEGV on musl alpine" \
   --snippet "Segmentation fault at 0x00007f9c in libvips" \
   --workaround "Downgraded to sharp@0.32.6" \
-  --file "src/image.ts"
+  --file "src/image.ts" \
+  --related-dep "libvips"
 
 # Park and output machine-readable JSON handoff payload
 bugrouter park stripe "Webhook signature verification panic on malformed payload" --json
@@ -132,12 +139,12 @@ bugrouter patch rm sharp
 ### Draft a Staged Bug Report
 Stage a structured bug ticket with automatic secret redaction, template mapping, and duplicate detection:
 ```bash
-# Draft using CLI flags
-bugrouter draft requests \
-  --title "SSL connection reset during streaming download" \
-  --summary "Encountered SSLEOFError when streaming large files" \
-  --steps "1. Call requests.get(stream=True)\n2. Read chunks" \
-  --logs "SSLEOFError: EOF occurred in violation of protocol"
+# Draft using CLI flags with cross-dependency interaction evidence
+bugrouter draft react-dom \
+  --title "Hydration mismatch caused by third-party DOM mutation" \
+  --summary "Browser extension injects data attributes before hydration completes" \
+  --steps "1. Install extension\n2. Reload page" \
+  --related-dep "https://github.com/grammarly/extension"
 
 # Draft using a Markdown body file with strict quality enforcement
 cat error.log | bugrouter draft payment-service --body-file - --strict-quality

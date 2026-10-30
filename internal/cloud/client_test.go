@@ -11,6 +11,7 @@ import (
 
 	"github.com/riccivr/bugrouter/internal/adapter"
 	"github.com/riccivr/bugrouter/internal/httpx"
+	"github.com/riccivr/bugrouter/internal/introspector"
 	"github.com/riccivr/bugrouter/internal/resolver"
 )
 
@@ -274,5 +275,29 @@ func TestForgeClientGitea(t *testing.T) {
 	expectedURL := "https://projects.blender.org/blender/blender/issues/404"
 	if issueURL != expectedURL {
 		t.Errorf("url = %q, want %q", issueURL, expectedURL)
+	}
+}
+
+func TestForgeClientMaintainerOptOut(t *testing.T) {
+	client := NewForgeClient(httpx.NewTestClient(time.Second))
+	draft := &adapter.StagedDraft{
+		Status: "companion_only",
+		Template: &introspector.TemplateSchema{
+			Policy: &introspector.MaintainerPolicy{
+				AIOptOut:     true,
+				OptOutReason: "no bot issues allowed",
+			},
+		},
+		Target: resolver.Target{
+			Tracker: resolver.TrackerInfo{Protocol: resolver.ProtocolGitHub},
+		},
+	}
+
+	_, err := client.Submit(context.Background(), draft)
+	if err == nil {
+		t.Fatalf("expected error submitting companion_only draft, got nil")
+	}
+	if !strings.Contains(err.Error(), "maintainer policy opt-out") || !strings.Contains(err.Error(), "no bot issues allowed") {
+		t.Errorf("unexpected error: %v", err)
 	}
 }

@@ -720,8 +720,9 @@ func TestMCPRecordDependencyPatch(t *testing.T) {
 		t.Fatalf("server.Run failed: %v", err)
 	}
 
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
 	var resp jsonrpcResponse
-	if err := json.Unmarshal(out.Bytes(), &resp); err != nil {
+	if err := json.Unmarshal([]byte(lines[len(lines)-1]), &resp); err != nil {
 		t.Fatalf("unmarshal response failed: %v", err)
 	}
 
@@ -758,5 +759,138 @@ func TestMCPRecordDependencyPatch(t *testing.T) {
 	}
 	if len(patches) != 1 || patches[0].ID != recorded.ID {
 		t.Errorf("expected 1 patch in store, got %+v", patches)
+	}
+}
+
+func TestMCPApproveDraftCompanionOnly(t *testing.T) {
+	tempDir := t.TempDir()
+	store := adapter.NewDraftStore(tempDir)
+
+	draft, err := adapter.BuildDraft(adapter.DraftInput{
+		Target: resolver.Target{
+			CanonicalName: "strict-pkg",
+			Tracker: resolver.TrackerInfo{
+				Protocol: resolver.ProtocolGitHub,
+				URL:      "https://github.com/org/strict-pkg/issues",
+			},
+		},
+		Title:   "Crash in strict pkg",
+		Summary: "Summary",
+		Template: &introspector.TemplateSchema{
+			Policy: &introspector.MaintainerPolicy{
+				AIOptOut:     true,
+				OptOutReason: "do not submit ai generated bug reports",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("BuildDraft failed: %v", err)
+	}
+
+	if _, err := store.Save(draft); err != nil {
+		t.Fatalf("store.Save failed: %v", err)
+	}
+
+	server := NewServer(nil, store)
+	var in bytes.Buffer
+	var out bytes.Buffer
+
+	callMsg := fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"approve_draft","arguments":{"id":"%s"}}}`+"\n", draft.ID)
+	in.WriteString(callMsg)
+
+	if err := server.Run(context.Background(), &in, &out); err != nil {
+		t.Fatalf("server.Run failed: %v", err)
+	}
+
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	var resp jsonrpcResponse
+	if err := json.Unmarshal([]byte(lines[len(lines)-1]), &resp); err != nil {
+		t.Fatalf("unmarshal response failed: %v", err)
+	}
+
+	resultMap := resp.Result.(map[string]any)
+	if resultMap["isError"] != true {
+		t.Fatalf("expected isError=true for companion_only draft, got false")
+	}
+	contentArr := resultMap["content"].([]any)
+	text := contentArr[0].(map[string]any)["text"].(string)
+	if !strings.Contains(text, "maintainer policy opt-out") || !strings.Contains(text, "do not submit ai generated bug reports") {
+		t.Errorf("unexpected error text: %q", text)
+	}
+}
+
+func TestMCPDraftBugReportRelatedDependency(t *testing.T) {
+	tempDir := t.TempDir()
+	store := adapter.NewDraftStore(tempDir)
+	wf := resolver.NewWaterfall(time.Second, resolver.NewDirectProbe())
+
+	server := NewServer(wf, store)
+	var in bytes.Buffer
+	var out bytes.Buffer
+
+	callMsg := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"draft_bug_report","arguments":{"query":"https://github.com/facebook/react","title":"Hydration mismatch error","summary":"DOM altered by extension","related_dependency":"https://github.com/riccivr/bugrouter"}}}` + "\n"
+	in.WriteString(callMsg)
+
+	if err := server.Run(context.Background(), &in, &out); err != nil {
+		t.Fatalf("server.Run failed: %v", err)
+	}
+
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	var resp jsonrpcResponse
+	if err := json.Unmarshal([]byte(lines[len(lines)-1]), &resp); err != nil {
+		t.Fatalf("unmarshal response failed: %v", err)
+	}
+
+	resultMap := resp.Result.(map[string]any)
+	if resultMap["isError"] != false {
+		t.Fatalf("expected isError=false, got %+v", resultMap)
+	}
+	contentArr := resultMap["content"].([]any)
+	text := contentArr[0].(map[string]any)["text"].(string)
+
+	var staged adapter.StagedDraft
+	if err := json.Unmarshal([]byte(text), &staged); err != nil {
+		t.Fatalf("unmarshal staged draft: %v", err)
+	}
+	if staged.RelatedDependency != "https://github.com/riccivr/bugrouter" {
+		t.Errorf("RelatedDependency = %q, want https://github.com/riccivr/bugrouter", staged.RelatedDependency)
+	}
+}
+
+func TestMCPParkBugRelatedDependency(t *testing.T) {
+	tempDir := t.TempDir()
+	parkedStore := adapter.NewParkedStore(tempDir)
+	server := NewServer(nil, nil).WithParkedStore(parkedStore)
+
+	var in bytes.Buffer
+	var out bytes.Buffer
+
+	callMsg := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"park_bug","arguments":{"dependency":"react-dom","title":"Hydration mismatch","related_dependency":"grammarly-extension"}}}` + "\n"
+	in.WriteString(callMsg)
+
+	if err := server.Run(context.Background(), &in, &out); err != nil {
+		t.Fatalf("server.Run failed: %v", err)
+	}
+
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	var resp jsonrpcResponse
+	if err := json.Unmarshal([]byte(lines[len(lines)-1]), &resp); err != nil {
+		t.Fatalf("unmarshal response failed: %v", err)
+	}
+
+	resultMap := resp.Result.(map[string]any)
+	if resultMap["isError"] == true {
+		t.Fatalf("expected isError=false, got %+v", resultMap)
+	}
+
+	bugs, err := parkedStore.List()
+	if err != nil {
+		t.Fatalf("parkedStore.List failed: %v", err)
+	}
+	if len(bugs) != 1 {
+		t.Fatalf("expected 1 bug, got %d", len(bugs))
+	}
+	if bugs[0].RelatedDependency != "grammarly-extension" {
+		t.Errorf("RelatedDependency = %q, want 'grammarly-extension'", bugs[0].RelatedDependency)
 	}
 }

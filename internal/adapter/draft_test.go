@@ -1,6 +1,7 @@
 package adapter
 
 import (
+	"context"
 	"encoding/json"
 	"net/url"
 	"os"
@@ -655,5 +656,133 @@ func TestBuildDraftWithTelemetry(t *testing.T) {
 	}
 	if !strings.Contains(body, "- **Display Server**: wayland") {
 		t.Errorf("expected Display Server line in environment: %s", body)
+	}
+}
+
+type dummySubmitter struct{}
+
+func (d *dummySubmitter) Submit(ctx context.Context, draft *StagedDraft) (string, error) {
+	return "https://tracker.example.com/issues/1", nil
+}
+
+func TestParseMaintainerPolicyAndCompanionMode(t *testing.T) {
+	policy := &introspector.MaintainerPolicy{
+		AIOptOut:     true,
+		OptOutReason: "do not submit ai-generated issues",
+		ChecklistRules: []string{
+			"- [ ] Check duplicate issues",
+			"Must provide reproduction steps",
+		},
+	}
+
+	tmpl := &introspector.TemplateSchema{
+		Name:     "Bug Report",
+		Format:   introspector.FormatGitHubMarkdown,
+		Protocol: resolver.ProtocolGitHub,
+		Policy:   policy,
+	}
+
+	in := DraftInput{
+		Target: resolver.Target{
+			CanonicalName: "strict-lib",
+			LocalVersion:  "1.0.0",
+			Tracker: resolver.TrackerInfo{
+				Protocol: resolver.ProtocolGitHub,
+				URL:      "https://github.com/org/strict-lib/issues",
+			},
+		},
+		Title:            "Memory corruption on slice shrink",
+		Summary:          "Slice shrink causes panic",
+		StepsToReproduce: "1. Shrink slice\n2. Call append",
+		Template:         tmpl,
+	}
+
+	draft, err := BuildDraft(in)
+	if err != nil {
+		t.Fatalf("BuildDraft failed: %v", err)
+	}
+
+	if draft.Status != "companion_only" {
+		t.Errorf("draft.Status = %q, want companion_only", draft.Status)
+	}
+
+	body := string(draft.MarkdownBody)
+	if strings.Contains(body, "*Staged via bugrouter/") {
+		t.Errorf("expected footer to be omitted in companion mode: %s", body)
+	}
+
+	// Verify submission block
+	_, submitErr := draft.Submit(context.Background(), &dummySubmitter{})
+	if submitErr == nil {
+		t.Fatalf("expected submission error for companion_only draft, got nil")
+	}
+	if !strings.Contains(submitErr.Error(), "maintainer policy opt-out") {
+		t.Errorf("expected maintainer policy opt-out error, got: %v", submitErr)
+	}
+	if !strings.Contains(submitErr.Error(), "do not submit ai-generated issues") {
+		t.Errorf("expected opt-out reason in error, got: %v", submitErr)
+	}
+}
+
+func TestBuildDraftWithRelatedDependencyEvidence(t *testing.T) {
+	in := DraftInput{
+		Target: resolver.Target{
+			CanonicalName: "react-dom",
+			LocalVersion:  "18.2.0",
+			Tracker: resolver.TrackerInfo{
+				Protocol: resolver.ProtocolGitHub,
+				URL:      "https://github.com/facebook/react/issues",
+			},
+		},
+		Title:             "Hydration mismatch caused by third-party DOM mutation",
+		Summary:           "Extension injects extra attributes breaking hydration",
+		StepsToReproduce:  "1. Install extension\n2. Reload page",
+		RelatedDependency: "grammarly-extension",
+		RelatedIssues: []dedup.ExistingIssue{
+			{
+				ID:    "4092",
+				Title: "Grammarly injects data-gr-ext attribute before hydration completes",
+				URL:   "https://github.com/facebook/react/issues/4092",
+				State: "open",
+				Score: 0.88,
+			},
+			{
+				ID:    "1204",
+				Title: "DOM attribute mutation crashes SSR client hydration",
+				URL:   "https://github.com/facebook/react/issues/1204",
+				State: "closed",
+				Score: 0.75,
+			},
+		},
+	}
+
+	draft, err := BuildDraft(in)
+	if err != nil {
+		t.Fatalf("BuildDraft failed: %v", err)
+	}
+
+	if draft.RelatedDependency != "grammarly-extension" {
+		t.Errorf("RelatedDependency = %q, want grammarly-extension", draft.RelatedDependency)
+	}
+	if len(draft.RelatedIssues) != 2 {
+		t.Fatalf("RelatedIssues len = %d, want 2", len(draft.RelatedIssues))
+	}
+
+	body := string(draft.MarkdownBody)
+	if !strings.Contains(body, "## Correlated Evidence (grammarly-extension)") {
+		t.Errorf("missing '## Correlated Evidence (grammarly-extension)' section: %s", body)
+	}
+	if !strings.Contains(body, "- [#4092](https://github.com/facebook/react/issues/4092): Grammarly injects data-gr-ext attribute before hydration completes (open)") {
+		t.Errorf("missing formatted correlated issue #4092: %s", body)
+	}
+	if !strings.Contains(body, "- [#1204](https://github.com/facebook/react/issues/1204): DOM attribute mutation crashes SSR client hydration (closed)") {
+		t.Errorf("missing formatted correlated issue #1204: %s", body)
+	}
+
+	// Verify that Correlated Evidence appears before ## Environment
+	idxCorr := strings.Index(body, "## Correlated Evidence (grammarly-extension)")
+	idxEnv := strings.Index(body, "## Environment")
+	if idxCorr == -1 || idxEnv == -1 || idxCorr > idxEnv {
+		t.Errorf("expected Correlated Evidence before Environment section (corr=%d, env=%d)", idxCorr, idxEnv)
 	}
 }

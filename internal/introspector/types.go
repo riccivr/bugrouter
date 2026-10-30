@@ -33,6 +33,13 @@ type FieldSchema struct {
 	Value       string    `json:"value,omitempty"` // Pre-filled or default value
 }
 
+// MaintainerPolicy records maintainer rules and automated submission constraints.
+type MaintainerPolicy struct {
+	AIOptOut       bool     `json:"ai_opt_out"`
+	OptOutReason   string   `json:"opt_out_reason,omitempty"`
+	ChecklistRules []string `json:"checklist_rules,omitempty"`
+}
+
 // TemplateSchema represents a discovered upstream issue template or tracker schema.
 type TemplateSchema struct {
 	Name        string            `json:"name"`
@@ -44,4 +51,5 @@ type TemplateSchema struct {
 	Labels      []string          `json:"labels,omitempty"`
 	Fields      []FieldSchema     `json:"fields,omitempty"`
 	RawMarkdown string            `json:"raw_markdown,omitempty"`
+	Policy      *MaintainerPolicy `json:"policy,omitempty"`
 }

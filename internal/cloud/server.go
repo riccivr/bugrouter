@@ -858,6 +858,15 @@ func (s *Server) handleApproveDraft(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if draft.Status == "companion_only" || (draft.Template != nil && draft.Template.Policy != nil && draft.Template.Policy.AIOptOut) {
+		reason := "upstream restrictions"
+		if draft.Template != nil && draft.Template.Policy != nil && draft.Template.Policy.OptOutReason != "" {
+			reason = draft.Template.Policy.OptOutReason
+		}
+		http.Error(w, fmt.Sprintf("maintainer policy opt-out: upstream repository restricts automated/AI submissions (%s); use draft as a local human companion only", reason), http.StatusForbidden)
+		return
+	}
+
 	remoteIP, _, ipErr := net.SplitHostPort(r.RemoteAddr)
 	if ipErr != nil {
 		remoteIP = r.RemoteAddr

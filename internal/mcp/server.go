@@ -400,6 +400,10 @@ func (s *Server) toolDefinitions() []map[string]any {
 						"type":        "string",
 						"description": "Workspace file path or line number where the bug was encountered",
 					},
+					"related_dependency": map[string]any{
+						"type":        "string",
+						"description": "Optional secondary or interacting dependency causing anomaly",
+					},
 				},
 				"required": []string{"dependency", "title"},
 			},
@@ -517,6 +521,10 @@ func (s *Server) toolDefinitions() []map[string]any {
 					"include_telemetry": map[string]any{
 						"type":        "boolean",
 						"description": "Collect and attach local hardware/OS telemetry (default: false)",
+					},
+					"related_dependency": map[string]any{
+						"type":        "string",
+						"description": "Optional secondary/related dependency to query for correlated stack evidence",
 					},
 				},
 				"required": []string{"query", "title"},
@@ -813,14 +821,15 @@ func (s *Server) handleToolCall(ctx context.Context, params toolCallParams, out 
 
 	case "draft_bug_report":
 		var args struct {
-			Query            string `json:"query"`
-			Title            string `json:"title"`
-			Summary          string `json:"summary"`
-			StepsToReproduce string `json:"steps_to_reproduce"`
-			Logs             string `json:"logs"`
-			StrictQuality    bool   `json:"strict_quality"`
-			VerifyCmd        string `json:"verify_cmd"`
-			IncludeTelemetry bool   `json:"include_telemetry"`
+			Query             string `json:"query"`
+			Title             string `json:"title"`
+			Summary           string `json:"summary"`
+			StepsToReproduce  string `json:"steps_to_reproduce"`
+			Logs              string `json:"logs"`
+			StrictQuality     bool   `json:"strict_quality"`
+			VerifyCmd         string `json:"verify_cmd"`
+			IncludeTelemetry  bool   `json:"include_telemetry"`
+			RelatedDependency string `json:"related_dependency"`
 		}
 		if err := json.Unmarshal(params.Arguments, &args); err != nil {
 			return toolCallResult{
@@ -876,16 +885,29 @@ func (s *Server) handleToolCall(ctx context.Context, params toolCallParams, out 
 			sysTelemetry = &t
 		}
 
+		var relatedIssues []dedup.ExistingIssue
+		if strings.TrimSpace(args.RelatedDependency) != "" {
+			relTarget, relErr := s.resolver.Resolve(ctx, strings.TrimSpace(args.RelatedDependency))
+			if relErr == nil && relTarget != nil && s.dedupFinder != nil {
+				searchQuery := scrubber.Scrub(args.Title + " " + args.Summary)
+				if relDups, err := s.dedupFinder.FindDuplicates(ctx, *relTarget, searchQuery); err == nil {
+					relatedIssues = relDups
+				}
+			}
+		}
+
 		draft, err := adapter.BuildDraft(adapter.DraftInput{
-			Target:           *target,
-			Title:            args.Title,
-			Summary:          args.Summary,
-			StepsToReproduce: args.StepsToReproduce,
-			Logs:             args.Logs,
-			Template:         schema,
-			Duplicates:       dups,
-			Verification:     proof,
-			Telemetry:        sysTelemetry,
+			Target:            *target,
+			Title:             args.Title,
+			Summary:           args.Summary,
+			StepsToReproduce:  args.StepsToReproduce,
+			Logs:              args.Logs,
+			Template:          schema,
+			Duplicates:        dups,
+			Verification:      proof,
+			Telemetry:         sysTelemetry,
+			RelatedDependency: args.RelatedDependency,
+			RelatedIssues:     relatedIssues,
 		})
 		if err != nil {
 			return toolCallResult{
@@ -1065,6 +1087,17 @@ func (s *Server) handleToolCall(ctx context.Context, params toolCallParams, out 
 		if draft.Status == "submitted" {
 			return toolCallResult{
 				Content: []toolContent{{Type: "text", Text: "draft is already submitted"}},
+				IsError: true,
+			}
+		}
+
+		if draft.Status == "companion_only" || (draft.Template != nil && draft.Template.Policy != nil && draft.Template.Policy.AIOptOut) {
+			reason := "upstream restrictions"
+			if draft.Template != nil && draft.Template.Policy != nil && draft.Template.Policy.OptOutReason != "" {
+				reason = draft.Template.Policy.OptOutReason
+			}
+			return toolCallResult{
+				Content: []toolContent{{Type: "text", Text: fmt.Sprintf("maintainer policy opt-out: upstream repository restricts automated/AI submissions (%s); use draft as a local human companion only", reason)}},
 				IsError: true,
 			}
 		}
@@ -1368,11 +1401,12 @@ func (s *Server) handleParkBug(ctx context.Context, args json.RawMessage, out io
 	}
 
 	var input struct {
-		Dependency     string `json:"dependency"`
-		Title          string `json:"title"`
-		ErrorSnippet   string `json:"error_snippet"`
-		WorkaroundNote string `json:"workaround_note"`
-		WorkspaceFile  string `json:"workspace_file"`
+		Dependency        string `json:"dependency"`
+		Title             string `json:"title"`
+		ErrorSnippet      string `json:"error_snippet"`
+		WorkaroundNote    string `json:"workaround_note"`
+		WorkspaceFile     string `json:"workspace_file"`
+		RelatedDependency string `json:"related_dependency"`
 	}
 	if err := json.Unmarshal(args, &input); err != nil {
 		return toolCallResult{
@@ -1381,7 +1415,7 @@ func (s *Server) handleParkBug(ctx context.Context, args json.RawMessage, out io
 		}
 	}
 
-	bug, handoff, err := s.parkedStore.Park(input.Dependency, input.Title, input.ErrorSnippet, input.WorkaroundNote, input.WorkspaceFile)
+	bug, handoff, err := s.parkedStore.Park(input.Dependency, input.Title, input.ErrorSnippet, input.WorkaroundNote, input.WorkspaceFile, input.RelatedDependency)
 	if err != nil {
 		return toolCallResult{
 			Content: []toolContent{{Type: "text", Text: fmt.Sprintf("failed to park bug: %v", err)}},

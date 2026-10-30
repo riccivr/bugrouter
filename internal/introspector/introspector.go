@@ -199,6 +199,33 @@ func (intro *Introspector) introspectGitHub(ctx context.Context, target resolver
 
 	dirURL := fmt.Sprintf("%s/repos/%s/%s/contents/.github/ISSUE_TEMPLATE", baseURL, owner, repo)
 
+	fetchContributing := func() *MaintainerPolicy {
+		paths := []string{"CONTRIBUTING.md", ".github/CONTRIBUTING.md"}
+		for _, p := range paths {
+			rawURL := fmt.Sprintf("%s/repos/%s/%s/contents/%s", baseURL, owner, repo, p)
+			contentData, fetchErr := intro.client.GetBytesWithHeaders(ctx, rawURL, "application/vnd.github.v3.raw", gitHubAuthHeader())
+			if fetchErr == nil && len(contentData) > 0 {
+				var item ghContentItem
+				if json.Unmarshal(contentData, &item) == nil && item.DownloadURL != "" {
+					var headers map[string]string
+					if shouldSendGitHubAuth(item.DownloadURL, baseURL) {
+						headers = gitHubAuthHeader()
+					}
+					downData, downErr := intro.client.GetBytesWithHeaders(ctx, item.DownloadURL, "text/plain", headers)
+					if downErr == nil && len(downData) > 0 {
+						if pol := ParseMaintainerPolicy(string(downData)); pol != nil {
+							return pol
+						}
+					}
+				}
+				if pol := ParseMaintainerPolicy(string(contentData)); pol != nil {
+					return pol
+				}
+			}
+		}
+		return nil
+	}
+
 	var candidates []ghContentItem
 	data, err := intro.client.GetBytesWithHeaders(ctx, dirURL, "application/json", gitHubAuthHeader())
 	if err == nil {
@@ -216,17 +243,22 @@ func (intro *Introspector) introspectGitHub(ctx context.Context, target resolver
 	if len(candidates) == 0 {
 		fileURL := fmt.Sprintf("%s/repos/%s/%s/contents/.github/ISSUE_TEMPLATE.md", baseURL, owner, repo)
 		fileData, fileErr := intro.client.GetBytesWithHeaders(ctx, fileURL, "application/json", gitHubAuthHeader())
-		if fileErr != nil {
-			return nil, ErrNoTemplateFound
+		if fileErr == nil {
+			var singleItem ghContentItem
+			if unmarshalErr := json.Unmarshal(fileData, &singleItem); unmarshalErr == nil {
+				candidates = append(candidates, singleItem)
+			}
 		}
-		var singleItem ghContentItem
-		if unmarshalErr := json.Unmarshal(fileData, &singleItem); unmarshalErr != nil {
-			return nil, fmt.Errorf("decode github file item: %w", unmarshalErr)
-		}
-		candidates = append(candidates, singleItem)
 	}
 
 	if len(candidates) == 0 {
+		if pol := fetchContributing(); pol != nil {
+			return &TemplateSchema{
+				Name:     "CONTRIBUTING.md",
+				Protocol: target.Tracker.Protocol,
+				Policy:   pol,
+			}, nil
+		}
 		return nil, ErrNoTemplateFound
 	}
 
@@ -274,11 +306,28 @@ func (intro *Introspector) introspectGitHub(ctx context.Context, target resolver
 		}
 	}
 
+	var schema *TemplateSchema
 	lowerName := strings.ToLower(best.Name)
 	if strings.HasSuffix(lowerName, ".yml") || strings.HasSuffix(lowerName, ".yaml") {
-		return ParseGitHubYAMLForm(best.Name, rawData)
+		schema, err = ParseGitHubYAMLForm(best.Name, rawData)
+	} else {
+		schema, err = ParseMarkdownTemplate(best.Name, resolver.ProtocolGitHub, rawData)
 	}
-	return ParseMarkdownTemplate(best.Name, resolver.ProtocolGitHub, rawData)
+	if err != nil {
+		if pol := fetchContributing(); pol != nil {
+			return &TemplateSchema{
+				Name:     "CONTRIBUTING.md",
+				Protocol: target.Tracker.Protocol,
+				Policy:   pol,
+			}, nil
+		}
+		return nil, err
+	}
+
+	if schema != nil && schema.Policy == nil {
+		schema.Policy = fetchContributing()
+	}
+	return schema, nil
 }
 
 type gitlabTreeItem struct {
@@ -418,6 +467,20 @@ func (intro *Introspector) introspectGitea(ctx context.Context, target resolver.
 	repo := strings.TrimSuffix(parts[1], ".git")
 	baseURL := fmt.Sprintf("%s://%s", u.Scheme, u.Host)
 
+	fetchGiteaContributing := func() *MaintainerPolicy {
+		paths := []string{"CONTRIBUTING.md", ".github/CONTRIBUTING.md"}
+		for _, p := range paths {
+			rawURL := fmt.Sprintf("%s/api/v1/repos/%s/%s/raw/%s", baseURL, owner, repo, p)
+			contentData, fetchErr := intro.client.GetBytesWithHeaders(ctx, rawURL, "text/plain", giteaAuthHeader())
+			if fetchErr == nil && len(contentData) > 0 {
+				if pol := ParseMaintainerPolicy(string(contentData)); pol != nil {
+					return pol
+				}
+			}
+		}
+		return nil
+	}
+
 	apiURL := fmt.Sprintf("%s/api/v1/repos/%s/%s/issue_templates", baseURL, owner, repo)
 	data, err := intro.client.GetBytesWithHeaders(ctx, apiURL, "application/json", giteaAuthHeader())
 	if err == nil {
@@ -442,12 +505,29 @@ func (intro *Introspector) introspectGitea(ctx context.Context, target resolver.
 			if best.Name == "" {
 				best = templates[0]
 			}
+			var schema *TemplateSchema
+			var parseErr error
 			lowerName := strings.ToLower(best.Name)
 			if strings.HasSuffix(lowerName, ".yml") || strings.HasSuffix(lowerName, ".yaml") {
-				return ParseGitHubYAMLForm(best.Name, []byte(best.Content))
+				schema, parseErr = ParseGitHubYAMLForm(best.Name, []byte(best.Content))
+			} else {
+				schema, parseErr = ParseMarkdownTemplate(best.Name, resolver.ProtocolGitea, []byte(best.Content))
 			}
-			return ParseMarkdownTemplate(best.Name, resolver.ProtocolGitea, []byte(best.Content))
+			if parseErr == nil && schema != nil {
+				if schema.Policy == nil {
+					schema.Policy = fetchGiteaContributing()
+				}
+				return schema, nil
+			}
 		}
+	}
+
+	if pol := fetchGiteaContributing(); pol != nil {
+		return &TemplateSchema{
+			Name:     "CONTRIBUTING.md",
+			Protocol: target.Tracker.Protocol,
+			Policy:   pol,
+		}, nil
 	}
 
 	return nil, ErrNoTemplateFound

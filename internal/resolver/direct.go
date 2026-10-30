@@ -3,6 +3,8 @@ package resolver
 import (
 	"context"
 	"strings"
+
+	"github.com/riccivr/bugrouter/internal/version"
 )
 
 // DirectProbe resolves queries that are explicit repository URLs or qualified web paths.
@@ -26,6 +28,20 @@ func (p *DirectProbe) Layer() SourceLayer {
 // Resolve identifies explicit URLs and repository paths.
 func (p *DirectProbe) Resolve(ctx context.Context, query string) (*Target, error) {
 	trimmed := strings.TrimSpace(query)
+	if strings.EqualFold(trimmed, "bugrouter") || strings.EqualFold(trimmed, "self") {
+		return &Target{
+			Query:         query,
+			CanonicalName: "bugrouter",
+			LocalVersion:  version.Version,
+			Layer:         LayerWorkspace,
+			RepositoryURL: "https://github.com/riccivr/bugrouter",
+			Tracker: TrackerInfo{
+				Protocol: ProtocolGitHub,
+				URL:      "https://github.com/riccivr/bugrouter/issues",
+			},
+		}, nil
+	}
+
 	hasPrefix := strings.HasPrefix(trimmed, "http://") ||
 		strings.HasPrefix(trimmed, "https://") ||
 		strings.HasPrefix(trimmed, "github.com/") ||

@@ -474,7 +474,10 @@ func TestServerCSRFProtection(t *testing.T) {
 	}
 
 	// 4. Matching Origin header and X-Bugrouter-Request: 1 -> 200 OK
-	u, _ := url.Parse(tsUnauth.URL)
+	u, parseErr := url.Parse(tsUnauth.URL)
+	if parseErr != nil {
+		t.Fatalf("parse test server url: %v", parseErr)
+	}
 	reqGoodOrigin, err := http.NewRequest(http.MethodPost, unauthDiscardURL, nil)
 	if err != nil {
 		t.Fatalf("new request: %v", err)
@@ -491,10 +494,13 @@ func TestServerCSRFProtection(t *testing.T) {
 	}
 
 	// 5. Authenticated request with valid Authorization satisfies CSRF guard without X-Bugrouter-Request
-	d2, _ := adapter.BuildDraft(adapter.DraftInput{
+	d2, draftErr := adapter.BuildDraft(adapter.DraftInput{
 		Target: resolver.Target{CanonicalName: "auth-csrf-svc"},
 		Title:  "Auth CSRF Test",
 	})
+	if draftErr != nil {
+		t.Fatalf("build draft d2: %v", draftErr)
+	}
 	if _, err := store.Save(d2); err != nil {
 		t.Fatalf("Save d2: %v", err)
 	}
@@ -1067,7 +1073,10 @@ func TestServerServicesCatalogEndpoints(t *testing.T) {
 	defer respPost.Body.Close()
 
 	if respPost.StatusCode != http.StatusOK {
-		respBytes, _ := io.ReadAll(respPost.Body)
+		respBytes, readErr := io.ReadAll(respPost.Body)
+		if readErr != nil {
+			t.Logf("read error: %v", readErr)
+		}
 		t.Fatalf("expected 200 OK, got %d: %s", respPost.StatusCode, string(respBytes))
 	}
 
@@ -1265,7 +1274,10 @@ func TestServerPatchEndpoints(t *testing.T) {
 	}
 	defer respValid.Body.Close()
 	if respValid.StatusCode != http.StatusCreated {
-		respBytes, _ := io.ReadAll(respValid.Body)
+		respBytes, readErr := io.ReadAll(respValid.Body)
+		if readErr != nil {
+			t.Logf("read error: %v", readErr)
+		}
 		t.Fatalf("expected 201 Created, got %d: %s", respValid.StatusCode, string(respBytes))
 	}
 
