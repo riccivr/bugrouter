@@ -1,7 +1,7 @@
 # ARCHITECTURE_STATE.md — bugrouter System Architecture & Handoff
 
 Current CalVer: **2026.10.0**  
-Status: **Milestones 1–8 Completed** (Core Resolver, Upstream Introspector, Cloud Control Plane, Native MCP Handoff, Stack Radar & Reproduction Verifier, Native OS Crash Reader, Maintainer Empathy & Opt-Out Guard, and Upstream Patch Status Checker)
+Status: **Milestones 1–9 Completed** (Core Resolver, Upstream Introspector, Cloud Control Plane, Native MCP Handoff, Stack Radar & Reproduction Verifier, Native OS Crash Reader, Maintainer Empathy & Opt-Out Guard, Upstream Patch Status Checker, and GitHub Actions Matrix & Release Automation)
 
 ---
 
@@ -125,3 +125,9 @@ TemplateSchema (with Policy)               PotentialDuplicates
 - Wired issue template introspection into Cloud server `handleCreateDraft` so drafts staged in Web UI trigger `companion_only` status for AI opt-out targets.
 - Added `.status-companion` styling, disabled `Approve` button for `companion_only` drafts, and rendered prominent Maintainer Empathy banner with checklist rules and manual submission link in review modal.
 - Added `check_dependency_patches` as the 15th MCP tool in `internal/mcp/server.go`, completing the full 15 MCP tools suite.
+
+### Milestone 9: GitHub Actions Matrix, CI/CD Pipeline & Automated CalVer Release [COMPLETED]
+- Multi-OS Strategy Matrix (`.github/workflows/ci.yml`) across Ubuntu, macOS, and Windows with Go 1.22.x, supply-chain zero-dependency validation, code formatting gate, `go vet`, `go test -race -v`, and static binary compilation.
+- Reproducible CalVer Release Automation (`.github/workflows/release.yml`) cross-compiling static binaries for Linux (amd64/arm64), macOS (amd64/arm64), and Windows (amd64) with `SHA256SUMS` and automated GitHub Release publishing.
+- Turnkey Composite GitHub Action (`action.yml`) in repository root enabling CI runners to execute `patch-check` (with `fail-on-revertable: true`) and `triage` modes, rendering rich step summaries in `$GITHUB_STEP_SUMMARY`.
+- `Makefile` release dry-run (`make release-dry-run`) compiling all 5 platform targets and generating `SHA256SUMS`.

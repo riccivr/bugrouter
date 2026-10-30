@@ -1,0 +1,234 @@
+name: 'bugrouter CI Action'
+description: 'Automate upstream patch status checks (revertable fork alerting) and crash log triage in CI pipelines'
+author: 'riccivr'
+
+inputs:
+  mode:
+    description: "Execution mode: 'patch-check' to audit tracked patches or 'triage' for crash log triage"
+    required: false
+    default: 'patch-check'
+  fail-on-revertable:
+    description: "In patch-check mode, fail the action if any tracked patch can be reverted"
+    required: false
+    default: 'true'
+  patches-file:
+    description: "Optional path to patches.json (sets BUGROUTER_PATCHES_FILE)"
+    required: false
+    default: ''
+  log-file:
+    description: "Path to crash log file for triage mode"
+    required: false
+    default: ''
+  query:
+    description: "Optional target query override for triage mode"
+    required: false
+    default: ''
+
+outputs:
+  result-json:
+    description: "JSON output from bugrouter patch check or bugrouter agent triage"
+    value: ${{ steps.run-bugrouter.outputs.result-json }}
+  revertable-count:
+    description: "Number of tracked dependency patches ready to revert"
+    value: ${{ steps.run-bugrouter.outputs.revertable-count }}
+
+runs:
+  using: "composite"
+  steps:
+    - id: run-bugrouter
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        # 1. Locate or compile bugrouter executable
+        if command -v bugrouter >/dev/null 2>&1; then
+          BUGROUTER_BIN="bugrouter"
+          echo "Using pre-installed bugrouter executable: $(command -v bugrouter)"
+        else
+          echo "Compiling bugrouter from source (${{ github.action_path }})..."
+          BUILD_DIR="${RUNNER_TEMP:-/tmp}/bugrouter-bin"
+          mkdir -p "$BUILD_DIR"
+          CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o "$BUILD_DIR/bugrouter" "${{ github.action_path }}/cmd/bugrouter"
+          BUGROUTER_BIN="$BUILD_DIR/bugrouter"
+          echo "Compiled bugrouter to $BUGROUTER_BIN"
+        fi
+
+        # 2. Configure environment overrides
+        if [ -n "${{ inputs.patches-file }}" ]; then
+          export BUGROUTER_PATCHES_FILE="${{ inputs.patches-file }}"
+          echo "BUGROUTER_PATCHES_FILE set to ${{ inputs.patches-file }}"
+        fi
+
+        MODE="${{ inputs.mode }}"
+        FAIL_ON_REVERTABLE="${{ inputs.fail-on-revertable }}"
+        REVERTABLE_COUNT=0
+
+        # Locate python interpreter for summary formatting
+        PYTHON_BIN=""
+        if command -v python3 >/dev/null 2>&1; then
+          PYTHON_BIN="python3"
+        elif command -v python >/dev/null 2>&1; then
+          PYTHON_BIN="python"
+        fi
+
+        if [ "$MODE" = "patch-check" ]; then
+          echo "Executing: $BUGROUTER_BIN patch check --json"
+          RESULT_JSON=$("$BUGROUTER_BIN" patch check --json)
+
+          if [ -n "$PYTHON_BIN" ]; then
+            PARSED=$("$PYTHON_BIN" -c '
+        import json, os, sys
+
+        try:
+            results = json.loads(sys.stdin.read() or "[]")
+        except Exception:
+            results = []
+
+        revertable = [r for r in results if r.get("can_revert")]
+        revertable_count = len(revertable)
+        print(f"COUNT={revertable_count}")
+
+        summary_lines = []
+        if not results:
+            summary_lines.append("### 🛡️ bugrouter Upstream Patch Audit\n\nNo active temporary dependency patches tracked in ledger.")
+        elif revertable_count > 0:
+            summary_lines.append(f"### ⚠️ bugrouter Upstream Patch Audit: {revertable_count} Revertable Fork(s) Detected\n")
+            summary_lines.append("The following tracked dependencies have resolved upstream issues and can be safely reverted:\n")
+            summary_lines.append("| Dependency | State | Target | Upstream Issue |")
+            summary_lines.append("| :--- | :--- | :--- | :--- |")
+            for r in revertable:
+                p = r.get("patch", {})
+                dep = p.get("dependency", "-")
+                target = p.get("patch_target", "-")
+                state = r.get("upstream_state", "-")
+                url = p.get("upstream_issue_url", "-")
+                summary_lines.append(f"| `{dep}` | **{state}** | `{target}` | {url} |")
+            summary_lines.append("\n<details><summary>All Tracked Patches</summary>\n")
+            summary_lines.append("| Dependency | State | Status | Upstream Issue |")
+            summary_lines.append("| :--- | :--- | :--- | :--- |")
+            for r in results:
+                p = r.get("patch", {})
+                dep = p.get("dependency", "-")
+                state = r.get("upstream_state", "-")
+                status = "✅ Ready to Revert" if r.get("can_revert") else "Active Fork"
+                url = p.get("upstream_issue_url", "-")
+                summary_lines.append(f"| `{dep}` | {state} | {status} | {url} |")
+            summary_lines.append("\n</details>")
+        else:
+            summary_lines.append("### ✅ bugrouter Upstream Patch Audit: All Clear\n")
+            summary_lines.append("All tracked dependency patches remain active upstream. No temporary forks are ready for revert.\n")
+            summary_lines.append("| Dependency | State | Target | Upstream Issue |")
+            summary_lines.append("| :--- | :--- | :--- | :--- |")
+            for r in results:
+                p = r.get("patch", {})
+                dep = p.get("dependency", "-")
+                state = r.get("upstream_state", "-")
+                url = p.get("upstream_issue_url", "-")
+                summary_lines.append(f"| `{dep}` | {state} | `{p.get(\"patch_target\", \"-\")}` | {url} |")
+
+        summary_file = os.environ.get("GITHUB_STEP_SUMMARY")
+        if summary_file:
+            with open(summary_file, "a", encoding="utf-8") as f:
+                f.write("\n".join(summary_lines) + "\n")
+        ' <<< "$RESULT_JSON")
+            COUNT_VAL=$(echo "$PARSED" | grep '^COUNT=' | cut -d= -f2 || echo "0")
+            if [ -n "$COUNT_VAL" ]; then
+              REVERTABLE_COUNT="$COUNT_VAL"
+            fi
+          else
+            # Fallback counting if python is absent
+            REVERTABLE_COUNT=$(grep -o '"can_revert":[[:space:]]*true' <<< "$RESULT_JSON" | wc -l || echo "0")
+            if [ -n "$GITHUB_STEP_SUMMARY" ]; then
+              echo "### 🛡️ bugrouter Upstream Patch Audit" >> "$GITHUB_STEP_SUMMARY"
+              echo "Revertable forks detected: $REVERTABLE_COUNT" >> "$GITHUB_STEP_SUMMARY"
+            fi
+          fi
+
+        elif [ "$MODE" = "triage" ]; then
+          echo "Executing bugrouter agent triage..."
+          TRIAGE_ARGS=("agent" "triage")
+          if [ -n "${{ inputs.log-file }}" ]; then
+            TRIAGE_ARGS+=("--log-file" "${{ inputs.log-file }}")
+          fi
+          if [ -n "${{ inputs.query }}" ]; then
+            TRIAGE_ARGS+=("--query" "${{ inputs.query }}")
+          fi
+
+          RESULT_JSON=$("$BUGROUTER_BIN" "${TRIAGE_ARGS[@]}")
+
+          if [ -n "$PYTHON_BIN" ]; then
+            "$PYTHON_BIN" -c '
+        import json, os, sys
+
+        try:
+            res = json.loads(sys.stdin.read() or "{}")
+        except Exception:
+            res = {}
+
+        summary_lines = ["### 🔍 bugrouter Crash Log Triage Summary\n"]
+        target = res.get("resolved_target")
+        if target:
+            cname = target.get("canonical_name", "-")
+            tracker = target.get("tracker", {})
+            turl = tracker.get("url", "-")
+            proto = tracker.get("protocol", "-")
+            summary_lines.append(f"**Resolved Upstream Target:** `{cname}` ({turl} [{proto}])\n")
+        else:
+            summary_lines.append("**Resolved Upstream Target:** _None automatically resolved_\n")
+
+        candidates = res.get("candidates") or []
+        if candidates:
+            summary_lines.append("#### Extracted Trace Candidates\n")
+            summary_lines.append("| Source | Query | Evidence |")
+            summary_lines.append("| :--- | :--- | :--- |")
+            for c in candidates:
+                src = c.get("source", "-")
+                q = c.get("query", "-")
+                ev = c.get("evidence", "-")
+                summary_lines.append(f"| `{src}` | `{q}` | `{ev}` |")
+            summary_lines.append("")
+
+        duplicates = res.get("potential_duplicates") or []
+        if duplicates:
+            summary_lines.append(f"#### Potential Upstream Duplicates ({len(duplicates)} found)\n")
+            for d in duplicates:
+                st = d.get("state", "-")
+                score = int(d.get("score", 0) * 100)
+                title = d.get("title", "-")
+                url = d.get("url", "#")
+                summary_lines.append(f"- [{st}] ({score}% match) [{title}]({url})")
+            summary_lines.append("")
+
+        next_actions = res.get("next_actions") or []
+        if next_actions:
+            summary_lines.append("#### Recommended Next Actions\n")
+            for a in next_actions:
+                summary_lines.append(f"- {a}")
+            summary_lines.append("")
+
+        summary_file = os.environ.get("GITHUB_STEP_SUMMARY")
+        if summary_file:
+            with open(summary_file, "a", encoding="utf-8") as f:
+                f.write("\n".join(summary_lines) + "\n")
+        ' <<< "$RESULT_JSON"
+          fi
+        else
+          echo "::error::Unknown mode: $MODE. Supported modes are 'patch-check' and 'triage'."
+          exit 1
+        fi
+
+        # 3. Export GitHub Action step outputs
+        if [ -n "${GITHUB_OUTPUT:-}" ]; then
+          {
+            echo "result-json<<EOF"
+            echo "$RESULT_JSON"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+          echo "revertable-count=$REVERTABLE_COUNT" >> "$GITHUB_OUTPUT"
+        fi
+
+        # 4. Enforce fail-on-revertable gate
+        if [ "$MODE" = "patch-check" ] && [ "$FAIL_ON_REVERTABLE" = "true" ] && [ "$REVERTABLE_COUNT" -gt 0 ]; then
+          echo "::error::Failing CI pipeline: $REVERTABLE_COUNT temporary dependency fork(s) are closed upstream and ready to be reverted!"
+          exit 1
+        fi

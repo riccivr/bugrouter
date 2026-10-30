@@ -105,11 +105,14 @@ All milestones below are fully implemented, verified with race-detector tests, a
 - [x] **Full 15 MCP Tools Integration (`internal/mcp/server.go`)**:
   - Added `check_dependency_patches` as the 15th MCP tool.
   - Verified exact tool count of 15 tools with comprehensive test suite.
+- [x] **Milestone 9: GitHub Actions Matrix, CI/CD Pipeline & Automated CalVer Release [COMPLETED]**:
+  - **Multi-OS CI Matrix (`.github/workflows/ci.yml`)**: Strategy matrix across `ubuntu-latest`, `macos-latest`, `windows-latest` with `go-version: ['1.22.x']`, enforcing supply-chain zero external dependency validation, code formatting on Linux/macOS, `go vet`, `go test -race -v`, and static binary compilation.
+  - **Reproducible CalVer Release Automation (`.github/workflows/release.yml`)**: Cross-compilation pipeline triggered on CalVer tags (`20[0-9][0-9].[0-1][0-9].*`) producing stripped static binaries (`CGO_ENABLED=0`, `-trimpath`, `-ldflags="-s -w"`) for `linux/amd64`, `linux/arm64`, `darwin/amd64`, `darwin/arm64`, and `windows/amd64`, generating `SHA256SUMS`, and publishing releases via `softprops/action-gh-release@v2`.
+  - **Turnkey Composite GitHub Action (`action.yml`)**: Root composite action enabling any repository to audit tracked dependency patches (`mode: patch-check`, with `fail-on-revertable: true`) or triage crash logs (`mode: triage`), generating rich Markdown summaries in `$GITHUB_STEP_SUMMARY`.
+  - **Makefile Release Dry-Run (`Makefile`)**: Added `make release-dry-run` to cross-compile all 5 platform binaries to `dist/` with `SHA256SUMS` and updated `clean` to purge `bin/ dist/`.
 
 ---
 
 ## 3. Future & Planned Milestones
 
-### Milestone 9: GitHub Actions Matrix, CI/CD Pipeline & Automated CalVer Release [PLANNED]
-- **Release Automation**: Multi-platform release matrix (Linux `amd64`/`arm64`, macOS `amd64`/`arm64`, Windows `amd64`) producing standalone static binaries with SHA-256 checksums.
-- **GitHub Action (`action.yml`)**: Composite GitHub Action enabling CI runners to automatically check tracked dependency patches (`bugrouter patch check`) and fail PRs if temporary forks have been fixed upstream.
+*(All core milestones through Milestone 9 completed)*

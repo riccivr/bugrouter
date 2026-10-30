@@ -374,3 +374,81 @@ Internal private services and monorepo packages can be routed directly to intern
 - **Constant-Time Authentication**: Control plane Bearer tokens are pre-hashed with SHA-256 and compared using `crypto/subtle.ConstantTimeCompare` to eliminate timing side channels.
 - **CSRF Mutation Guard**: All state-modifying requests (`POST /api/v1/...`) enforce strict origin matching against the request `Host` header and require either an `Authorization: Bearer` header or `X-Bugrouter-Request: 1`.
 - **Audit Logging & Webhooks**: Append-only JSONL audit logs guarantee an immutable record of all draft triage actions. Webhook notifications are signed via HMAC-SHA256 (`X-Bugrouter-Signature`) and executed with bounded timeouts.
+
+---
+
+## 9. CI/CD & GitHub Actions Integration
+
+`bugrouter` provides a turnkey composite GitHub Action (`action.yml`) enabling automated upstream patch status auditing and crash log triage directly within GitHub Actions pipelines.
+
+### 9.1 Gating PRs on Upstream Patch Status (`mode: patch-check`)
+
+When teams maintain temporary forks or local patches (`patches.json`), this workflow continuously audits upstream issue states. If an upstream bug is closed or merged, the action alerts the team and optionally fails CI so temporary forks are prompt and safely reverted to canonical releases.
+
+```yaml
+name: Dependency Patch Audit
+
+on:
+  pull_request:
+  schedule:
+    - cron: '0 8 * * 1' # Run weekly every Monday
+
+jobs:
+  audit-patches:
+    name: Check Upstream Patch Status
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Audit dependency patches
+        uses: riccivr/bugrouter@2026.10.0
+        with:
+          mode: 'patch-check'
+          fail-on-revertable: 'true'
+          patches-file: 'patches.json'
+```
+
+### 9.2 Automated Crash Log Triage in CI (`mode: triage`)
+
+Capture panics, crash logs, or segfaults from test runners and automatically triage them to suspect upstream packages, query issue templates, and identify potential duplicates.
+
+```yaml
+name: Test & Autonomous Crash Triage
+
+on: [push, pull_request]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run test suite with crash capture
+        run: |
+          go test -v ./... > test-run.log 2>&1 || true
+
+      - name: Triage crash logs
+        uses: riccivr/bugrouter@2026.10.0
+        if: failure()
+        with:
+          mode: 'triage'
+          log-file: 'test-run.log'
+```
+
+### 9.3 Action Parameters
+
+| Input | Mode | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `mode` | Both | `patch-check` | Operational mode: `patch-check` (audit tracked forks) or `triage` (crash log attribution). |
+| `fail-on-revertable` | `patch-check` | `true` | Exit with non-zero status if any tracked patch can be reverted (upstream issue closed). |
+| `patches-file` | `patch-check` | `""` | Optional path to `patches.json` (sets `BUGROUTER_PATCHES_FILE`). |
+| `log-file` | `triage` | `""` | Path to raw crash log or test failure output file. |
+| `query` | `triage` | `""` | Optional target package or binary query override. |
+
+| Output | Description |
+| :--- | :--- |
+| `result-json` | Machine-parseable JSON array of patch statuses or `AgentTriageResult` envelope. |
+| `revertable-count` | Number of tracked patches that have been resolved upstream and are ready to revert. |
+
