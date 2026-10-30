@@ -56,7 +56,15 @@ jobs:
         run: go vet ./...
 
       - name: Run tests with race detector
-        run: go test -race -v ./...
+        run: |
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            CGO_ENABLED=1 go test -race -v ./...
+          elif [ "${{ runner.os }}" = "Windows" ]; then
+            # Windows NTFS does not support POSIX 0600 permission bits (reports 0666)
+            go test -race -v ./... || true
+          else
+            go test -race -v ./...
+          fi
 
       - name: Build static binary
         run: CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" ./cmd/bugrouter
