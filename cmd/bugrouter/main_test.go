@@ -1431,3 +1431,86 @@ func TestPatchCheckSummaryMDAndFailOnRevertable(t *testing.T) {
 		t.Fatalf("expected exit code 2 with --json --fail-on-revertable, got %d", code)
 	}
 }
+
+func TestPatchScanCLI(t *testing.T) {
+	tempDir := t.TempDir()
+	patchFile := filepath.Join(tempDir, "patches.json")
+	store := adapter.NewPatchStore(patchFile)
+
+	workspaceDir := filepath.Join(tempDir, "workspace")
+	if err := os.MkdirAll(workspaceDir, 0755); err != nil {
+		t.Fatalf("mkdir workspace: %v", err)
+	}
+	goModContent := `module example.com/testapp
+
+go 1.22
+
+require github.com/gin-gonic/gin v1.9.1
+
+replace github.com/gin-gonic/gin => github.com/myfork/gin v1.9.2
+`
+	if err := os.WriteFile(filepath.Join(workspaceDir, "go.mod"), []byte(goModContent), 0644); err != nil {
+		t.Fatalf("write go.mod: %v", err)
+	}
+
+	// 1. Initial scan with text output
+	var out, errOut bytes.Buffer
+	code := runPatchScan(store, &out, &errOut, []string{"--dir", workspaceDir})
+	if code != 0 {
+		t.Fatalf("runPatchScan failed with code %d: %s", code, errOut.String())
+	}
+	outStr := out.String()
+	if !strings.Contains(outStr, "github.com/gin-gonic/gin") || !strings.Contains(outStr, "github.com/myfork/gin v1.9.2") {
+		t.Errorf("expected table output with patched dependency, got: %s", outStr)
+	}
+
+	// Verify patch stored in ledger
+	patches, err := store.List()
+	if err != nil {
+		t.Fatalf("list patches: %v", err)
+	}
+	if len(patches) != 1 {
+		t.Fatalf("expected 1 patch recorded, got %d", len(patches))
+	}
+	if patches[0].Dependency != "github.com/gin-gonic/gin" {
+		t.Errorf("Dependency = %q, want github.com/gin-gonic/gin", patches[0].Dependency)
+	}
+
+	// 2. Second scan should report 0 new patches
+	out.Reset()
+	errOut.Reset()
+	code = runPatchScan(store, &out, &errOut, []string{"--dir", workspaceDir})
+	if code != 0 {
+		t.Fatalf("runPatchScan second run failed with code %d: %s", code, errOut.String())
+	}
+	if !strings.Contains(out.String(), "No new dependency patches discovered in workspace.") {
+		t.Errorf("expected 'No new dependency patches discovered', got: %s", out.String())
+	}
+
+	// 3. Scan with --json output for another manifest
+	pkgJsonContent := `{
+  "dependencies": {
+    "lodash": "patch:lodash@4.17.21#./patches/lodash.patch"
+  }
+}`
+	if err := os.WriteFile(filepath.Join(workspaceDir, "package.json"), []byte(pkgJsonContent), 0644); err != nil {
+		t.Fatalf("write package.json: %v", err)
+	}
+
+	out.Reset()
+	errOut.Reset()
+	code = runPatchScan(store, &out, &errOut, []string{"--dir", workspaceDir, "--json"})
+	if code != 0 {
+		t.Fatalf("runPatchScan json failed with code %d: %s", code, errOut.String())
+	}
+	var jsonAdded []adapter.DependencyPatch
+	if err := json.Unmarshal(out.Bytes(), &jsonAdded); err != nil {
+		t.Fatalf("unmarshal json output: %v", err)
+	}
+	if len(jsonAdded) != 1 {
+		t.Fatalf("expected 1 new patch from package.json, got %d", len(jsonAdded))
+	}
+	if jsonAdded[0].Dependency != "lodash" {
+		t.Errorf("Dependency = %q, want lodash", jsonAdded[0].Dependency)
+	}
+}

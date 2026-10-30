@@ -1877,3 +1877,100 @@ func TestServerDraftFromParkedLifecycle(t *testing.T) {
 		t.Errorf("expected status 'triaged', got %q", allList[0].Status)
 	}
 }
+
+func TestServerScanPatchesEndpoint(t *testing.T) {
+	tempDir := t.TempDir()
+	draftStore := adapter.NewDraftStore(filepath.Join(tempDir, "drafts"))
+	patchFile := filepath.Join(tempDir, "patches.json")
+	patchStore := adapter.NewPatchStore(patchFile)
+	auditLogPath := filepath.Join(tempDir, "audit.jsonl")
+	auditLogger := NewAuditLogger(auditLogPath)
+
+	stackDir := filepath.Join(tempDir, "workspace")
+	if err := os.MkdirAll(stackDir, 0755); err != nil {
+		t.Fatalf("mkdir workspace: %v", err)
+	}
+	goModContent := `module example.com/testcloud
+
+go 1.22
+
+require github.com/gin-gonic/gin v1.9.1
+
+replace github.com/gin-gonic/gin => github.com/myfork/gin v1.9.2
+`
+	if err := os.WriteFile(filepath.Join(stackDir, "go.mod"), []byte(goModContent), 0644); err != nil {
+		t.Fatalf("write go.mod: %v", err)
+	}
+
+	srv := NewServer(":0", draftStore, nil).
+		WithPatchStore(patchStore).
+		WithAuditLogger(auditLogger).
+		WithStackScanner(nil, nil, stackDir)
+
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	// 1. POST /api/v1/patches/scan discovers go.mod replace directive
+	req, err := http.NewRequest(http.MethodPost, ts.URL+"/api/v1/patches/scan", nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("X-Bugrouter-Request", "1")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST /api/v1/patches/scan failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 200 OK, got %d: %s", resp.StatusCode, string(body))
+	}
+
+	var scanResult struct {
+		AddedCount int                       `json:"added_count"`
+		Added      []adapter.DependencyPatch `json:"added"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&scanResult); err != nil {
+		t.Fatalf("decode scan result: %v", err)
+	}
+
+	if scanResult.AddedCount != 1 || len(scanResult.Added) != 1 {
+		t.Fatalf("expected 1 added patch, got count=%d len=%d", scanResult.AddedCount, len(scanResult.Added))
+	}
+	if scanResult.Added[0].Dependency != "github.com/gin-gonic/gin" {
+		t.Errorf("Dependency = %q, want github.com/gin-gonic/gin", scanResult.Added[0].Dependency)
+	}
+	if scanResult.Added[0].PatchTarget != "github.com/myfork/gin v1.9.2" {
+		t.Errorf("PatchTarget = %q, want github.com/myfork/gin v1.9.2", scanResult.Added[0].PatchTarget)
+	}
+
+	// 2. Verify persisted in patchStore
+	persisted, err := patchStore.List()
+	if err != nil {
+		t.Fatalf("list persisted patches: %v", err)
+	}
+	if len(persisted) != 1 {
+		t.Fatalf("expected 1 patch in store, got %d", len(persisted))
+	}
+	if persisted[0].Dependency != "github.com/gin-gonic/gin" {
+		t.Errorf("persisted Dependency = %q, want github.com/gin-gonic/gin", persisted[0].Dependency)
+	}
+
+	// 3. Verify audit event was logged
+	events, err := auditLogger.ListRecent(10)
+	if err != nil {
+		t.Fatalf("list audit events: %v", err)
+	}
+	var foundAudit bool
+	for _, ev := range events {
+		if ev.Action == "patch.scanned" && ev.Target == stackDir {
+			foundAudit = true
+			break
+		}
+	}
+	if !foundAudit {
+		t.Errorf("expected audit event patch.scanned for target %q, got: %+v", stackDir, events)
+	}
+}

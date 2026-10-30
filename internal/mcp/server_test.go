@@ -131,17 +131,23 @@ body:
 	}
 	res3 := resp3.Result.(map[string]any)
 	tools := res3["tools"].([]any)
-	if len(tools) != 15 {
-		t.Errorf("expected 15 tools, got %d", len(tools))
+	if len(tools) != 17 {
+		t.Errorf("expected 17 tools, got %d", len(tools))
 	}
 	if len(tools) > 0 && tools[0].(map[string]any)["name"] != "park_bug" {
 		t.Errorf("expected first tool to be park_bug, got %v", tools[0].(map[string]any)["name"])
 	}
-	if len(tools) > 1 && tools[1].(map[string]any)["name"] != "record_dependency_patch" {
-		t.Errorf("expected second tool to be record_dependency_patch, got %v", tools[1].(map[string]any)["name"])
+	if len(tools) > 1 && tools[1].(map[string]any)["name"] != "list_parked_bugs" {
+		t.Errorf("expected second tool to be list_parked_bugs, got %v", tools[1].(map[string]any)["name"])
 	}
-	if len(tools) > 2 && tools[2].(map[string]any)["name"] != "check_dependency_patches" {
-		t.Errorf("expected third tool to be check_dependency_patches, got %v", tools[2].(map[string]any)["name"])
+	if len(tools) > 2 && tools[2].(map[string]any)["name"] != "record_dependency_patch" {
+		t.Errorf("expected third tool to be record_dependency_patch, got %v", tools[2].(map[string]any)["name"])
+	}
+	if len(tools) > 3 && tools[3].(map[string]any)["name"] != "check_dependency_patches" {
+		t.Errorf("expected fourth tool to be check_dependency_patches, got %v", tools[3].(map[string]any)["name"])
+	}
+	if len(tools) > 4 && tools[4].(map[string]any)["name"] != "scan_workspace_patches" {
+		t.Errorf("expected fifth tool to be scan_workspace_patches, got %v", tools[4].(map[string]any)["name"])
 	}
 
 	// Response 4: tools/call scrub_text
@@ -980,5 +986,325 @@ func TestCheckDependencyPatchesTool(t *testing.T) {
 	}
 	if results[0].UpstreamState != "closed" || !results[0].CanRevert {
 		t.Errorf("expected UpstreamState='closed' and CanRevert=true, got %+v", results[0])
+	}
+}
+
+func TestMCPDraftFromParkedAndListParkedBugs(t *testing.T) {
+	tempDir := t.TempDir()
+	draftStore := adapter.NewDraftStore(filepath.Join(tempDir, "drafts"))
+	parkedStore := adapter.NewParkedStore(filepath.Join(tempDir, "parked"))
+	wf := resolver.NewWaterfall(time.Second, resolver.NewDirectProbe())
+	server := NewServer(wf, draftStore).WithParkedStore(parkedStore)
+
+	// 1. Calling park_bug creates a parked bug
+	var in1, out1 bytes.Buffer
+	parkReq := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"park_bug","arguments":{"dependency":"https://github.com/expressjs/express","title":"Router crash on undefined param","error_snippet":"TypeError: Cannot read properties of undefined","workaround_note":"Bypass router middleware","workspace_file":"src/app.js:55","related_dependency":"body-parser"}}}` + "\n"
+	in1.WriteString(parkReq)
+
+	if err := server.Run(context.Background(), &in1, &out1); err != nil {
+		t.Fatalf("park_bug server.Run failed: %v", err)
+	}
+
+	lines1 := strings.Split(strings.TrimSpace(out1.String()), "\n")
+	if len(lines1) < 2 {
+		t.Fatalf("expected at least 2 lines (notification + response), got %d: %v", len(lines1), lines1)
+	}
+	var respPark jsonrpcResponse
+	if err := json.Unmarshal([]byte(lines1[len(lines1)-1]), &respPark); err != nil {
+		t.Fatalf("unmarshal park_bug response: %v", err)
+	}
+	resPark, ok := respPark.Result.(map[string]any)
+	if !ok || resPark["isError"] == true {
+		t.Fatalf("park_bug failed: %+v", respPark)
+	}
+	var parkPayload struct {
+		ParkedBug adapter.ParkedBug `json:"parked_bug"`
+	}
+	parkText := resPark["content"].([]any)[0].(map[string]any)["text"].(string)
+	if err := json.Unmarshal([]byte(parkText), &parkPayload); err != nil {
+		t.Fatalf("unmarshal park payload: %v", err)
+	}
+	parkedID := parkPayload.ParkedBug.ID
+	if parkedID == "" {
+		t.Fatal("expected non-empty parked bug id")
+	}
+	if parkPayload.ParkedBug.Status != "parked" {
+		t.Fatalf("expected status 'parked', got %q", parkPayload.ParkedBug.Status)
+	}
+
+	// 2. Calling list_parked_bugs returns 1 active parked bug
+	var in2, out2 bytes.Buffer
+	listReq := `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"list_parked_bugs","arguments":{}}}` + "\n"
+	in2.WriteString(listReq)
+	if err := server.Run(context.Background(), &in2, &out2); err != nil {
+		t.Fatalf("list_parked_bugs server.Run failed: %v", err)
+	}
+	var respList jsonrpcResponse
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out2.String())), &respList); err != nil {
+		t.Fatalf("unmarshal list response: %v", err)
+	}
+	resList := respList.Result.(map[string]any)
+	if resList["isError"] == true {
+		t.Fatalf("list_parked_bugs failed: %+v", resList)
+	}
+	listText := resList["content"].([]any)[0].(map[string]any)["text"].(string)
+	var activeBugs []*adapter.ParkedBug
+	if err := json.Unmarshal([]byte(listText), &activeBugs); err != nil {
+		t.Fatalf("unmarshal active bugs: %v", err)
+	}
+	if len(activeBugs) != 1 {
+		t.Fatalf("expected 1 active parked bug, got %d", len(activeBugs))
+	}
+	if activeBugs[0].ID != parkedID {
+		t.Errorf("expected bug ID %s, got %s", parkedID, activeBugs[0].ID)
+	}
+
+	// 3. Calling draft_bug_report with from_parked_id hydrates draft, stages it, transitions parked bug to "triaged"
+	var in3, out3 bytes.Buffer
+	draftReq := fmt.Sprintf(`{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"draft_bug_report","arguments":{"from_parked_id":%q}}}`+"\n", parkedID)
+	in3.WriteString(draftReq)
+	if err := server.Run(context.Background(), &in3, &out3); err != nil {
+		t.Fatalf("draft_bug_report server.Run failed: %v", err)
+	}
+	lines3 := strings.Split(strings.TrimSpace(out3.String()), "\n")
+	if len(lines3) < 2 {
+		t.Fatalf("expected at least 2 lines (notification + response), got %d: %v", len(lines3), lines3)
+	}
+	var notif3 map[string]any
+	if err := json.Unmarshal([]byte(lines3[0]), &notif3); err != nil {
+		t.Fatalf("unmarshal notification: %v", err)
+	}
+	if notif3["method"] != "notifications/resources/list_changed" {
+		t.Errorf("expected notifications/resources/list_changed, got: %v", notif3["method"])
+	}
+	var respDraft jsonrpcResponse
+	if err := json.Unmarshal([]byte(lines3[1]), &respDraft); err != nil {
+		t.Fatalf("unmarshal draft response: %v", err)
+	}
+	resDraft := respDraft.Result.(map[string]any)
+	if resDraft["isError"] == true {
+		t.Fatalf("draft_bug_report failed: %+v", resDraft)
+	}
+	draftText := resDraft["content"].([]any)[0].(map[string]any)["text"].(string)
+	var staged adapter.StagedDraft
+	if err := json.Unmarshal([]byte(draftText), &staged); err != nil {
+		t.Fatalf("unmarshal staged draft: %v", err)
+	}
+	if string(staged.Title) != "Router crash on undefined param" {
+		t.Errorf("Title = %q, want 'Router crash on undefined param'", string(staged.Title))
+	}
+	body := string(staged.MarkdownBody)
+	if !strings.Contains(body, "Discovered anomaly in https://github.com/expressjs/express") || !strings.Contains(body, "Bypass router middleware") {
+		t.Errorf("MarkdownBody = %q, missing expected hydrated summary text", body)
+	}
+	if !strings.Contains(body, "Observed in src/app.js:55") {
+		t.Errorf("MarkdownBody = %q, want steps 'Observed in src/app.js:55'", body)
+	}
+	if !strings.Contains(body, "TypeError: Cannot read properties of undefined") {
+		t.Errorf("MarkdownBody = %q, want logs 'TypeError: Cannot read properties of undefined'", body)
+	}
+	if staged.RelatedDependency != "body-parser" {
+		t.Errorf("RelatedDependency = %q, want 'body-parser'", staged.RelatedDependency)
+	}
+
+	updatedParked, err := parkedStore.Get(parkedID)
+	if err != nil {
+		t.Fatalf("get parked bug from store: %v", err)
+	}
+	if updatedParked.Status != "triaged" {
+		t.Errorf("parked bug status = %q, want 'triaged'", updatedParked.Status)
+	}
+
+	// 4. Calling list_parked_bugs (with include_triaged: false) returns 0 active parked bugs
+	var in4, out4 bytes.Buffer
+	listReqFalse := `{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"list_parked_bugs","arguments":{"include_triaged":false}}}` + "\n"
+	in4.WriteString(listReqFalse)
+	if err := server.Run(context.Background(), &in4, &out4); err != nil {
+		t.Fatalf("list_parked_bugs false server.Run failed: %v", err)
+	}
+	var respListFalse jsonrpcResponse
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out4.String())), &respListFalse); err != nil {
+		t.Fatalf("unmarshal list false response: %v", err)
+	}
+	resListFalse := respListFalse.Result.(map[string]any)
+	if resListFalse["isError"] == true {
+		t.Fatalf("list_parked_bugs false failed: %+v", resListFalse)
+	}
+	listFalseText := resListFalse["content"].([]any)[0].(map[string]any)["text"].(string)
+	var falseBugs []*adapter.ParkedBug
+	if err := json.Unmarshal([]byte(listFalseText), &falseBugs); err != nil {
+		t.Fatalf("unmarshal falseBugs: %v", err)
+	}
+	if len(falseBugs) != 0 {
+		t.Errorf("expected 0 active parked bugs, got %d", len(falseBugs))
+	}
+
+	// Calling list_parked_bugs with include_triaged: true returns 1 triaged bug
+	var in5, out5 bytes.Buffer
+	listReqTrue := `{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"list_parked_bugs","arguments":{"include_triaged":true}}}` + "\n"
+	in5.WriteString(listReqTrue)
+	if err := server.Run(context.Background(), &in5, &out5); err != nil {
+		t.Fatalf("list_parked_bugs true server.Run failed: %v", err)
+	}
+	var respListTrue jsonrpcResponse
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out5.String())), &respListTrue); err != nil {
+		t.Fatalf("unmarshal list true response: %v", err)
+	}
+	resListTrue := respListTrue.Result.(map[string]any)
+	if resListTrue["isError"] == true {
+		t.Fatalf("list_parked_bugs true failed: %+v", resListTrue)
+	}
+	listTrueText := resListTrue["content"].([]any)[0].(map[string]any)["text"].(string)
+	var trueBugs []*adapter.ParkedBug
+	if err := json.Unmarshal([]byte(listTrueText), &trueBugs); err != nil {
+		t.Fatalf("unmarshal trueBugs: %v", err)
+	}
+	if len(trueBugs) != 1 {
+		t.Fatalf("expected 1 triaged bug, got %d", len(trueBugs))
+	}
+	if trueBugs[0].ID != parkedID || trueBugs[0].Status != "triaged" {
+		t.Errorf("expected triaged bug ID %s with status triaged, got ID %s status %s", parkedID, trueBugs[0].ID, trueBugs[0].Status)
+	}
+
+	// Verify dismiss_id parameter functionality
+	var in6, out6 bytes.Buffer
+	dismissReq := fmt.Sprintf(`{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"list_parked_bugs","arguments":{"dismiss_id":%q,"include_triaged":true}}}`+"\n", parkedID)
+	in6.WriteString(dismissReq)
+	if err := server.Run(context.Background(), &in6, &out6); err != nil {
+		t.Fatalf("dismiss list_parked_bugs server.Run failed: %v", err)
+	}
+	lines6 := strings.Split(strings.TrimSpace(out6.String()), "\n")
+	if len(lines6) < 2 {
+		t.Fatalf("expected at least 2 lines (notification + response) on dismiss, got %d: %v", len(lines6), lines6)
+	}
+	var notif6 map[string]any
+	if err := json.Unmarshal([]byte(lines6[0]), &notif6); err != nil {
+		t.Fatalf("unmarshal dismiss notification: %v", err)
+	}
+	if notif6["method"] != "notifications/resources/list_changed" {
+		t.Errorf("expected notifications/resources/list_changed on dismiss, got: %v", notif6["method"])
+	}
+	var respDismiss jsonrpcResponse
+	if err := json.Unmarshal([]byte(lines6[1]), &respDismiss); err != nil {
+		t.Fatalf("unmarshal dismiss response: %v", err)
+	}
+	resDismiss := respDismiss.Result.(map[string]any)
+	if resDismiss["isError"] == true {
+		t.Fatalf("dismiss failed: %+v", resDismiss)
+	}
+	dismissText := resDismiss["content"].([]any)[0].(map[string]any)["text"].(string)
+	var remainingBugs []*adapter.ParkedBug
+	if err := json.Unmarshal([]byte(dismissText), &remainingBugs); err != nil {
+		t.Fatalf("unmarshal remainingBugs: %v", err)
+	}
+	if len(remainingBugs) != 0 {
+		t.Errorf("expected 0 bugs after dismiss, got %d", len(remainingBugs))
+	}
+	if _, err := parkedStore.Get(parkedID); err == nil {
+		t.Errorf("expected parked bug %s to be deleted from store", parkedID)
+	}
+}
+
+func TestMCPDraftFromParkedNotFound(t *testing.T) {
+	tempDir := t.TempDir()
+	draftStore := adapter.NewDraftStore(tempDir)
+	parkedStore := adapter.NewParkedStore(tempDir)
+	wf := resolver.NewWaterfall(time.Second, resolver.NewDirectProbe())
+	server := NewServer(wf, draftStore).WithParkedStore(parkedStore)
+
+	var in, out bytes.Buffer
+	draftReq := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"draft_bug_report","arguments":{"from_parked_id":"deadbeef"}}}` + "\n"
+	in.WriteString(draftReq)
+	if err := server.Run(context.Background(), &in, &out); err != nil {
+		t.Fatalf("server.Run failed: %v", err)
+	}
+
+	var resp jsonrpcResponse
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out.String())), &resp); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	res := resp.Result.(map[string]any)
+	if res["isError"] != true {
+		t.Errorf("expected isError=true for non-existent from_parked_id, got false")
+	}
+}
+
+func TestMCPScanWorkspacePatches(t *testing.T) {
+	tempDir := t.TempDir()
+	patchFile := filepath.Join(tempDir, "patches.json")
+	patchStore := adapter.NewPatchStore(patchFile)
+
+	workspaceDir := filepath.Join(tempDir, "workspace")
+	if err := os.MkdirAll(workspaceDir, 0755); err != nil {
+		t.Fatalf("mkdir workspace: %v", err)
+	}
+	goModContent := `module example.com/mcpapp
+
+go 1.22
+
+require github.com/gin-gonic/gin v1.9.1
+
+replace github.com/gin-gonic/gin => github.com/myfork/gin v1.9.2
+`
+	if err := os.WriteFile(filepath.Join(workspaceDir, "go.mod"), []byte(goModContent), 0644); err != nil {
+		t.Fatalf("write go.mod: %v", err)
+	}
+
+	server := NewServer(nil, nil).WithPatchStore(patchStore)
+
+	var in, out bytes.Buffer
+	reqPayload := map[string]any{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"method":  "tools/call",
+		"params": map[string]any{
+			"name": "scan_workspace_patches",
+			"arguments": map[string]any{
+				"dir": workspaceDir,
+			},
+		},
+	}
+	reqBytes, err := json.Marshal(reqPayload)
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	in.Write(append(reqBytes, '\n'))
+
+	if err := server.Run(context.Background(), &in, &out); err != nil {
+		t.Fatalf("server.Run failed: %v", err)
+	}
+
+	var resp jsonrpcResponse
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out.String())), &resp); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	resMap, ok := resp.Result.(map[string]any)
+	if !ok {
+		t.Fatalf("expected map result, got %T: %+v", resp.Result, resp.Result)
+	}
+	if resMap["isError"] != false {
+		t.Fatalf("expected isError=false, got: %+v", resMap)
+	}
+
+	content := resMap["content"].([]any)
+	text := content[0].(map[string]any)["text"].(string)
+
+	var added []adapter.DependencyPatch
+	if err := json.Unmarshal([]byte(text), &added); err != nil {
+		t.Fatalf("unmarshal added patches: %v", err)
+	}
+	if len(added) != 1 {
+		t.Fatalf("expected 1 added patch, got %d", len(added))
+	}
+	if added[0].Dependency != "github.com/gin-gonic/gin" {
+		t.Errorf("Dependency = %q, want github.com/gin-gonic/gin", added[0].Dependency)
+	}
+
+	persisted, err := patchStore.List()
+	if err != nil {
+		t.Fatalf("list patches: %v", err)
+	}
+	if len(persisted) != 1 {
+		t.Fatalf("expected 1 patch in store, got %d", len(persisted))
 	}
 }

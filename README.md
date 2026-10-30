@@ -196,11 +196,15 @@ bugrouter park sharp "v0.33.0 fails with SIGSEGV on musl alpine" \
 bugrouter park stripe "Webhook signature verification panic on malformed payload" --json
 ```
 
-### `bugrouter patch <list|add|check|rm>`
+### `bugrouter patch <list|add|scan|check|rm>`
 Manages the tracked dependency patch ledger so temporary local forks and vendor patches stay visible and are promptly reverted when fixed upstream:
 ```bash
 # List all tracked dependency patches in ledger
 bugrouter patch list
+
+# Scan workspace manifests (go.mod, package.json, patches/, Cargo.toml, pyproject.toml) and sync new patches to ledger
+bugrouter patch scan
+bugrouter patch scan --dir ./subproject --json
 
 # Track a new local fork or patch
 bugrouter patch add \
@@ -279,19 +283,21 @@ Add `bugrouter` to your MCP client configuration (e.g., `claude_desktop_config.j
 - **Prompts**: Provides `triage_parked_bug` with argument `id`, supplying ready-to-execute prompt templates for spawned triage sessions.
 - **Notifications**: Emits `notifications/resources/list_changed` to the host client immediately before returning `park_bug` responses.
 
-### Complete 15 MCP Tools Reference
+### Complete 17 MCP Tools Reference
 
 | Tool Name | Parameters | Description |
 | :--- | :--- | :--- |
 | `park_bug` | `dependency` (string, req), `title` (string, req), `error_snippet` (string, opt), `workaround_note` (string, opt), `workspace_file` (string, opt), `related_dependency` (string, opt) | PREFERRED DURING CODING: Instantly parks a 3rd-party dependency bug in <5ms with zero network calls and returns a native session-handoff payload so you can alert the user to spawn a separate bug-reporting session without derailing your current task. Emits `notifications/resources/list_changed`. |
+| `list_parked_bugs` | `include_triaged` (bool, opt), `dismiss_id` (string, opt) | Lists parked breadcrumb bugs recorded during coding sessions, with options to dismiss/delete or inspect triaged bugs. |
 | `record_dependency_patch` | `dependency` (string, req), `patch_target` (string, req), `reason` (string, req), `ecosystem` (string, opt), `manifest_file` (string, opt), `upstream_issue_url` (string, opt) | Records a temporary local fork or patch for a 3rd-party dependency in the patch ledger so it stays visible to engineers and can be reverted when upstream fixes the issue. |
 | `check_dependency_patches` | *(none)* | Checks upstream issue/PR tracking status for all recorded temporary dependency patches across GitHub, GitLab, Gitea, and Bugzilla, highlighting issues ready to be reverted. |
+| `scan_workspace_patches` | `dir` (string, opt) | Scans workspace manifests (`go.mod`, `package.json`, `patches/`, `Cargo.toml`, `pyproject.toml`) for local forks and vendor patches and syncs them into the patch ledger. |
 | `read_system_crash_log` | `query` (string, opt), `title` (string, opt) | Reads the latest native OS post-mortem crash record (Linux coredumpctl/var-crash, Windows WER/Event 1000, macOS DiagnosticReports), extracts suspect binary and trace candidates, scrubs PII, and returns structured triage context. |
 | `resolve_target` | `query` (string, req) | Resolves a software artifact or dependency query to its canonical bug tracker via the 6-layer waterfall engine. |
 | `scrub_text` | `text` (string, req) | Deterministically scrubs secrets, tokens, connection strings, and PII home paths from text. |
 | `introspect_template` | `query` (string, req) | Discovers and parses upstream bug tracker issue templates or schemas for a target, detecting maintainer AI opt-out policies and checklist rules. |
 | `search_duplicates` | `query` (string, req), `title` (string, req) | Searches upstream issue tracker (GitHub, GitLab, Bugzilla, Gitea) for existing duplicate bug reports using token overlap scoring. |
-| `draft_bug_report` | `query` (string, req), `title` (string, req), `summary` (string, opt), `steps_to_reproduce` (string, opt), `logs` (string, opt), `strict_quality` (bool, opt), `verify_cmd` (string, opt), `include_telemetry` (bool, opt), `related_dependency` (string, opt) | Resolves target, scrubs credentials, introspects templates, checks duplicates, stages draft to disk, compiles cross-dependency evidence, enforces maintainer policies, and returns structured ticket. |
+| `draft_bug_report` | `from_parked_id` (string, opt), `query` (string, opt), `title` (string, opt), `summary` (string, opt), `steps_to_reproduce` (string, opt), `logs` (string, opt), `strict_quality` (bool, opt), `verify_cmd` (string, opt), `include_telemetry` (bool, opt), `related_dependency` (string, opt) | Resolves target, scrubs credentials, introspects templates, checks duplicates, stages draft to disk, compiles cross-dependency evidence, enforces maintainer policies, hydrates from parked bug breadcrumbs, and returns structured ticket. |
 | `list_staged_drafts` | `status` (string, opt) | Lists all staged bug drafts pending review or approval (`pending_review`, `companion_only`, `submitted`, `discarded`). |
 | `approve_draft` | `id` (string, req) | Approves and submits a staged draft to its upstream tracker via authenticated OAuth connectors (refuses automated submission if maintainer has opted out of AI/bot reports). |
 | `triage_crash_log` | `log` (string, req), `title` (string, opt), `query` (string, opt) | Analyzes raw crash logs or stack traces, deterministically attributes failures to upstream dependencies, introspects templates, checks duplicates, and returns structured agent triage envelopes. |
@@ -306,7 +312,7 @@ Add `bugrouter` to your MCP client configuration (e.g., `claude_desktop_config.j
 The embedded Cloud Control Plane (`bugrouter serve`) provides a single-pane-of-glass operations console:
 
 1. **Active Dependency Patches (Temporary Forks) Banner**:
-   Displays active local patches, manifests, fork branches, and upstream issue links. Features a **"Check Upstream Status"** button that queries upstream trackers and marks closed upstream bugs with a prominent green `Ready to Revert` badge.
+   Displays active local patches, manifests, fork branches, and upstream issue links. Features a **"Scan Workspace Manifests"** button (`POST /api/v1/patches/scan`) to discover and sync local replacements and patches across `go.mod`, `package.json`, `patches/`, `Cargo.toml`, and `pyproject.toml` into the ledger, and a **"Check Upstream Status"** button (`POST /api/v1/patches/check`) that queries upstream trackers and marks closed upstream bugs with a prominent green `Ready to Revert` badge.
 2. **WorkOS-Style Plug-and-Play Services Catalog**:
    One-click connection cards for common ecosystem dependencies (Stripe, Supabase, Auth0, Prisma, Next.js, Remix, Redis, Postgres, FFmpeg, Blender) plus a custom registration form backed by `services.json`.
 3. **Human-in-the-Loop Review Queue**:
@@ -453,4 +459,12 @@ jobs:
 | :--- | :--- |
 | `result-json` | Machine-parseable JSON array of patch statuses or `AgentTriageResult` envelope. |
 | `revertable-count` | Number of tracked patches that have been resolved upstream and are ready to revert. |
+
+---
+
+## 10. License
+
+`bugrouter` is licensed under the [MIT License](LICENSE).  
+Copyright (c) 2026 Ricardo Veronese Ricci.
+
 

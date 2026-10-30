@@ -212,6 +212,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("POST /api/v1/services", s.handleUpsertService)
 	s.mux.HandleFunc("DELETE /api/v1/services/{name}", s.handleDeleteService)
 	s.mux.HandleFunc("GET /api/v1/patches", s.handleListPatches)
+	s.mux.HandleFunc("POST /api/v1/patches/scan", s.handleScanPatches)
 	s.mux.HandleFunc("POST /api/v1/patches/check", s.handleCheckPatches)
 	s.mux.HandleFunc("POST /api/v1/patches", s.handleRecordPatch)
 	s.mux.HandleFunc("DELETE /api/v1/patches/{id}", s.handleDeletePatch)
@@ -558,6 +559,46 @@ func (s *Server) handleListPatches(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(patches); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+}
+
+func (s *Server) handleScanPatches(w http.ResponseWriter, r *http.Request) {
+	if s.patchStore == nil {
+		http.Error(w, "patch store not configured", http.StatusInternalServerError)
+		return
+	}
+	added, err := s.patchStore.SyncWorkspace(s.stackDir)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("scan workspace patches: %v", err), http.StatusInternalServerError)
+		return
+	}
+	if added == nil {
+		added = []adapter.DependencyPatch{}
+	}
+
+	remoteIP := r.RemoteAddr
+	if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
+		remoteIP = strings.TrimSpace(strings.Split(fwd, ",")[0])
+	}
+	if s.auditLogger != nil {
+		ev := AuditEvent{
+			Timestamp: time.Now().UTC(),
+			Action:    "patch.scanned",
+			Target:    s.stackDir,
+			RemoteIP:  remoteIP,
+		}
+		if logErr := s.auditLogger.Record(ev); logErr != nil {
+			fmt.Fprintf(os.Stderr, "audit log record error: %v\n", logErr)
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	resp := map[string]any{
+		"added_count": len(added),
+		"added":       added,
+	}
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
 }
@@ -1442,6 +1483,7 @@ const indexHTML = `<!DOCTYPE html>
             <span id="patches-badge" style="background: #f59e0b; color: #000; font-weight: bold; font-size: 0.75rem; padding: 2px 8px; border-radius: 12px;">0 Active</span>
           </div>
           <div style="display: flex; gap: 8px;">
+            <button class="btn btn-inspect" style="font-size: 0.8rem; padding: 4px 10px;" onclick="scanWorkspacePatches()">Scan Workspace Manifests</button>
             <button class="btn btn-inspect" style="font-size: 0.8rem; padding: 4px 10px;" onclick="checkPatchesStatus()">Check Upstream Status</button>
             <button class="btn btn-inspect" style="font-size: 0.8rem; padding: 4px 10px;" onclick="openAddPatchModal()">+ Track Local Patch</button>
           </div>
@@ -1781,6 +1823,23 @@ const indexHTML = `<!DOCTYPE html>
         }
       } catch (err) {
         console.error('fetch patches error', err);
+      }
+    }
+
+    async function scanWorkspacePatches() {
+      try {
+        const res = await fetch('/api/v1/patches/scan', {
+          method: 'POST',
+          headers: getHeaders()
+        });
+        if (res.ok) {
+          await fetchPatches();
+        } else {
+          const err = await res.text();
+          alert('Scan workspace patches failed: ' + err);
+        }
+      } catch (err) {
+        alert('Network error: ' + err.message);
       }
     }
 

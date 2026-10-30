@@ -419,6 +419,23 @@ func (s *Server) toolDefinitions() []map[string]any {
 			},
 		},
 		{
+			"name":        "list_parked_bugs",
+			"description": "Lists parked breadcrumb bugs recorded during coding sessions, with options to dismiss/delete or inspect triaged bugs.",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"include_triaged": map[string]any{
+						"type":        "boolean",
+						"description": "Whether to include bugs already marked 'triaged' (default false, showing only active 'parked' breadcrumbs)",
+					},
+					"dismiss_id": map[string]any{
+						"type":        "string",
+						"description": "Optional parked bug ID to delete/dismiss before listing",
+					},
+				},
+			},
+		},
+		{
 			"name":        "record_dependency_patch",
 			"description": "Records a temporary local fork or patch for a 3rd-party dependency in the patch ledger so it stays visible to engineers and can be reverted when upstream fixes the issue.",
 			"inputSchema": map[string]any{
@@ -458,6 +475,19 @@ func (s *Server) toolDefinitions() []map[string]any {
 			"inputSchema": map[string]any{
 				"type":       "object",
 				"properties": map[string]any{},
+			},
+		},
+		{
+			"name":        "scan_workspace_patches",
+			"description": "Scans workspace manifests (go.mod, package.json, patches/, Cargo.toml, pyproject.toml) for local forks and vendor patches and syncs them into the patch ledger.",
+			"inputSchema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"dir": map[string]any{
+						"type":        "string",
+						"description": "Workspace root directory to scan for vendor patches and forks (default: .)",
+					},
+				},
 			},
 		},
 		{
@@ -508,6 +538,10 @@ func (s *Server) toolDefinitions() []map[string]any {
 			"inputSchema": map[string]any{
 				"type": "object",
 				"properties": map[string]any{
+					"from_parked_id": map[string]any{
+						"type":        "string",
+						"description": "Optional parked bug ID to hydrate fields from and mark as triaged",
+					},
 					"query": map[string]any{
 						"type":        "string",
 						"description": "Software package name or target query",
@@ -545,7 +579,7 @@ func (s *Server) toolDefinitions() []map[string]any {
 						"description": "Optional secondary/related dependency to query for correlated stack evidence",
 					},
 				},
-				"required": []string{"query", "title"},
+				"required": []string{},
 			},
 		},
 		{
@@ -687,6 +721,9 @@ func (s *Server) handleToolCall(ctx context.Context, params toolCallParams, out 
 	case "park_bug":
 		return s.handleParkBug(ctx, params.Arguments, out)
 
+	case "list_parked_bugs":
+		return s.handleListParkedBugs(ctx, params.Arguments, out)
+
 	case "record_dependency_patch":
 		var args struct {
 			Dependency       string `json:"dependency"`
@@ -758,6 +795,55 @@ func (s *Server) handleToolCall(ctx context.Context, params toolCallParams, out 
 
 	case "check_dependency_patches":
 		return s.handleCheckDependencyPatches(ctx)
+
+	case "scan_workspace_patches":
+		var args struct {
+			Dir string `json:"dir"`
+		}
+		if len(params.Arguments) > 0 && string(params.Arguments) != "{}" && string(params.Arguments) != "null" {
+			if err := json.Unmarshal(params.Arguments, &args); err != nil {
+				return toolCallResult{
+					Content: []toolContent{{Type: "text", Text: fmt.Sprintf("parse arguments: %v", err)}},
+					IsError: true,
+				}
+			}
+		}
+
+		if s.patchStore == nil {
+			return toolCallResult{
+				Content: []toolContent{{Type: "text", Text: "patch store is not initialized"}},
+				IsError: true,
+			}
+		}
+
+		dir := args.Dir
+		if strings.TrimSpace(dir) == "" {
+			dir = "."
+		}
+
+		added, err := s.patchStore.SyncWorkspace(dir)
+		if err != nil {
+			return toolCallResult{
+				Content: []toolContent{{Type: "text", Text: fmt.Sprintf("scan workspace patches: %v", err)}},
+				IsError: true,
+			}
+		}
+		if added == nil {
+			added = []adapter.DependencyPatch{}
+		}
+
+		data, err := json.MarshalIndent(added, "", "  ")
+		if err != nil {
+			return toolCallResult{
+				Content: []toolContent{{Type: "text", Text: fmt.Sprintf("marshal patches: %v", err)}},
+				IsError: true,
+			}
+		}
+
+		return toolCallResult{
+			Content: []toolContent{{Type: "text", Text: string(data)}},
+			IsError: false,
+		}
 
 	case "resolve_target":
 		var args struct {
@@ -859,6 +945,7 @@ func (s *Server) handleToolCall(ctx context.Context, params toolCallParams, out 
 
 	case "draft_bug_report":
 		var args struct {
+			FromParkedID      string `json:"from_parked_id"`
 			Query             string `json:"query"`
 			Title             string `json:"title"`
 			Summary           string `json:"summary"`
@@ -875,6 +962,47 @@ func (s *Server) handleToolCall(ctx context.Context, params toolCallParams, out 
 				IsError: true,
 			}
 		}
+
+		var parkedBug *adapter.ParkedBug
+		if fromParked := strings.TrimSpace(args.FromParkedID); fromParked != "" {
+			if s.parkedStore == nil {
+				return toolCallResult{
+					Content: []toolContent{{Type: "text", Text: "parked store is not initialized"}},
+					IsError: true,
+				}
+			}
+			p, err := s.parkedStore.Get(fromParked)
+			if err != nil {
+				return toolCallResult{
+					Content: []toolContent{{Type: "text", Text: fmt.Sprintf("load parked bug %s: %v", fromParked, err)}},
+					IsError: true,
+				}
+			}
+			parkedBug = p
+			if args.Query == "" {
+				args.Query = parkedBug.Dependency
+			}
+			if args.Title == "" {
+				args.Title = parkedBug.Title
+			}
+			if args.Logs == "" && string(parkedBug.ErrorSnippet) != "" {
+				args.Logs = string(parkedBug.ErrorSnippet)
+			}
+			if args.Summary == "" {
+				if string(parkedBug.WorkaroundNote) != "" {
+					args.Summary = fmt.Sprintf("Discovered anomaly in %s: %s\n\nWorkaround/Notes: %s", parkedBug.Dependency, parkedBug.Title, string(parkedBug.WorkaroundNote))
+				} else {
+					args.Summary = fmt.Sprintf("Discovered anomaly in %s: %s", parkedBug.Dependency, parkedBug.Title)
+				}
+			}
+			if args.StepsToReproduce == "" && parkedBug.WorkspaceFile != "" {
+				args.StepsToReproduce = "Observed in " + parkedBug.WorkspaceFile
+			}
+			if args.RelatedDependency == "" && parkedBug.RelatedDependency != "" {
+				args.RelatedDependency = parkedBug.RelatedDependency
+			}
+		}
+
 		if strings.TrimSpace(args.Query) == "" || strings.TrimSpace(args.Title) == "" {
 			return toolCallResult{
 				Content: []toolContent{{Type: "text", Text: "query and title parameters are required"}},
@@ -968,11 +1096,28 @@ func (s *Server) handleToolCall(ctx context.Context, params toolCallParams, out 
 			}
 		}
 
+		if s.draftStore == nil {
+			return toolCallResult{
+				Content: []toolContent{{Type: "text", Text: "draft store not configured"}},
+				IsError: true,
+			}
+		}
+
 		if _, err := s.draftStore.Save(draft); err != nil {
 			return toolCallResult{
 				Content: []toolContent{{Type: "text", Text: fmt.Sprintf("save draft: %v", err)}},
 				IsError: true,
 			}
+		}
+
+		if parkedBug != nil {
+			parkedBug.Status = "triaged"
+			if s.parkedStore != nil {
+				if err := s.parkedStore.Save(parkedBug); err != nil {
+					// Non-fatal status update failure
+				}
+			}
+			s.emitResourceListChanged(out)
 		}
 
 		data, err := json.MarshalIndent(draft, "", "  ")
@@ -1464,18 +1609,7 @@ func (s *Server) handleParkBug(ctx context.Context, args json.RawMessage, out io
 		}
 	}
 
-	// Emit native MCP notification so host knows resources changed before returning result
-	if out != nil {
-		notification := map[string]any{
-			"jsonrpc": "2.0",
-			"method":  "notifications/resources/list_changed",
-		}
-		if data, err := json.Marshal(notification); err == nil {
-			if _, writeErr := out.Write(append(data, '\n')); writeErr != nil {
-				// Non-fatal notification emit error
-			}
-		}
-	}
+	s.emitResourceListChanged(out)
 
 	resultMap := map[string]any{
 		"parked_bug": bug,
@@ -1485,6 +1619,82 @@ func (s *Server) handleParkBug(ctx context.Context, args json.RawMessage, out io
 	if err != nil {
 		return toolCallResult{
 			Content: []toolContent{{Type: "text", Text: fmt.Sprintf("failed to marshal handoff payload: %v", err)}},
+			IsError: true,
+		}
+	}
+
+	return toolCallResult{
+		Content: []toolContent{{Type: "text", Text: string(data)}},
+	}
+}
+
+func (s *Server) emitResourceListChanged(out io.Writer) {
+	if out == nil {
+		return
+	}
+	notification := map[string]any{
+		"jsonrpc": "2.0",
+		"method":  "notifications/resources/list_changed",
+	}
+	if data, err := json.Marshal(notification); err == nil {
+		if _, writeErr := out.Write(append(data, '\n')); writeErr != nil {
+			// Non-fatal notification emit error
+		}
+	}
+}
+
+func (s *Server) handleListParkedBugs(ctx context.Context, args json.RawMessage, out io.Writer) toolCallResult {
+	if s.parkedStore == nil {
+		return toolCallResult{
+			Content: []toolContent{{Type: "text", Text: "parked store is not initialized"}},
+			IsError: true,
+		}
+	}
+
+	var input struct {
+		IncludeTriaged bool   `json:"include_triaged"`
+		DismissID      string `json:"dismiss_id"`
+	}
+	if len(args) > 0 && string(args) != "{}" && string(args) != "null" {
+		if err := json.Unmarshal(args, &input); err != nil {
+			return toolCallResult{
+				Content: []toolContent{{Type: "text", Text: fmt.Sprintf("invalid arguments: %v", err)}},
+				IsError: true,
+			}
+		}
+	}
+
+	dismissID := strings.TrimSpace(input.DismissID)
+	if dismissID != "" {
+		if err := s.parkedStore.Delete(dismissID); err != nil {
+			return toolCallResult{
+				Content: []toolContent{{Type: "text", Text: fmt.Sprintf("failed to dismiss parked bug %s: %v", dismissID, err)}},
+				IsError: true,
+			}
+		}
+		s.emitResourceListChanged(out)
+	}
+
+	bugs, err := s.parkedStore.List()
+	if err != nil {
+		return toolCallResult{
+			Content: []toolContent{{Type: "text", Text: fmt.Sprintf("failed to list parked bugs: %v", err)}},
+			IsError: true,
+		}
+	}
+
+	filtered := make([]*adapter.ParkedBug, 0, len(bugs))
+	for _, b := range bugs {
+		if !input.IncludeTriaged && b.Status == "triaged" {
+			continue
+		}
+		filtered = append(filtered, b)
+	}
+
+	data, err := json.MarshalIndent(filtered, "", "  ")
+	if err != nil {
+		return toolCallResult{
+			Content: []toolContent{{Type: "text", Text: fmt.Sprintf("failed to marshal parked bugs: %v", err)}},
 			IsError: true,
 		}
 	}

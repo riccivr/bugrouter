@@ -26,7 +26,7 @@ This document tracks the long-term architectural trajectory, active implementati
 
 ---
 
-## 2. Chronological Milestones Ledger (Milestones 1–8)
+## 2. Chronological Milestones Ledger (Milestones 1–10)
 
 All milestones below are fully implemented, verified with race-detector tests, and merged into the core engine under CalVer `2026.10.0`.
 
@@ -110,9 +110,21 @@ All milestones below are fully implemented, verified with race-detector tests, a
   - **Reproducible CalVer Release Automation (`.github/workflows/release.yml`)**: Cross-compilation pipeline triggered on CalVer tags (`20[0-9][0-9].[0-1][0-9].*`) producing stripped static binaries (`CGO_ENABLED=0`, `-trimpath`, `-ldflags="-s -w"`) for `linux/amd64`, `linux/arm64`, `darwin/amd64`, `darwin/arm64`, and `windows/amd64`, generating `SHA256SUMS`, and publishing releases via `softprops/action-gh-release@v2`.
   - **Turnkey Composite GitHub Action (`action.yml`)**: Root composite action enabling any repository to audit tracked dependency patches (`mode: patch-check`, with `fail-on-revertable: true`) or triage crash logs (`mode: triage`), generating rich Markdown summaries in `$GITHUB_STEP_SUMMARY`.
   - **Makefile Release Dry-Run (`Makefile`)**: Added `make release-dry-run` to cross-compile all 5 platform binaries to `dist/` with `SHA256SUMS` and updated `clean` to purge `bin/ dist/`.
+- [x] **Milestone 10: Workspace Patch Scanner (`patch scan`), Root License & Release Finalization (`v2026.10.0`) [COMPLETED]**:
+  - **Spec #15: Workspace Patch Scanner Engine (`internal/adapter/patch_scan.go`)**:
+    - Built `ScanWorkspacePatches` and `PatchStore.SyncWorkspace` to scan `go.mod` (replace directives), `package.json` (`patch:`, `file:`, `link:`, `git+`), `patches/` directory (`*.patch` diffs), `Cargo.toml` (`[patch.<source>]`), and `pyproject.toml` (`[tool.poetry.dependencies]`), deduplicating against existing ledger entries.
+  - **CLI `bugrouter patch scan` (`cmd/bugrouter/main.go`)**:
+    - Added `bugrouter patch scan [--dir <path>] [--json]` with table and JSON formatting.
+  - **Cloud Control Plane (`internal/cloud/server.go`)**:
+    - Registered `POST /api/v1/patches/scan`, added audit logging (`patch.scanned`), and added "Scan Workspace Manifests" button to Active Dependency Patches banner.
+  - **Full 17 MCP Tools Suite (`internal/mcp/server.go`)**:
+    - Added `scan_workspace_patches` as the 17th tool in `internal/mcp/server.go`.
+    - Added `list_parked_bugs` (tool 16) and `from_parked_id` hydration with auto-triage transition to `draft_bug_report`.
+  - **MIT License (`LICENSE`)**:
+    - Added root `LICENSE` file under MIT License, Copyright (c) 2026 Ricardo Veronese Ricci.
 
 ---
 
 ## 3. Future & Planned Milestones
 
-*(All core milestones through Milestone 9 completed)*
+*(All core milestones through Milestone 10 completed — v2026.10.0 General Availability)*

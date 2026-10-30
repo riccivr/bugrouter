@@ -881,6 +881,43 @@ func runParked(out io.Writer, errOut io.Writer, args []string) int {
 	}
 }
 
+func runPatchScan(store *adapter.PatchStore, out, errOut io.Writer, args []string) int {
+	fs := flag.NewFlagSet("patch scan", flag.ContinueOnError)
+	fs.SetOutput(errOut)
+	dir := fs.String("dir", ".", "workspace directory to scan for vendor patches and forks")
+	jsonOut := fs.Bool("json", false, "output JSON array")
+	if err := fs.Parse(args); err != nil {
+		return 1
+	}
+	if store == nil {
+		store = adapter.NewPatchStore("")
+	}
+	added, err := store.SyncWorkspace(*dir)
+	if err != nil {
+		fmt.Fprintf(errOut, "error: scan workspace patches: %v\n", err)
+		return 1
+	}
+	if *jsonOut {
+		enc := json.NewEncoder(out)
+		enc.SetIndent("", "  ")
+		if err := enc.Encode(added); err != nil {
+			fmt.Fprintf(errOut, "error: encode json: %v\n", err)
+			return 1
+		}
+		return 0
+	}
+	if len(added) == 0 {
+		fmt.Fprintln(out, "No new dependency patches discovered in workspace.")
+		return 0
+	}
+	fmt.Fprintf(out, "%-10s %-25s %-10s %-30s %s\n", "ID", "DEPENDENCY", "ECOSYSTEM", "TARGET", "REASON")
+	fmt.Fprintln(out, strings.Repeat("-", 90))
+	for _, p := range added {
+		fmt.Fprintf(out, "%-10s %-25s %-10s %-30s %s\n", p.ID, p.Dependency, p.Ecosystem, p.PatchTarget, p.Reason)
+	}
+	return 0
+}
+
 func runPatchCheck(ctx context.Context, httpClient *httpx.Client, out, errOut io.Writer, args []string) int {
 	fs := flag.NewFlagSet("patch check", flag.ContinueOnError)
 	fs.SetOutput(errOut)
@@ -1226,7 +1263,7 @@ func main() {
 
 	case "patch":
 		if len(os.Args) < 3 {
-			fmt.Fprintln(os.Stderr, "Usage: bugrouter patch <list|add|check|rm> [arguments...]")
+			fmt.Fprintln(os.Stderr, "Usage: bugrouter patch <list|add|scan|check|rm> [arguments...]")
 			os.Exit(1)
 		}
 		patchStore := adapter.NewPatchStore("")
@@ -1259,6 +1296,16 @@ func main() {
 			fmt.Println(strings.Repeat("-", 90))
 			for _, p := range patches {
 				fmt.Printf("%-10s %-25s %-10s %-30s %s\n", p.ID, p.Dependency, p.Ecosystem, p.PatchTarget, p.Reason)
+			}
+			return
+
+		case "scan":
+			var scanArgs []string
+			if len(os.Args) > 3 {
+				scanArgs = os.Args[3:]
+			}
+			if code := runPatchScan(patchStore, os.Stdout, os.Stderr, scanArgs); code != 0 {
+				os.Exit(code)
 			}
 			return
 
@@ -1316,7 +1363,7 @@ func main() {
 
 		default:
 			fmt.Fprintf(os.Stderr, "error: unknown patch subcommand %q\n", os.Args[2])
-			fmt.Fprintln(os.Stderr, "Usage: bugrouter patch <list|add|check|rm> [arguments...]")
+			fmt.Fprintln(os.Stderr, "Usage: bugrouter patch <list|add|scan|check|rm> [arguments...]")
 			os.Exit(1)
 		}
 
@@ -2011,6 +2058,8 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "  patch list [--json]         List tracked dependency patches and temporary forks")
 	fmt.Fprintln(os.Stderr, "  patch add --dep <d> --target <fork> [--ecosystem <e>] [--issue <url>] [--manifest <m>] [--reason <r>]")
 	fmt.Fprintln(os.Stderr, "                              Record a temporary dependency fork/patch in the ledger")
+	fmt.Fprintln(os.Stderr, "  patch scan [--dir <dir>] [--json]")
+	fmt.Fprintln(os.Stderr, "                              Scan workspace manifests for local forks/patches and sync to ledger")
 	fmt.Fprintln(os.Stderr, "  patch rm <id-or-dep>        Remove a dependency patch from the ledger")
 	fmt.Fprintln(os.Stderr, "  patch check [--json] [--summary-md] [--fail-on-revertable] [--timeout <dur>]")
 	fmt.Fprintln(os.Stderr, "                              Check upstream issue status for tracked patches and flag revertable forks")
