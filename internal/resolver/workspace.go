@@ -4,7 +4,9 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"encoding/xml"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -240,6 +242,26 @@ func (w *WorkspaceProbe) Resolve(ctx context.Context, query string) (*Target, er
 
 	// 4. Python check: pyproject.toml
 	if target, err := w.resolvePyproject(ctx, query); err == nil {
+		return target, nil
+	}
+
+	// 5. Java check: pom.xml
+	if target, err := w.resolveMaven(ctx, query); err == nil {
+		return target, nil
+	}
+
+	// 6. .NET / C# check: .csproj & packages.config
+	if target, err := w.resolveDotNet(ctx, query); err == nil {
+		return target, nil
+	}
+
+	// 7. Ruby check: Gemfile.lock & Gemfile
+	if target, err := w.resolveRuby(ctx, query); err == nil {
+		return target, nil
+	}
+
+	// 8. PHP check: composer.lock & composer.json
+	if target, err := w.resolvePHP(ctx, query); err == nil {
 		return target, nil
 	}
 
@@ -712,6 +734,815 @@ func (w *WorkspaceProbe) resolvePyproject(ctx context.Context, query string) (*T
 				Tracker:       tracker,
 			}, nil
 		}
+	}
+
+	return nil, ErrNotFound
+}
+
+// maxWorkspaceManifestBytes caps manifest ingestion to 2 MiB.
+const maxWorkspaceManifestBytes = 2 * 1024 * 1024
+
+func readBoundedFile(path string) (data []byte, err error) {
+	file, openErr := os.Open(path)
+	if openErr != nil {
+		return nil, openErr
+	}
+	defer func() {
+		if closeErr := file.Close(); closeErr != nil && err == nil {
+			err = fmt.Errorf("close %s: %w", path, closeErr)
+		}
+	}()
+
+	limited := io.LimitReader(file, maxWorkspaceManifestBytes+1)
+	buf, readErr := io.ReadAll(limited)
+	if readErr != nil {
+		return nil, fmt.Errorf("read %s: %w", path, readErr)
+	}
+	if len(buf) > maxWorkspaceManifestBytes {
+		return nil, fmt.Errorf("manifest %s exceeds %d byte limit", path, maxWorkspaceManifestBytes)
+	}
+	return buf, nil
+}
+
+func shortPkgName(name string) string {
+	if idx := strings.LastIndex(name, "/"); idx != -1 {
+		return name[idx+1:]
+	}
+	if idx := strings.LastIndex(name, ":"); idx != -1 {
+		return name[idx+1:]
+	}
+	return name
+}
+
+// ----------------------------------------------------------------------------
+// Maven (pom.xml) Parser
+// ----------------------------------------------------------------------------
+
+type pomProject struct {
+	XMLName         xml.Name        `xml:"project"`
+	GroupID         string          `xml:"groupId"`
+	ArtifactID      string          `xml:"artifactId"`
+	Version         string          `xml:"version"`
+	URL             string          `xml:"url"`
+	Parent          pomParent       `xml:"parent"`
+	SCM             pomSCM          `xml:"scm"`
+	IssueManagement pomIssueMgmt    `xml:"issueManagement"`
+	Dependencies    pomDependencies `xml:"dependencies"`
+}
+
+type pomParent struct {
+	GroupID    string `xml:"groupId"`
+	ArtifactID string `xml:"artifactId"`
+	Version    string `xml:"version"`
+}
+
+type pomSCM struct {
+	URL                 string `xml:"url"`
+	Connection          string `xml:"connection"`
+	DeveloperConnection string `xml:"developerConnection"`
+}
+
+type pomIssueMgmt struct {
+	System string `xml:"system"`
+	URL    string `xml:"url"`
+}
+
+type pomDependencies struct {
+	Dependency []pomDependency `xml:"dependency"`
+}
+
+type pomDependency struct {
+	GroupID    string `xml:"groupId"`
+	ArtifactID string `xml:"artifactId"`
+	Version    string `xml:"version"`
+	URL        string `xml:"url"`
+	SCM        pomSCM `xml:"scm"`
+}
+
+func (w *WorkspaceProbe) resolveMaven(ctx context.Context, query string) (*Target, error) {
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+
+	pomPath := filepath.Join(w.rootDir, "pom.xml")
+	data, err := readBoundedFile(pomPath)
+	if err != nil {
+		return nil, ErrNotFound
+	}
+
+	var pom pomProject
+	if err := xml.Unmarshal(data, &pom); err != nil {
+		return nil, ErrNotFound
+	}
+
+	groupID := strings.TrimSpace(pom.GroupID)
+	if groupID == "" {
+		groupID = strings.TrimSpace(pom.Parent.GroupID)
+	}
+	version := strings.TrimSpace(pom.Version)
+	if version == "" {
+		version = strings.TrimSpace(pom.Parent.Version)
+	}
+	artifactID := strings.TrimSpace(pom.ArtifactID)
+
+	// 1. Check if query matches the root project
+	isProjectMatch := (artifactID != "" && strings.EqualFold(artifactID, query)) ||
+		(groupID != "" && artifactID != "" && strings.EqualFold(groupID+":"+artifactID, query)) ||
+		(groupID != "" && artifactID != "" && strings.EqualFold(groupID+"/"+artifactID, query))
+
+	if isProjectMatch {
+		issuesURL := strings.TrimSpace(pom.IssueManagement.URL)
+		repoURL := strings.TrimSpace(pom.SCM.URL)
+		if repoURL == "" {
+			repoURL = strings.TrimSpace(pom.SCM.Connection)
+		}
+		if repoURL == "" {
+			repoURL = strings.TrimSpace(pom.SCM.DeveloperConnection)
+		}
+		if repoURL == "" {
+			repoURL = strings.TrimSpace(pom.URL)
+		}
+
+		tracker, normRepo := ClassifyTracker(issuesURL, "", repoURL)
+		switch strings.ToLower(strings.TrimSpace(pom.IssueManagement.System)) {
+		case "jira":
+			tracker.Protocol = ProtocolJira
+			tracker.URL = issuesURL
+		case "bugzilla":
+			tracker.Protocol = ProtocolBugzilla
+			tracker.URL = issuesURL
+		case "github":
+			tracker.Protocol = ProtocolGitHub
+		case "gitlab":
+			tracker.Protocol = ProtocolGitLab
+		default:
+			if strings.Contains(strings.ToLower(issuesURL), "/jira/") {
+				tracker.Protocol = ProtocolJira
+				tracker.URL = issuesURL
+			}
+		}
+
+		if tracker.URL != "" || tracker.Email != "" {
+			return &Target{
+				Query:         query,
+				CanonicalName: artifactID,
+				LocalVersion:  version,
+				Layer:         LayerWorkspace,
+				RepositoryURL: normRepo,
+				Tracker:       tracker,
+			}, nil
+		}
+	}
+
+	// 2. Check dependencies
+	for _, dep := range pom.Dependencies.Dependency {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+
+		depArtifact := strings.TrimSpace(dep.ArtifactID)
+		depGroup := strings.TrimSpace(dep.GroupID)
+		depVersion := strings.TrimSpace(dep.Version)
+
+		isDepMatch := strings.EqualFold(depArtifact, query) ||
+			(depGroup != "" && strings.EqualFold(depGroup+":"+depArtifact, query)) ||
+			(depGroup != "" && strings.EqualFold(depGroup+"/"+depArtifact, query))
+
+		if !isDepMatch {
+			continue
+		}
+
+		repoURL := strings.TrimSpace(dep.SCM.URL)
+		if repoURL == "" {
+			repoURL = strings.TrimSpace(dep.SCM.Connection)
+		}
+		if repoURL == "" {
+			repoURL = strings.TrimSpace(dep.SCM.DeveloperConnection)
+		}
+		if repoURL == "" {
+			repoURL = strings.TrimSpace(dep.URL)
+		}
+
+		// Infer git forge URL from groupId if available
+		if repoURL == "" {
+			lowerGroup := strings.ToLower(depGroup)
+			if strings.HasPrefix(lowerGroup, "com.github.") {
+				user := strings.TrimPrefix(lowerGroup, "com.github.")
+				repoURL = fmt.Sprintf("https://github.com/%s/%s", user, depArtifact)
+			} else if strings.HasPrefix(lowerGroup, "io.github.") {
+				user := strings.TrimPrefix(lowerGroup, "io.github.")
+				repoURL = fmt.Sprintf("https://github.com/%s/%s", user, depArtifact)
+			} else if strings.HasPrefix(lowerGroup, "com.gitlab.") {
+				user := strings.TrimPrefix(lowerGroup, "com.gitlab.")
+				repoURL = fmt.Sprintf("https://gitlab.com/%s/%s", user, depArtifact)
+			} else if strings.HasPrefix(lowerGroup, "org.codeberg.") {
+				user := strings.TrimPrefix(lowerGroup, "org.codeberg.")
+				repoURL = fmt.Sprintf("https://codeberg.org/%s/%s", user, depArtifact)
+			}
+		}
+
+		if repoURL != "" {
+			tracker, normRepo := ClassifyTracker("", "", repoURL)
+			if tracker.URL != "" || tracker.Email != "" {
+				return &Target{
+					Query:         query,
+					CanonicalName: depArtifact,
+					LocalVersion:  depVersion,
+					Layer:         LayerWorkspace,
+					RepositoryURL: normRepo,
+					Tracker:       tracker,
+				}, nil
+			}
+		}
+	}
+
+	return nil, ErrNotFound
+}
+
+// ----------------------------------------------------------------------------
+// .NET / C# (.csproj / packages.config) Parser
+// ----------------------------------------------------------------------------
+
+type csProject struct {
+	XMLName        xml.Name          `xml:"Project"`
+	PropertyGroups []csPropertyGroup `xml:"PropertyGroup"`
+	ItemGroups     []csItemGroup     `xml:"ItemGroup"`
+}
+
+type csPropertyGroup struct {
+	PackageID         string `xml:"PackageId"`
+	AssemblyName      string `xml:"AssemblyName"`
+	Version           string `xml:"Version"`
+	RepositoryURL     string `xml:"RepositoryUrl"`
+	PackageProjectURL string `xml:"PackageProjectUrl"`
+}
+
+type csItemGroup struct {
+	PackageReferences []csPackageReference `xml:"PackageReference"`
+}
+
+type csPackageReference struct {
+	Include           string `xml:"Include,attr"`
+	Update            string `xml:"Update,attr"`
+	VersionAttr       string `xml:"Version,attr"`
+	VersionElem       string `xml:"Version"`
+	RepositoryURLAttr string `xml:"RepositoryUrl,attr"`
+	RepositoryURLElem string `xml:"RepositoryUrl"`
+	ProjectURLAttr    string `xml:"PackageProjectUrl,attr"`
+	ProjectURLElem    string `xml:"PackageProjectUrl"`
+	ProjectURLAttr2   string `xml:"ProjectUrl,attr"`
+	ProjectURLElem2   string `xml:"ProjectUrl"`
+}
+
+type packagesConfig struct {
+	XMLName  xml.Name           `xml:"packages"`
+	Packages []packageConfigPkg `xml:"package"`
+}
+
+type packageConfigPkg struct {
+	ID            string `xml:"id,attr"`
+	Version       string `xml:"version,attr"`
+	RepositoryURL string `xml:"repositoryUrl,attr"`
+	ProjectURL    string `xml:"projectUrl,attr"`
+}
+
+func (w *WorkspaceProbe) resolveDotNet(ctx context.Context, query string) (*Target, error) {
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+
+	entries, err := os.ReadDir(w.rootDir)
+	if err != nil {
+		return nil, ErrNotFound
+	}
+
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if strings.HasSuffix(strings.ToLower(name), ".csproj") {
+			csprojPath := filepath.Join(w.rootDir, name)
+			if target, parseErr := w.parseCSProj(ctx, csprojPath, query); parseErr == nil && target != nil {
+				return target, nil
+			}
+		}
+	}
+
+	pkgConfigPath := filepath.Join(w.rootDir, "packages.config")
+	if target, parseErr := w.parsePackagesConfig(ctx, pkgConfigPath, query); parseErr == nil && target != nil {
+		return target, nil
+	}
+
+	return nil, ErrNotFound
+}
+
+func (w *WorkspaceProbe) parseCSProj(ctx context.Context, csprojPath string, query string) (*Target, error) {
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+
+	data, err := readBoundedFile(csprojPath)
+	if err != nil {
+		return nil, ErrNotFound
+	}
+
+	var proj csProject
+	if err := xml.Unmarshal(data, &proj); err != nil {
+		return nil, ErrNotFound
+	}
+
+	// 1. Check PropertyGroups for project match
+	for _, pg := range proj.PropertyGroups {
+		pkgID := strings.TrimSpace(pg.PackageID)
+		if pkgID == "" {
+			pkgID = strings.TrimSpace(pg.AssemblyName)
+		}
+		ver := strings.TrimSpace(pg.Version)
+		repo := strings.TrimSpace(pg.RepositoryURL)
+		if repo == "" {
+			repo = strings.TrimSpace(pg.PackageProjectURL)
+		}
+
+		if (strings.EqualFold(pkgID, query) || strings.EqualFold(shortPkgName(pkgID), query)) && repo != "" {
+			tracker, normRepo := ClassifyTracker("", "", repo)
+			if tracker.URL != "" || tracker.Email != "" {
+				canonicalName := pkgID
+				if canonicalName == "" {
+					canonicalName = query
+				}
+				return &Target{
+					Query:         query,
+					CanonicalName: canonicalName,
+					LocalVersion:  ver,
+					Layer:         LayerWorkspace,
+					RepositoryURL: normRepo,
+					Tracker:       tracker,
+				}, nil
+			}
+		}
+	}
+
+	// 2. Check ItemGroups for PackageReference match
+	for _, ig := range proj.ItemGroups {
+		for _, pkg := range ig.PackageReferences {
+			pkgName := strings.TrimSpace(pkg.Include)
+			if pkgName == "" {
+				pkgName = strings.TrimSpace(pkg.Update)
+			}
+			if !strings.EqualFold(pkgName, query) && !strings.EqualFold(shortPkgName(pkgName), query) {
+				continue
+			}
+
+			ver := strings.TrimSpace(pkg.VersionAttr)
+			if ver == "" {
+				ver = strings.TrimSpace(pkg.VersionElem)
+			}
+
+			repo := strings.TrimSpace(pkg.RepositoryURLAttr)
+			if repo == "" {
+				repo = strings.TrimSpace(pkg.RepositoryURLElem)
+			}
+			if repo == "" {
+				repo = strings.TrimSpace(pkg.ProjectURLAttr)
+			}
+			if repo == "" {
+				repo = strings.TrimSpace(pkg.ProjectURLElem)
+			}
+			if repo == "" {
+				repo = strings.TrimSpace(pkg.ProjectURLAttr2)
+			}
+			if repo == "" {
+				repo = strings.TrimSpace(pkg.ProjectURLElem2)
+			}
+
+			if repo == "" {
+				repo = fmt.Sprintf("https://www.nuget.org/packages/%s", pkgName)
+			}
+
+			tracker, normRepo := ClassifyTracker("", "", repo)
+			if tracker.URL != "" || tracker.Email != "" {
+				return &Target{
+					Query:         query,
+					CanonicalName: pkgName,
+					LocalVersion:  ver,
+					Layer:         LayerWorkspace,
+					RepositoryURL: normRepo,
+					Tracker:       tracker,
+				}, nil
+			}
+		}
+	}
+
+	return nil, ErrNotFound
+}
+
+func (w *WorkspaceProbe) parsePackagesConfig(ctx context.Context, configPath string, query string) (*Target, error) {
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+
+	data, err := readBoundedFile(configPath)
+	if err != nil {
+		return nil, ErrNotFound
+	}
+
+	var cfg packagesConfig
+	if err := xml.Unmarshal(data, &cfg); err != nil {
+		return nil, ErrNotFound
+	}
+
+	for _, pkg := range cfg.Packages {
+		id := strings.TrimSpace(pkg.ID)
+		if !strings.EqualFold(id, query) && !strings.EqualFold(shortPkgName(id), query) {
+			continue
+		}
+
+		repo := strings.TrimSpace(pkg.RepositoryURL)
+		if repo == "" {
+			repo = strings.TrimSpace(pkg.ProjectURL)
+		}
+		if repo == "" {
+			repo = fmt.Sprintf("https://www.nuget.org/packages/%s", id)
+		}
+
+		tracker, normRepo := ClassifyTracker("", "", repo)
+		if tracker.URL != "" || tracker.Email != "" {
+			return &Target{
+				Query:         query,
+				CanonicalName: id,
+				LocalVersion:  strings.TrimSpace(pkg.Version),
+				Layer:         LayerWorkspace,
+				RepositoryURL: normRepo,
+				Tracker:       tracker,
+			}, nil
+		}
+	}
+
+	return nil, ErrNotFound
+}
+
+// ----------------------------------------------------------------------------
+// Ruby (Gemfile.lock / Gemfile) Parser
+// ----------------------------------------------------------------------------
+
+func (w *WorkspaceProbe) resolveRuby(ctx context.Context, query string) (*Target, error) {
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+
+	lockPath := filepath.Join(w.rootDir, "Gemfile.lock")
+	if data, err := readBoundedFile(lockPath); err == nil {
+		if t, parseErr := w.parseGemfileLock(ctx, data, query); parseErr == nil && t != nil {
+			return t, nil
+		}
+	}
+
+	gemfilePath := filepath.Join(w.rootDir, "Gemfile")
+	if data, err := readBoundedFile(gemfilePath); err == nil {
+		if t, parseErr := w.parseGemfile(ctx, data, query); parseErr == nil && t != nil {
+			return t, nil
+		}
+	}
+
+	return nil, ErrNotFound
+}
+
+func (w *WorkspaceProbe) parseGemfileLock(ctx context.Context, data []byte, query string) (*Target, error) {
+	lines := strings.Split(string(data), "\n")
+	var currentSection string
+	var currentRemote string
+
+	for _, rawLine := range lines {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+
+		trimmed := strings.TrimRight(rawLine, "\r\n")
+		if strings.TrimSpace(trimmed) == "" {
+			continue
+		}
+
+		if len(trimmed) > 0 && trimmed[0] != ' ' && trimmed[0] != '\t' {
+			currentSection = strings.TrimSpace(trimmed)
+			currentRemote = ""
+			continue
+		}
+
+		lineTrimmed := strings.TrimSpace(trimmed)
+		if strings.HasPrefix(lineTrimmed, "remote:") {
+			currentRemote = strings.TrimSpace(strings.TrimPrefix(lineTrimmed, "remote:"))
+			continue
+		}
+
+		if idx := strings.Index(lineTrimmed, " ("); idx != -1 && strings.HasSuffix(lineTrimmed, ")") {
+			gemName := strings.TrimSpace(lineTrimmed[:idx])
+			version := strings.TrimSpace(lineTrimmed[idx+2 : len(lineTrimmed)-1])
+
+			if strings.EqualFold(gemName, query) {
+				repoURL := currentRemote
+				if currentSection == "GEM" && (repoURL == "" || repoURL == "https://rubygems.org/" || repoURL == "http://rubygems.org/") {
+					if gfRepo := w.findGemfileGitSource(gemName); gfRepo != "" {
+						repoURL = gfRepo
+					} else {
+						repoURL = fmt.Sprintf("https://rubygems.org/gems/%s", gemName)
+					}
+				}
+
+				if repoURL != "" {
+					tracker, normRepo := ClassifyTracker("", "", repoURL)
+					if tracker.URL != "" || tracker.Email != "" {
+						return &Target{
+							Query:         query,
+							CanonicalName: gemName,
+							LocalVersion:  version,
+							Layer:         LayerWorkspace,
+							RepositoryURL: normRepo,
+							Tracker:       tracker,
+						}, nil
+					}
+				}
+			}
+		}
+	}
+
+	return nil, ErrNotFound
+}
+
+func (w *WorkspaceProbe) parseGemfile(ctx context.Context, data []byte, query string) (*Target, error) {
+	lines := strings.Split(string(data), "\n")
+	for _, rawLine := range lines {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+
+		line := strings.TrimSpace(rawLine)
+		if strings.HasPrefix(line, "#") || !strings.HasPrefix(line, "gem ") {
+			continue
+		}
+
+		rest := strings.TrimSpace(strings.TrimPrefix(line, "gem "))
+		parts := strings.Split(rest, ",")
+		if len(parts) == 0 {
+			continue
+		}
+
+		gemName := strings.Trim(strings.TrimSpace(parts[0]), `"'`)
+		if !strings.EqualFold(gemName, query) {
+			continue
+		}
+
+		var version, repoURL string
+		for i := 1; i < len(parts); i++ {
+			p := strings.TrimSpace(parts[i])
+			if strings.HasPrefix(p, "github:") {
+				val := strings.Trim(strings.TrimSpace(strings.TrimPrefix(p, "github:")), `"'`)
+				repoURL = "https://github.com/" + val
+			} else if strings.HasPrefix(p, ":github =>") {
+				val := strings.Trim(strings.TrimSpace(strings.TrimPrefix(p, ":github =>")), `"'`)
+				repoURL = "https://github.com/" + val
+			} else if strings.HasPrefix(p, "git:") {
+				repoURL = strings.Trim(strings.TrimSpace(strings.TrimPrefix(p, "git:")), `"'`)
+			} else if strings.HasPrefix(p, ":git =>") {
+				repoURL = strings.Trim(strings.TrimSpace(strings.TrimPrefix(p, ":git =>")), `"'`)
+			} else if version == "" && (strings.HasPrefix(p, `"`) || strings.HasPrefix(p, `'`)) {
+				version = strings.Trim(p, `"' `)
+			}
+		}
+
+		if repoURL == "" {
+			repoURL = fmt.Sprintf("https://rubygems.org/gems/%s", gemName)
+		}
+
+		tracker, normRepo := ClassifyTracker("", "", repoURL)
+		if tracker.URL != "" || tracker.Email != "" {
+			return &Target{
+				Query:         query,
+				CanonicalName: gemName,
+				LocalVersion:  version,
+				Layer:         LayerWorkspace,
+				RepositoryURL: normRepo,
+				Tracker:       tracker,
+			}, nil
+		}
+	}
+
+	return nil, ErrNotFound
+}
+
+func (w *WorkspaceProbe) findGemfileGitSource(gemName string) string {
+	gemfilePath := filepath.Join(w.rootDir, "Gemfile")
+	data, err := readBoundedFile(gemfilePath)
+	if err != nil {
+		return ""
+	}
+
+	lines := strings.Split(string(data), "\n")
+	for _, rawLine := range lines {
+		line := strings.TrimSpace(rawLine)
+		if strings.HasPrefix(line, "#") || !strings.HasPrefix(line, "gem ") {
+			continue
+		}
+
+		rest := strings.TrimSpace(strings.TrimPrefix(line, "gem "))
+		parts := strings.Split(rest, ",")
+		if len(parts) == 0 {
+			continue
+		}
+
+		name := strings.Trim(strings.TrimSpace(parts[0]), `"'`)
+		if !strings.EqualFold(name, gemName) {
+			continue
+		}
+
+		for i := 1; i < len(parts); i++ {
+			p := strings.TrimSpace(parts[i])
+			if strings.HasPrefix(p, "github:") {
+				val := strings.Trim(strings.TrimSpace(strings.TrimPrefix(p, "github:")), `"'`)
+				return "https://github.com/" + val
+			} else if strings.HasPrefix(p, ":github =>") {
+				val := strings.Trim(strings.TrimSpace(strings.TrimPrefix(p, ":github =>")), `"'`)
+				return "https://github.com/" + val
+			} else if strings.HasPrefix(p, "git:") {
+				return strings.Trim(strings.TrimSpace(strings.TrimPrefix(p, "git:")), `"'`)
+			} else if strings.HasPrefix(p, ":git =>") {
+				return strings.Trim(strings.TrimSpace(strings.TrimPrefix(p, ":git =>")), `"'`)
+			}
+		}
+	}
+	return ""
+}
+
+// ----------------------------------------------------------------------------
+// PHP (composer.lock / composer.json) Parser
+// ----------------------------------------------------------------------------
+
+type composerLock struct {
+	Packages    []composerPackage `json:"packages"`
+	PackagesDev []composerPackage `json:"packages-dev"`
+}
+
+type composerPackage struct {
+	Name     string          `json:"name"`
+	Version  string          `json:"version"`
+	Source   composerSource  `json:"source"`
+	Homepage string          `json:"homepage"`
+	Support  composerSupport `json:"support"`
+}
+
+type composerSource struct {
+	Type string `json:"type"`
+	URL  string `json:"url"`
+}
+
+type composerSupport struct {
+	Issues string `json:"issues"`
+	Source string `json:"source"`
+}
+
+type composerManifest struct {
+	Name       string            `json:"name"`
+	Version    string            `json:"version"`
+	Homepage   string            `json:"homepage"`
+	Support    composerSupport   `json:"support"`
+	Require    map[string]string `json:"require"`
+	RequireDev map[string]string `json:"require-dev"`
+}
+
+func (w *WorkspaceProbe) resolvePHP(ctx context.Context, query string) (*Target, error) {
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+
+	lockPath := filepath.Join(w.rootDir, "composer.lock")
+	if data, err := readBoundedFile(lockPath); err == nil {
+		if t, parseErr := w.parseComposerLock(ctx, data, query); parseErr == nil && t != nil {
+			return t, nil
+		}
+	}
+
+	jsonPath := filepath.Join(w.rootDir, "composer.json")
+	if data, err := readBoundedFile(jsonPath); err == nil {
+		if t, parseErr := w.parseComposerJSON(ctx, data, query); parseErr == nil && t != nil {
+			return t, nil
+		}
+	}
+
+	return nil, ErrNotFound
+}
+
+func (w *WorkspaceProbe) parseComposerLock(ctx context.Context, data []byte, query string) (*Target, error) {
+	var lock composerLock
+	if err := json.Unmarshal(data, &lock); err != nil {
+		return nil, ErrNotFound
+	}
+
+	allPackages := append(lock.Packages, lock.PackagesDev...)
+	for _, pkg := range allPackages {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+
+		name := strings.TrimSpace(pkg.Name)
+		isMatch := strings.EqualFold(name, query) ||
+			strings.EqualFold(shortPkgName(name), query) ||
+			strings.EqualFold(strings.ReplaceAll(name, "/", ":"), query)
+
+		if !isMatch {
+			continue
+		}
+
+		issuesURL := strings.TrimSpace(pkg.Support.Issues)
+		repoURL := strings.TrimSpace(pkg.Support.Source)
+		if repoURL == "" {
+			repoURL = strings.TrimSpace(pkg.Source.URL)
+		}
+		if repoURL == "" {
+			repoURL = strings.TrimSpace(pkg.Homepage)
+		}
+		if repoURL == "" && issuesURL == "" {
+			repoURL = fmt.Sprintf("https://packagist.org/packages/%s", name)
+		}
+
+		tracker, normRepo := ClassifyTracker(issuesURL, "", repoURL)
+		if tracker.URL != "" || tracker.Email != "" {
+			return &Target{
+				Query:         query,
+				CanonicalName: name,
+				LocalVersion:  strings.TrimSpace(pkg.Version),
+				Layer:         LayerWorkspace,
+				RepositoryURL: normRepo,
+				Tracker:       tracker,
+			}, nil
+		}
+	}
+
+	return nil, ErrNotFound
+}
+
+func (w *WorkspaceProbe) parseComposerJSON(ctx context.Context, data []byte, query string) (*Target, error) {
+	var manifest composerManifest
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		return nil, ErrNotFound
+	}
+
+	// 1. Check root project match
+	rootName := strings.TrimSpace(manifest.Name)
+	if rootName != "" {
+		isRootMatch := strings.EqualFold(rootName, query) ||
+			strings.EqualFold(shortPkgName(rootName), query) ||
+			strings.EqualFold(strings.ReplaceAll(rootName, "/", ":"), query)
+
+		if isRootMatch {
+			issuesURL := strings.TrimSpace(manifest.Support.Issues)
+			repoURL := strings.TrimSpace(manifest.Support.Source)
+			if repoURL == "" {
+				repoURL = strings.TrimSpace(manifest.Homepage)
+			}
+
+			tracker, normRepo := ClassifyTracker(issuesURL, "", repoURL)
+			if tracker.URL != "" || tracker.Email != "" {
+				return &Target{
+					Query:         query,
+					CanonicalName: rootName,
+					LocalVersion:  strings.TrimSpace(manifest.Version),
+					Layer:         LayerWorkspace,
+					RepositoryURL: normRepo,
+					Tracker:       tracker,
+				}, nil
+			}
+		}
+	}
+
+	// 2. Check require & require-dev
+	checkMap := func(deps map[string]string) *Target {
+		for depName, depVer := range deps {
+			depName = strings.TrimSpace(depName)
+			if strings.EqualFold(depName, query) ||
+				strings.EqualFold(shortPkgName(depName), query) ||
+				strings.EqualFold(strings.ReplaceAll(depName, "/", ":"), query) {
+				repoURL := fmt.Sprintf("https://packagist.org/packages/%s", depName)
+				tracker, normRepo := ClassifyTracker("", "", repoURL)
+				if tracker.URL != "" || tracker.Email != "" {
+					return &Target{
+						Query:         query,
+						CanonicalName: depName,
+						LocalVersion:  strings.TrimSpace(depVer),
+						Layer:         LayerWorkspace,
+						RepositoryURL: normRepo,
+						Tracker:       tracker,
+					}
+				}
+			}
+		}
+		return nil
+	}
+
+	if t := checkMap(manifest.Require); t != nil {
+		return t, nil
+	}
+	if t := checkMap(manifest.RequireDev); t != nil {
+		return t, nil
 	}
 
 	return nil, ErrNotFound

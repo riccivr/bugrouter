@@ -399,3 +399,462 @@ func TestNormalizePyPkgName(t *testing.T) {
 		}
 	}
 }
+
+func TestWorkspaceProbePomXML(t *testing.T) {
+	tempDir := t.TempDir()
+
+	pomContent := `<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+	<modelVersion>4.0.0</modelVersion>
+	<groupId>org.apache.commons</groupId>
+	<artifactId>commons-lang3</artifactId>
+	<version>3.12.0</version>
+	<url>https://commons.apache.org/proper/commons-lang/</url>
+	<scm>
+		<url>https://github.com/apache/commons-lang</url>
+		<connection>scm:git:https://github.com/apache/commons-lang.git</connection>
+	</scm>
+	<issueManagement>
+		<system>jira</system>
+		<url>https://issues.apache.org/jira/browse/LANG</url>
+	</issueManagement>
+	<dependencies>
+		<dependency>
+			<groupId>com.github.luben</groupId>
+			<artifactId>zstd-jni</artifactId>
+			<version>1.5.5-1</version>
+		</dependency>
+		<dependency>
+			<groupId>org.slf4j</groupId>
+			<artifactId>slf4j-api</artifactId>
+			<version>2.0.9</version>
+			<scm>
+				<url>https://github.com/qos-ch/slf4j</url>
+			</scm>
+		</dependency>
+		<dependency>
+			<groupId>com.google.guava</groupId>
+			<artifactId>guava</artifactId>
+			<version>32.0.0-jre</version>
+		</dependency>
+	</dependencies>
+</project>`
+
+	if err := os.WriteFile(filepath.Join(tempDir, "pom.xml"), []byte(pomContent), 0644); err != nil {
+		t.Fatalf("write pom.xml: %v", err)
+	}
+
+	probe := NewWorkspaceProbe(tempDir)
+
+	// 1. Resolve root project by artifactId
+	t1, err := probe.Resolve(context.Background(), "commons-lang3")
+	if err != nil {
+		t.Fatalf("resolve commons-lang3: %v", err)
+	}
+	if t1.CanonicalName != "commons-lang3" {
+		t.Errorf("CanonicalName = %q, want commons-lang3", t1.CanonicalName)
+	}
+	if t1.LocalVersion != "3.12.0" {
+		t.Errorf("LocalVersion = %q, want 3.12.0", t1.LocalVersion)
+	}
+	if t1.Tracker.URL != "https://issues.apache.org/jira/browse/LANG" {
+		t.Errorf("Tracker URL = %q, want jira url", t1.Tracker.URL)
+	}
+	if t1.Tracker.Protocol != ProtocolJira {
+		t.Errorf("Tracker Protocol = %q, want jira", t1.Tracker.Protocol)
+	}
+
+	// 1b. Resolve root project by groupId:artifactId
+	t1b, err := probe.Resolve(context.Background(), "org.apache.commons:commons-lang3")
+	if err != nil {
+		t.Fatalf("resolve org.apache.commons:commons-lang3: %v", err)
+	}
+	if t1b.CanonicalName != "commons-lang3" {
+		t.Errorf("CanonicalName = %q, want commons-lang3", t1b.CanonicalName)
+	}
+
+	// 2. Resolve dependency with inferred github forge groupId
+	t2, err := probe.Resolve(context.Background(), "zstd-jni")
+	if err != nil {
+		t.Fatalf("resolve zstd-jni: %v", err)
+	}
+	if t2.Tracker.Protocol != ProtocolGitHub {
+		t.Errorf("Tracker Protocol = %q, want github", t2.Tracker.Protocol)
+	}
+	if t2.RepositoryURL != "https://github.com/luben/zstd-jni" {
+		t.Errorf("RepositoryURL = %q, want https://github.com/luben/zstd-jni", t2.RepositoryURL)
+	}
+
+	// 3. Resolve dependency with explicit scm
+	t3, err := probe.Resolve(context.Background(), "slf4j-api")
+	if err != nil {
+		t.Fatalf("resolve slf4j-api: %v", err)
+	}
+	if t3.Tracker.Protocol != ProtocolGitHub {
+		t.Errorf("Tracker Protocol = %q, want github", t3.Tracker.Protocol)
+	}
+	if t3.RepositoryURL != "https://github.com/qos-ch/slf4j" {
+		t.Errorf("RepositoryURL = %q, want https://github.com/qos-ch/slf4j", t3.RepositoryURL)
+	}
+
+	// 4. Dependency without repo URL or forge prefix falls through with ErrNotFound
+	_, err = probe.Resolve(context.Background(), "guava")
+	if !errors.Is(err, ErrNotFound) {
+		t.Errorf("expected ErrNotFound for guava, got: %v", err)
+	}
+}
+
+func TestWorkspaceProbeDotNet(t *testing.T) {
+	tempDir := t.TempDir()
+
+	csprojContent := `<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <PackageId>MyCSharpApp</PackageId>
+    <Version>1.0.0</Version>
+    <RepositoryUrl>https://github.com/my-org/my-csharp-app</RepositoryUrl>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.3" RepositoryUrl="https://github.com/JamesNK/Newtonsoft.Json" />
+    <PackageReference Include="Serilog">
+      <Version>3.1.1</Version>
+      <RepositoryUrl>https://github.com/serilog/serilog</RepositoryUrl>
+    </PackageReference>
+    <PackageReference Include="Dapper" Version="2.1.28" />
+  </ItemGroup>
+</Project>`
+
+	if err := os.WriteFile(filepath.Join(tempDir, "MyCSharpApp.csproj"), []byte(csprojContent), 0644); err != nil {
+		t.Fatalf("write MyCSharpApp.csproj: %v", err)
+	}
+
+	probe := NewWorkspaceProbe(tempDir)
+
+	// 1. Resolve root app
+	t1, err := probe.Resolve(context.Background(), "MyCSharpApp")
+	if err != nil {
+		t.Fatalf("resolve MyCSharpApp: %v", err)
+	}
+	if t1.CanonicalName != "MyCSharpApp" {
+		t.Errorf("CanonicalName = %q, want MyCSharpApp", t1.CanonicalName)
+	}
+	if t1.LocalVersion != "1.0.0" {
+		t.Errorf("LocalVersion = %q, want 1.0.0", t1.LocalVersion)
+	}
+	if t1.Tracker.Protocol != ProtocolGitHub {
+		t.Errorf("Tracker Protocol = %q, want github", t1.Tracker.Protocol)
+	}
+
+	// 2. Resolve package reference with attribute repository url
+	t2, err := probe.Resolve(context.Background(), "Newtonsoft.Json")
+	if err != nil {
+		t.Fatalf("resolve Newtonsoft.Json: %v", err)
+	}
+	if t2.Tracker.Protocol != ProtocolGitHub {
+		t.Errorf("Tracker Protocol = %q, want github", t2.Tracker.Protocol)
+	}
+	if t2.RepositoryURL != "https://github.com/JamesNK/Newtonsoft.Json" {
+		t.Errorf("RepositoryURL = %q, want https://github.com/JamesNK/Newtonsoft.Json", t2.RepositoryURL)
+	}
+
+	// 3. Resolve package reference with element version and repository url
+	t3, err := probe.Resolve(context.Background(), "Serilog")
+	if err != nil {
+		t.Fatalf("resolve Serilog: %v", err)
+	}
+	if t3.LocalVersion != "3.1.1" {
+		t.Errorf("LocalVersion = %q, want 3.1.1", t3.LocalVersion)
+	}
+	if t3.Tracker.Protocol != ProtocolGitHub {
+		t.Errorf("Tracker Protocol = %q, want github", t3.Tracker.Protocol)
+	}
+
+	// 4. Resolve package reference without repository url (falls back to nuget.org)
+	t4, err := probe.Resolve(context.Background(), "Dapper")
+	if err != nil {
+		t.Fatalf("resolve Dapper: %v", err)
+	}
+	if t4.LocalVersion != "2.1.28" {
+		t.Errorf("LocalVersion = %q, want 2.1.28", t4.LocalVersion)
+	}
+	if t4.Tracker.Protocol != ProtocolWebURL {
+		t.Errorf("Tracker Protocol = %q, want web-url", t4.Tracker.Protocol)
+	}
+	if t4.Tracker.URL != "https://www.nuget.org/packages/Dapper" {
+		t.Errorf("Tracker URL = %q, want nuget url", t4.Tracker.URL)
+	}
+}
+
+func TestWorkspaceProbeDotNetPackagesConfig(t *testing.T) {
+	tempDir := t.TempDir()
+
+	configContent := `<?xml version="1.0" encoding="utf-8"?>
+<packages>
+  <package id="Autofac" version="6.5.0" repositoryUrl="https://github.com/autofac/Autofac" targetFramework="net48" />
+  <package id="NUnit" version="3.13.3" targetFramework="net48" />
+</packages>`
+
+	if err := os.WriteFile(filepath.Join(tempDir, "packages.config"), []byte(configContent), 0644); err != nil {
+		t.Fatalf("write packages.config: %v", err)
+	}
+
+	probe := NewWorkspaceProbe(tempDir)
+
+	// 1. Resolve package with repositoryUrl
+	t1, err := probe.Resolve(context.Background(), "Autofac")
+	if err != nil {
+		t.Fatalf("resolve Autofac: %v", err)
+	}
+	if t1.LocalVersion != "6.5.0" {
+		t.Errorf("LocalVersion = %q, want 6.5.0", t1.LocalVersion)
+	}
+	if t1.Tracker.Protocol != ProtocolGitHub {
+		t.Errorf("Tracker Protocol = %q, want github", t1.Tracker.Protocol)
+	}
+
+	// 2. Resolve package without repositoryUrl (fallback to nuget)
+	t2, err := probe.Resolve(context.Background(), "NUnit")
+	if err != nil {
+		t.Fatalf("resolve NUnit: %v", err)
+	}
+	if t2.Tracker.Protocol != ProtocolWebURL {
+		t.Errorf("Tracker Protocol = %q, want web-url", t2.Tracker.Protocol)
+	}
+}
+
+func TestWorkspaceProbeRubyGemfileLock(t *testing.T) {
+	tempDir := t.TempDir()
+
+	lockContent := `GIT
+  remote: https://github.com/rails/rails.git
+  revision: 7b848c08ef8cf40aefea42456bc3d395a1a0937b
+  branch: main
+  specs:
+    rails (7.2.0.alpha)
+      actioncable (= 7.2.0.alpha)
+      actionmailbox (= 7.2.0.alpha)
+
+GIT
+  remote: https://github.com/sparklemotion/nokogiri.git
+  revision: abcdef123456
+  specs:
+    nokogiri (1.16.2)
+
+GEM
+  remote: https://rubygems.org/
+  specs:
+    puma (6.4.2)
+      nio4r (~> 2.0)
+    sidekiq (7.2.2)
+
+PLATFORMS
+  ruby
+
+DEPENDENCIES
+  nokogiri!
+  puma (~> 6.4)
+  rails!
+  sidekiq
+
+BUNDLED WITH
+   2.5.6`
+
+	if err := os.WriteFile(filepath.Join(tempDir, "Gemfile.lock"), []byte(lockContent), 0644); err != nil {
+		t.Fatalf("write Gemfile.lock: %v", err)
+	}
+
+	gemfileContent := `source "https://rubygems.org"
+gem "sidekiq", github: "sidekiq/sidekiq"`
+
+	if err := os.WriteFile(filepath.Join(tempDir, "Gemfile"), []byte(gemfileContent), 0644); err != nil {
+		t.Fatalf("write Gemfile: %v", err)
+	}
+
+	probe := NewWorkspaceProbe(tempDir)
+
+	// 1. Resolve git locked gem (rails)
+	t1, err := probe.Resolve(context.Background(), "rails")
+	if err != nil {
+		t.Fatalf("resolve rails: %v", err)
+	}
+	if t1.CanonicalName != "rails" {
+		t.Errorf("CanonicalName = %q, want rails", t1.CanonicalName)
+	}
+	if t1.LocalVersion != "7.2.0.alpha" {
+		t.Errorf("LocalVersion = %q, want 7.2.0.alpha", t1.LocalVersion)
+	}
+	if t1.Tracker.Protocol != ProtocolGitHub {
+		t.Errorf("Tracker Protocol = %q, want github", t1.Tracker.Protocol)
+	}
+	if t1.RepositoryURL != "https://github.com/rails/rails" {
+		t.Errorf("RepositoryURL = %q, want https://github.com/rails/rails", t1.RepositoryURL)
+	}
+
+	// 2. Resolve git locked gem (nokogiri)
+	t2, err := probe.Resolve(context.Background(), "nokogiri")
+	if err != nil {
+		t.Fatalf("resolve nokogiri: %v", err)
+	}
+	if t2.Tracker.Protocol != ProtocolGitHub {
+		t.Errorf("Tracker Protocol = %q, want github", t2.Tracker.Protocol)
+	}
+
+	// 3. Resolve gem section entry with github in Gemfile (sidekiq)
+	t3, err := probe.Resolve(context.Background(), "sidekiq")
+	if err != nil {
+		t.Fatalf("resolve sidekiq: %v", err)
+	}
+	if t3.Tracker.Protocol != ProtocolGitHub {
+		t.Errorf("Tracker Protocol = %q, want github", t3.Tracker.Protocol)
+	}
+	if t3.RepositoryURL != "https://github.com/sidekiq/sidekiq" {
+		t.Errorf("RepositoryURL = %q, want https://github.com/sidekiq/sidekiq", t3.RepositoryURL)
+	}
+
+	// 4. Resolve gem section entry without git in Gemfile (puma -> rubygems.org)
+	t4, err := probe.Resolve(context.Background(), "puma")
+	if err != nil {
+		t.Fatalf("resolve puma: %v", err)
+	}
+	if t4.LocalVersion != "6.4.2" {
+		t.Errorf("LocalVersion = %q, want 6.4.2", t4.LocalVersion)
+	}
+	if t4.Tracker.Protocol != ProtocolWebURL {
+		t.Errorf("Tracker Protocol = %q, want web-url", t4.Tracker.Protocol)
+	}
+	if t4.Tracker.URL != "https://rubygems.org/gems/puma" {
+		t.Errorf("Tracker URL = %q, want rubygems url", t4.Tracker.URL)
+	}
+}
+
+func TestWorkspaceProbeComposerLockAndJSON(t *testing.T) {
+	tempDir := t.TempDir()
+
+	composerLockContent := `{
+  "packages": [
+    {
+      "name": "monolog/monolog",
+      "version": "3.5.0",
+      "source": {
+        "type": "git",
+        "url": "https://github.com/Seldaek/monolog.git",
+        "reference": "abcdef"
+      },
+      "homepage": "https://seld.be",
+      "support": {
+        "issues": "https://github.com/Seldaek/monolog/issues",
+        "source": "https://github.com/Seldaek/monolog"
+      }
+    },
+    {
+      "name": "guzzlehttp/guzzle",
+      "version": "7.8.1",
+      "source": {
+        "type": "git",
+        "url": "https://github.com/guzzle/guzzle.git",
+        "reference": "123456"
+      },
+      "homepage": "https://guzzlephp.org",
+      "support": {
+        "issues": "https://github.com/guzzle/guzzle/issues",
+        "source": "https://github.com/guzzle/guzzle"
+      }
+    }
+  ],
+  "packages-dev": [
+    {
+      "name": "phpunit/phpunit",
+      "version": "10.5.9",
+      "source": {
+        "type": "git",
+        "url": "https://github.com/sebastianbergmann/phpunit.git",
+        "reference": "789012"
+      },
+      "support": {
+        "issues": "https://github.com/sebastianbergmann/phpunit/issues"
+      }
+    }
+  ]
+}`
+
+	if err := os.WriteFile(filepath.Join(tempDir, "composer.lock"), []byte(composerLockContent), 0644); err != nil {
+		t.Fatalf("write composer.lock: %v", err)
+	}
+
+	composerJSONContent := `{
+  "name": "my-org/my-php-app",
+  "version": "1.0.0",
+  "homepage": "https://example.com/app",
+  "support": {
+    "issues": "https://github.com/my-org/my-php-app/issues",
+    "source": "https://github.com/my-org/my-php-app"
+  }
+}`
+
+	if err := os.WriteFile(filepath.Join(tempDir, "composer.json"), []byte(composerJSONContent), 0644); err != nil {
+		t.Fatalf("write composer.json: %v", err)
+	}
+
+	probe := NewWorkspaceProbe(tempDir)
+
+	// 1. Resolve full name monolog/monolog
+	t1, err := probe.Resolve(context.Background(), "monolog/monolog")
+	if err != nil {
+		t.Fatalf("resolve monolog/monolog: %v", err)
+	}
+	if t1.CanonicalName != "monolog/monolog" {
+		t.Errorf("CanonicalName = %q, want monolog/monolog", t1.CanonicalName)
+	}
+	if t1.LocalVersion != "3.5.0" {
+		t.Errorf("LocalVersion = %q, want 3.5.0", t1.LocalVersion)
+	}
+	if t1.Tracker.Protocol != ProtocolGitHub {
+		t.Errorf("Tracker Protocol = %q, want github", t1.Tracker.Protocol)
+	}
+	if t1.Tracker.URL != "https://github.com/Seldaek/monolog/issues" {
+		t.Errorf("Tracker URL = %q, want https://github.com/Seldaek/monolog/issues", t1.Tracker.URL)
+	}
+
+	// 1b. Resolve short name monolog
+	t1b, err := probe.Resolve(context.Background(), "monolog")
+	if err != nil {
+		t.Fatalf("resolve monolog: %v", err)
+	}
+	if t1b.CanonicalName != "monolog/monolog" {
+		t.Errorf("CanonicalName = %q, want monolog/monolog", t1b.CanonicalName)
+	}
+
+	// 2. Resolve guzzlehttp/guzzle
+	t2, err := probe.Resolve(context.Background(), "guzzlehttp/guzzle")
+	if err != nil {
+		t.Fatalf("resolve guzzlehttp/guzzle: %v", err)
+	}
+	if t2.Tracker.Protocol != ProtocolGitHub {
+		t.Errorf("Tracker Protocol = %q, want github", t2.Tracker.Protocol)
+	}
+
+	// 3. Resolve dev dependency phpunit
+	t3, err := probe.Resolve(context.Background(), "phpunit")
+	if err != nil {
+		t.Fatalf("resolve phpunit: %v", err)
+	}
+	if t3.LocalVersion != "10.5.9" {
+		t.Errorf("LocalVersion = %q, want 10.5.9", t3.LocalVersion)
+	}
+	if t3.Tracker.Protocol != ProtocolGitHub {
+		t.Errorf("Tracker Protocol = %q, want github", t3.Tracker.Protocol)
+	}
+
+	// 4. Resolve root project from composer.json
+	t4, err := probe.Resolve(context.Background(), "my-php-app")
+	if err != nil {
+		t.Fatalf("resolve my-php-app: %v", err)
+	}
+	if t4.CanonicalName != "my-org/my-php-app" {
+		t.Errorf("CanonicalName = %q, want my-org/my-php-app", t4.CanonicalName)
+	}
+	if t4.Tracker.Protocol != ProtocolGitHub {
+		t.Errorf("Tracker Protocol = %q, want github", t4.Tracker.Protocol)
+	}
+}
