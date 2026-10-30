@@ -1588,3 +1588,178 @@ body:
 		t.Errorf("expected body to mention maintainer policy opt-out, got: %s", string(respApproveBytes))
 	}
 }
+
+func TestServerParkedEndpoints(t *testing.T) {
+	tempDir := t.TempDir()
+	draftStore := adapter.NewDraftStore(filepath.Join(tempDir, "drafts"))
+	parkedStore := adapter.NewParkedStore(filepath.Join(tempDir, "parked"))
+	auditLogPath := filepath.Join(tempDir, "audit.jsonl")
+	auditLogger := NewAuditLogger(auditLogPath)
+
+	srv := NewServer(":0", draftStore, nil).
+		WithParkedStore(parkedStore).
+		WithAuditLogger(auditLogger)
+
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	// 1. Initial list: should be empty
+	resp, err := http.Get(ts.URL + "/api/v1/parked")
+	if err != nil {
+		t.Fatalf("GET /api/v1/parked failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d", resp.StatusCode)
+	}
+
+	var initial []*adapter.ParkedBug
+	if err := json.NewDecoder(resp.Body).Decode(&initial); err != nil {
+		t.Fatalf("decode initial parked list: %v", err)
+	}
+	if len(initial) != 0 {
+		t.Fatalf("expected 0 parked bugs, got %d", len(initial))
+	}
+
+	// 2. Park a bug
+	bug, _, err := parkedStore.Park("sharp", "SIGSEGV on musl", "Segmentation fault at 0x0", "use debian", "package.json", "libvips")
+	if err != nil {
+		t.Fatalf("Park failed: %v", err)
+	}
+
+	// 3. List again: should contain the bug
+	resp2, err := http.Get(ts.URL + "/api/v1/parked")
+	if err != nil {
+		t.Fatalf("GET /api/v1/parked (second) failed: %v", err)
+	}
+	defer resp2.Body.Close()
+
+	var afterPark []*adapter.ParkedBug
+	if err := json.NewDecoder(resp2.Body).Decode(&afterPark); err != nil {
+		t.Fatalf("decode afterPark list: %v", err)
+	}
+	if len(afterPark) != 1 {
+		t.Fatalf("expected 1 parked bug, got %d", len(afterPark))
+	}
+	if afterPark[0].ID != bug.ID {
+		t.Errorf("bug ID = %q, want %q", afterPark[0].ID, bug.ID)
+	}
+	if afterPark[0].Dependency != "sharp" {
+		t.Errorf("bug Dependency = %q, want sharp", afterPark[0].Dependency)
+	}
+
+	// 4. Delete without CSRF header: should return 403 Forbidden
+	delReqNoHeader, err := http.NewRequest(http.MethodDelete, fmt.Sprintf("%s/api/v1/parked/%s", ts.URL, bug.ID), nil)
+	if err != nil {
+		t.Fatalf("new delete request: %v", err)
+	}
+	respDelNoHeader, err := http.DefaultClient.Do(delReqNoHeader)
+	if err != nil {
+		t.Fatalf("DELETE without CSRF failed: %v", err)
+	}
+	defer respDelNoHeader.Body.Close()
+	if respDelNoHeader.StatusCode != http.StatusForbidden {
+		t.Errorf("expected 403 Forbidden without CSRF, got %d", respDelNoHeader.StatusCode)
+	}
+
+	// 5. Delete with CSRF header: should return 200 OK
+	delReq, err := http.NewRequest(http.MethodDelete, fmt.Sprintf("%s/api/v1/parked/%s", ts.URL, bug.ID), nil)
+	if err != nil {
+		t.Fatalf("new delete request: %v", err)
+	}
+	delReq.Header.Set("X-Bugrouter-Request", "1")
+	respDel, err := http.DefaultClient.Do(delReq)
+	if err != nil {
+		t.Fatalf("DELETE with CSRF failed: %v", err)
+	}
+	defer respDel.Body.Close()
+	if respDel.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d", respDel.StatusCode)
+	}
+
+	var delResult map[string]any
+	if err := json.NewDecoder(respDel.Body).Decode(&delResult); err != nil {
+		t.Fatalf("decode delete response: %v", err)
+	}
+	if delResult["status"] != "deleted" || delResult["id"] != bug.ID {
+		t.Errorf("unexpected delete result: %+v", delResult)
+	}
+
+	// 6. Delete again: should return 404 Not Found
+	delReq2, err := http.NewRequest(http.MethodDelete, fmt.Sprintf("%s/api/v1/parked/%s", ts.URL, bug.ID), nil)
+	if err != nil {
+		t.Fatalf("new delete request (second): %v", err)
+	}
+	delReq2.Header.Set("X-Bugrouter-Request", "1")
+	respDel2, err := http.DefaultClient.Do(delReq2)
+	if err != nil {
+		t.Fatalf("DELETE (second) failed: %v", err)
+	}
+	defer respDel2.Body.Close()
+	if respDel2.StatusCode != http.StatusNotFound {
+		t.Errorf("expected 404 Not Found for deleted bug, got %d", respDel2.StatusCode)
+	}
+
+	// 7. Verify audit log recorded "parked.deleted"
+	auditEvents, err := auditLogger.ListRecent(10)
+	if err != nil {
+		t.Fatalf("read audit events failed: %v", err)
+	}
+	foundAudit := false
+	for _, ev := range auditEvents {
+		if ev.Action == "parked.deleted" && ev.DraftID == bug.ID {
+			foundAudit = true
+			break
+		}
+	}
+	if !foundAudit {
+		t.Errorf("audit log missing 'parked.deleted' event for %s", bug.ID)
+	}
+}
+
+func TestServerIndexParkedCard(t *testing.T) {
+	tempDir := t.TempDir()
+	draftStore := adapter.NewDraftStore(filepath.Join(tempDir, "drafts"))
+	srv := NewServer(":0", draftStore, nil)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/")
+	if err != nil {
+		t.Fatalf("GET / failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d", resp.StatusCode)
+	}
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read index HTML: %v", err)
+	}
+	body := string(bodyBytes)
+
+	// Verify Parked Bug Breadcrumbs panel
+	if !strings.Contains(body, "parked-container") {
+		t.Errorf("index HTML missing 'parked-container'")
+	}
+	if !strings.Contains(body, "Parked Bug Breadcrumbs") {
+		t.Errorf("index HTML missing 'Parked Bug Breadcrumbs'")
+	}
+	if !strings.Contains(body, "fetchParked()") {
+		t.Errorf("index HTML missing 'fetchParked()'")
+	}
+	if !strings.Contains(body, "stageParkedDraft") {
+		t.Errorf("index HTML missing 'stageParkedDraft'")
+	}
+	if !strings.Contains(body, "dismissParkedBug") {
+		t.Errorf("index HTML missing 'dismissParkedBug'")
+	}
+
+	// Verify automatic speculative stack scanning is removed from page load
+	if strings.Contains(body, "fetchStack(false)") {
+		t.Errorf("index HTML still contains automatic 'fetchStack(false)'")
+	}
+}

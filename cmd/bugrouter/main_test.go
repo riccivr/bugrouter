@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -853,5 +854,260 @@ func TestCrashLogPipeline(t *testing.T) {
 		if !strings.Contains(err.Error(), "no") && !strings.Contains(err.Error(), "context") && !strings.Contains(err.Error(), "not found") {
 			t.Logf("ReadLatestCrash returned: %v (expected in clean test environment)", err)
 		}
+	}
+}
+
+func TestRunScrub(t *testing.T) {
+	// 1. With --input flag
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	code := runScrub(strings.NewReader(""), &out, &errOut, []string{"--input", "Bearer ghp_abcdef1234567890 in /home/alice"})
+	if code != 0 {
+		t.Fatalf("expected exit code 0, got %d (err: %s)", code, errOut.String())
+	}
+	if !strings.Contains(out.String(), "[REDACTED_TOKEN]") || !strings.Contains(out.String(), "~") {
+		t.Errorf("expected scrubbed output, got: %s", out.String())
+	}
+
+	// 2. From Reader (stdin)
+	out.Reset()
+	errOut.Reset()
+	code2 := runScrub(strings.NewReader("DATABASE_URL=postgres://user:pass@localhost:5432/db\n"), &out, &errOut, []string{})
+	if code2 != 0 {
+		t.Fatalf("expected exit code 0, got %d (err: %s)", code2, errOut.String())
+	}
+	if !strings.Contains(out.String(), "[REDACTED_PASSWORD]") {
+		t.Errorf("expected scrubbed password, got: %s", out.String())
+	}
+}
+
+func TestRunVerify(t *testing.T) {
+	// 1. Error when --cmd is missing
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	code := runVerify(context.Background(), &out, &errOut, []string{})
+	if code != 1 {
+		t.Fatalf("expected exit code 1 for missing cmd, got %d", code)
+	}
+	if !strings.Contains(errOut.String(), "--cmd is required") {
+		t.Errorf("expected error message to mention --cmd, got: %s", errOut.String())
+	}
+
+	// 2. Success execution
+	out.Reset()
+	errOut.Reset()
+	codeSuccess := runVerify(context.Background(), &out, &errOut, []string{"--cmd", "echo test-verification-output"})
+	if codeSuccess != 0 {
+		t.Fatalf("expected exit code 0, got %d (err: %s)", codeSuccess, errOut.String())
+	}
+	var proof verifier.VerificationProof
+	if err := json.Unmarshal(out.Bytes(), &proof); err != nil {
+		t.Fatalf("decode verification proof JSON: %v", err)
+	}
+	if proof.Command != "echo test-verification-output" {
+		t.Errorf("proof.Command = %q, want echo test-verification-output", proof.Command)
+	}
+	if proof.ProofDigest == "" {
+		t.Errorf("expected non-empty ProofDigest")
+	}
+}
+
+func TestRunTriage(t *testing.T) {
+	crashLog := `goroutine 1 [running]:
+github.com/myorg/checkout-api/worker.ProcessPayment()
+	/app/worker.go:42 +0x123
+panic: connection timeout
+`
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	code := runTriage(context.Background(), nil, strings.NewReader(crashLog), &out, &errOut, []string{})
+	if code != 0 {
+		t.Fatalf("expected exit code 0, got %d (err: %s)", code, errOut.String())
+	}
+
+	var res AgentTriageResult
+	if err := json.Unmarshal(out.Bytes(), &res); err != nil {
+		t.Fatalf("decode triage JSON: %v", err)
+	}
+	if len(res.Candidates) == 0 {
+		t.Errorf("expected extracted candidates from trace")
+	}
+	if len(res.NextActions) == 0 {
+		t.Errorf("expected next actions")
+	}
+}
+
+func TestRunIntrospectAndDedupSubcommands(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasPrefix(r.URL.Path, "/api/v3/repos/myorg/sample-app/contents/.github/ISSUE_TEMPLATE"):
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprintf(w, `[
+				{"name": "bug.yml", "download_url": "http://%s/.github/ISSUE_TEMPLATE/bug.yml", "type": "file"}
+			]`, r.Host)
+
+		case r.URL.Path == "/.github/ISSUE_TEMPLATE/bug.yml":
+			w.Header().Set("Content-Type", "text/plain")
+			fmt.Fprint(w, `
+name: Bug Report Form
+description: Submit a bug
+title: "[BUG]: "
+labels: ["bug"]
+body:
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to Reproduce
+      description: Steps
+    validations:
+      required: true
+`)
+
+		case r.URL.Path == "/api/v3/repos/myorg/sample-app/contents/CONTRIBUTING.md":
+			w.Header().Set("Content-Type", "text/plain")
+			fmt.Fprint(w, `
+# Contributing
+Strictly NO AI-generated issues or automated bots allowed.
+- [ ] Must test against latest main branch
+`)
+
+		case strings.HasPrefix(r.URL.Path, "/api/v3/search/issues"):
+			q := r.URL.Query().Get("q")
+			w.Header().Set("Content-Type", "application/json")
+			if strings.Contains(q, "nodups") {
+				fmt.Fprint(w, `{"total_count": 0, "items": []}`)
+			} else {
+				fmt.Fprintf(w, `{
+					"total_count": 1,
+					"items": [
+						{
+							"number": 101,
+							"title": "Crash on startup",
+							"html_url": "http://%s/myorg/sample-app/issues/101",
+							"state": "open"
+						}
+					]
+				}`, r.Host)
+			}
+
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer ts.Close()
+
+	tempDir := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", filepath.Join(tempDir, "data"))
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(tempDir, "cache"))
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(tempDir, "config"))
+
+	servicesPath := filepath.Join(tempDir, "services.json")
+	servicesJSON := fmt.Sprintf(`{
+		"services": [
+			{
+				"name": "sample-app",
+				"repository_url": "%s/myorg/sample-app",
+				"tracker": {
+					"protocol": "github",
+					"url": "%s/myorg/sample-app/issues"
+				}
+			}
+		]
+	}`, ts.URL, ts.URL)
+	if err := os.WriteFile(servicesPath, []byte(servicesJSON), 0600); err != nil {
+		t.Fatalf("write services.json: %v", err)
+	}
+	t.Setenv("BUGROUTER_SERVICES_FILE", servicesPath)
+
+	testClient := httpx.NewTestClient(5 * time.Second)
+
+	// 1. Introspect: human readable
+	var outIntro bytes.Buffer
+	var errIntro bytes.Buffer
+	codeIntro := runIntrospect(context.Background(), testClient, &outIntro, &errIntro, []string{"sample-app"})
+	if codeIntro != 0 {
+		t.Fatalf("runIntrospect failed with %d: %s", codeIntro, errIntro.String())
+	}
+	introOutput := outIntro.String()
+	if !strings.Contains(introOutput, "Template Name:  Bug Report Form") {
+		t.Errorf("missing template name in output: %s", introOutput)
+	}
+	if !strings.Contains(introOutput, "AI Opt-Out:   true") {
+		t.Errorf("missing AI opt-out in output: %s", introOutput)
+	}
+	if !strings.Contains(introOutput, "Must test against latest main branch") {
+		t.Errorf("missing checklist rule in output: %s", introOutput)
+	}
+
+	// 2. Introspect: --json
+	outIntro.Reset()
+	errIntro.Reset()
+	codeIntroJSON := runIntrospect(context.Background(), testClient, &outIntro, &errIntro, []string{"--json", "sample-app"})
+	if codeIntroJSON != 0 {
+		t.Fatalf("runIntrospect --json failed: %s", errIntro.String())
+	}
+	var schema introspector.TemplateSchema
+	if err := json.Unmarshal(outIntro.Bytes(), &schema); err != nil {
+		t.Fatalf("decode schema json: %v", err)
+	}
+	if schema.Name != "Bug Report Form" {
+		t.Errorf("schema.Name = %q, want 'Bug Report Form'", schema.Name)
+	}
+	if schema.Policy == nil || !schema.Policy.AIOptOut {
+		t.Errorf("expected schema.Policy.AIOptOut=true, got %+v", schema.Policy)
+	}
+
+	// 3. Introspect: missing target
+	outIntro.Reset()
+	errIntro.Reset()
+	codeIntroMissing := runIntrospect(context.Background(), testClient, &outIntro, &errIntro, []string{})
+	if codeIntroMissing != 1 {
+		t.Errorf("expected exit code 1 for missing target, got %d", codeIntroMissing)
+	}
+
+	// 4. Dedup: matching issues
+	var outDedup bytes.Buffer
+	var errDedup bytes.Buffer
+	codeDedup := runDedup(context.Background(), testClient, &outDedup, &errDedup, []string{"sample-app", "Crash on startup"})
+	if codeDedup != 0 {
+		t.Fatalf("runDedup failed with %d: %s", codeDedup, errDedup.String())
+	}
+	dedupOutput := outDedup.String()
+	if !strings.Contains(dedupOutput, "[#101]") || !strings.Contains(dedupOutput, "Crash on startup") {
+		t.Errorf("expected duplicate match in output, got: %s", dedupOutput)
+	}
+
+	// 5. Dedup: --json
+	outDedup.Reset()
+	errDedup.Reset()
+	codeDedupJSON := runDedup(context.Background(), testClient, &outDedup, &errDedup, []string{"--json", "sample-app", "Crash on startup"})
+	if codeDedupJSON != 0 {
+		t.Fatalf("runDedup --json failed: %s", errDedup.String())
+	}
+	var dups []dedup.ExistingIssue
+	if err := json.Unmarshal(outDedup.Bytes(), &dups); err != nil {
+		t.Fatalf("decode dups json: %v", err)
+	}
+	if len(dups) != 1 || dups[0].ID != "101" {
+		t.Errorf("expected issue 101, got %+v", dups)
+	}
+
+	// 6. Dedup: no duplicates found
+	outDedup.Reset()
+	errDedup.Reset()
+	codeDedupNone := runDedup(context.Background(), testClient, &outDedup, &errDedup, []string{"sample-app", "nodups issue"})
+	if codeDedupNone != 0 {
+		t.Fatalf("runDedup failed with %d: %s", codeDedupNone, errDedup.String())
+	}
+	if !strings.Contains(outDedup.String(), "No potential upstream duplicates found.") {
+		t.Errorf("expected 'No potential upstream duplicates found.', got: %s", outDedup.String())
+	}
+
+	// 7. Dedup: missing args
+	outDedup.Reset()
+	errDedup.Reset()
+	codeDedupMissing := runDedup(context.Background(), testClient, &outDedup, &errDedup, []string{"sample-app"})
+	if codeDedupMissing != 1 {
+		t.Errorf("expected exit code 1 for missing title, got %d", codeDedupMissing)
 	}
 }

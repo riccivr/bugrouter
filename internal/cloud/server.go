@@ -44,6 +44,7 @@ type Server struct {
 	stackDir        string
 	servicesPath    string
 	patchStore      *adapter.PatchStore
+	parkedStore     *adapter.ParkedStore
 }
 
 // NewServer initializes a Cloud Control Plane server with routes registered.
@@ -61,6 +62,7 @@ func NewServer(addr string, store *adapter.DraftStore, submitter ForgeSubmitter)
 		stackDir:     ".",
 		servicesPath: resolver.ResolveOrgCloudConfigPath(),
 		patchStore:   adapter.NewPatchStore(""),
+		parkedStore:  adapter.NewParkedStore(""),
 		introspector: introspector.New(hc),
 		httpClient:   hc,
 	}
@@ -94,6 +96,14 @@ func (s *Server) WithServicesFile(path string) *Server {
 func (s *Server) WithPatchStore(store *adapter.PatchStore) *Server {
 	if store != nil {
 		s.patchStore = store
+	}
+	return s
+}
+
+// WithParkedStore overrides the default parked store for testing or custom configuration.
+func (s *Server) WithParkedStore(store *adapter.ParkedStore) *Server {
+	if store != nil {
+		s.parkedStore = store
 	}
 	return s
 }
@@ -205,6 +215,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("POST /api/v1/patches/check", s.handleCheckPatches)
 	s.mux.HandleFunc("POST /api/v1/patches", s.handleRecordPatch)
 	s.mux.HandleFunc("DELETE /api/v1/patches/{id}", s.handleDeletePatch)
+	s.mux.HandleFunc("GET /api/v1/parked", s.handleListParked)
+	s.mux.HandleFunc("DELETE /api/v1/parked/{id}", s.handleDeleteParked)
 	s.mux.HandleFunc("GET /api/v1/drafts", s.handleListDrafts)
 	s.mux.HandleFunc("POST /api/v1/drafts", s.handleCreateDraft)
 	s.mux.HandleFunc("POST /api/v1/drafts/{id}/approve", s.handleApproveDraft)
@@ -682,6 +694,82 @@ func (s *Server) handleDeletePatch(w http.ResponseWriter, r *http.Request) {
 	ev := AuditEvent{
 		Timestamp: time.Now().UTC(),
 		Action:    "patch.removed",
+		DraftID:   id,
+		Target:    id,
+		RemoteIP:  remoteIP,
+	}
+	if s.auditLogger != nil {
+		if logErr := s.auditLogger.Record(ev); logErr != nil {
+			fmt.Fprintf(os.Stderr, "audit log record error: %v\n", logErr)
+		}
+	}
+	if s.webhookNotifier != nil {
+		if notifyErr := s.webhookNotifier.Notify(r.Context(), ev); notifyErr != nil {
+			fmt.Fprintf(os.Stderr, "webhook notify error: %v\n", notifyErr)
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	if err := json.NewEncoder(w).Encode(map[string]any{
+		"status": "deleted",
+		"id":     id,
+	}); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+}
+
+func (s *Server) handleListParked(w http.ResponseWriter, r *http.Request) {
+	if s.parkedStore == nil {
+		w.Header().Set("Content-Type", "application/json")
+		if _, err := w.Write([]byte("[]")); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+		return
+	}
+	bugs, err := s.parkedStore.List()
+	if err != nil {
+		http.Error(w, fmt.Sprintf("list parked: %v", err), http.StatusInternalServerError)
+		return
+	}
+	if bugs == nil {
+		bugs = []*adapter.ParkedBug{}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(bugs); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+}
+
+func (s *Server) handleDeleteParked(w http.ResponseWriter, r *http.Request) {
+	if s.parkedStore == nil {
+		http.Error(w, "parked store not configured", http.StatusInternalServerError)
+		return
+	}
+	id := r.PathValue("id")
+	if id == "" {
+		trimmed := strings.TrimPrefix(r.URL.Path, "/api/v1/parked/")
+		id = strings.Trim(trimmed, "/")
+	}
+	id = strings.TrimSpace(id)
+	if id == "" {
+		http.Error(w, "missing parked bug id in path", http.StatusBadRequest)
+		return
+	}
+
+	if err := s.parkedStore.Delete(id); err != nil {
+		http.Error(w, fmt.Sprintf("parked bug %q not found: %v", id, err), http.StatusNotFound)
+		return
+	}
+
+	// Record audit event
+	remoteIP := r.RemoteAddr
+	if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
+		remoteIP = strings.TrimSpace(strings.Split(fwd, ",")[0])
+	}
+	ev := AuditEvent{
+		Timestamp: time.Now().UTC(),
+		Action:    "parked.deleted",
 		DraftID:   id,
 		Target:    id,
 		RemoteIP:  remoteIP,
@@ -1356,6 +1444,38 @@ const indexHTML = `<!DOCTYPE html>
       </div>
     </div>
 
+    <!-- Parked Bug Breadcrumbs (<5ms Handoff Queue) -->
+    <div id="parked-container" style="display: none; margin-bottom: 24px;">
+      <div class="card" style="border-left: 4px solid var(--accent); background: rgba(88, 166, 255, 0.05); padding: 16px;">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+          <div style="display: flex; align-items: center; gap: 8px;">
+            <span style="font-size: 1.1rem;">📍</span>
+            <h3 style="margin: 0; color: var(--accent); font-size: 1rem;">Parked Bug Breadcrumbs (&lt;5ms Handoff Queue)</h3>
+            <span id="parked-badge" class="badge">0 Parked</span>
+          </div>
+        </div>
+        <p style="margin: 0 0 12px 0; color: var(--muted); font-size: 0.85rem;">
+          These 3rd-party anomalies were parked during active coding sessions so developers and agents remained in flow. Stage full upstream bug tickets when ready, or dismiss if resolved.
+        </p>
+        <div id="parked-table-wrapper" style="overflow-x: auto;">
+          <table style="width: 100%; border-collapse: collapse; font-size: 0.85rem;">
+            <thead>
+              <tr style="text-align: left; border-bottom: 1px solid rgba(88, 166, 255, 0.2);">
+                <th style="padding: 6px 8px;">ID</th>
+                <th style="padding: 6px 8px;">Dependency</th>
+                <th style="padding: 6px 8px;">Title</th>
+                <th style="padding: 6px 8px;">Workspace File</th>
+                <th style="padding: 6px 8px;">Related Dep</th>
+                <th style="padding: 6px 8px; text-align: right;">Action</th>
+              </tr>
+            </thead>
+            <tbody id="parked-tbody">
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
     <h2>Human-in-the-Loop Review Queue</h2>
     <div class="card">
       <table>
@@ -1413,7 +1533,7 @@ const indexHTML = `<!DOCTYPE html>
           </tr>
         </thead>
         <tbody id="stack-table">
-          <tr><td colspan="7" style="text-align:center; color: var(--muted);">Loading workspace stack radar...</td></tr>
+          <tr><td colspan="7" style="text-align:center; color: var(--muted);">Click 'Scan Upstream Bugs' to scan workspace dependencies and check upstream bug trackers.</td></tr>
         </tbody>
       </table>
     </div>
@@ -1585,6 +1705,7 @@ const indexHTML = `<!DOCTYPE html>
     let currentDrafts = [];
     let currentServices = [];
     let currentPatches = [];
+    let currentParked = [];
 
     function getToken() {
       return sessionStorage.getItem('bugrouter_token') || '';
@@ -1753,6 +1874,85 @@ const indexHTML = `<!DOCTYPE html>
           return;
         }
         await fetchPatches();
+        await fetchAudit();
+      } catch (err) {
+        alert('Network error: ' + err.message);
+      }
+    }
+
+    async function fetchParked() {
+      try {
+        const res = await fetch('/api/v1/parked', { headers: getHeaders() });
+        if (res.ok) {
+          currentParked = await res.json();
+          renderParked();
+        }
+      } catch (err) {
+        console.error('fetch parked error', err);
+      }
+    }
+
+    function renderParked() {
+      const container = document.getElementById('parked-container');
+      const tbody = document.getElementById('parked-tbody');
+      const badge = document.getElementById('parked-badge');
+      if (!container || !tbody) return;
+
+      if (!currentParked || currentParked.length === 0) {
+        container.style.display = 'none';
+        return;
+      }
+
+      container.style.display = 'block';
+      if (badge) badge.textContent = currentParked.length + ' Parked';
+
+      tbody.innerHTML = currentParked.map(p => {
+        return '<tr style="border-bottom: 1px solid rgba(255,255,255,0.05);">' +
+          '<td style="padding: 8px;"><code>' + escapeHTML(p.id) + '</code></td>' +
+          '<td style="padding: 8px;"><strong>' + escapeHTML(p.dependency) + '</strong></td>' +
+          '<td style="padding: 8px;">' + escapeHTML(p.title) + '</td>' +
+          '<td style="padding: 8px; color: var(--muted);">' + escapeHTML(p.workspace_file || '-') + '</td>' +
+          '<td style="padding: 8px; color: var(--muted);">' + escapeHTML(p.related_dependency || '-') + '</td>' +
+          '<td style="padding: 8px; text-align: right;">' +
+            '<button class="btn btn-approve" style="padding: 3px 8px; font-size: 0.75rem;" onclick="stageParkedDraft(\'' + escapeHTML(p.id) + '\')">Stage Draft</button>' +
+            '<button class="btn btn-discard" style="padding: 3px 8px; font-size: 0.75rem;" onclick="dismissParkedBug(\'' + escapeHTML(p.id) + '\')">Dismiss</button>' +
+          '</td>' +
+        '</tr>';
+      }).join('');
+    }
+
+    function stageParkedDraft(id) {
+      const b = currentParked.find(x => x.id === id);
+      if (!b) return;
+      openComposerModal();
+      document.getElementById('comp-query').value = b.dependency || '';
+      document.getElementById('comp-title').value = b.title || '';
+      if (b.workaround_note) {
+        document.getElementById('comp-summary').value = 'Discovered anomaly in ' + b.dependency + ': ' + b.title + '\n\nWorkaround/Notes: ' + b.workaround_note;
+      } else {
+        document.getElementById('comp-summary').value = 'Discovered anomaly in ' + b.dependency + ': ' + b.title;
+      }
+      if (b.workspace_file) {
+        document.getElementById('comp-steps').value = 'Observed in ' + b.workspace_file;
+      } else {
+        document.getElementById('comp-steps').value = '';
+      }
+      document.getElementById('comp-logs').value = b.error_snippet || '';
+    }
+
+    async function dismissParkedBug(id) {
+      if (!confirm('Dismiss parked bug breadcrumb ' + id + '?')) return;
+      try {
+        const res = await fetch('/api/v1/parked/' + encodeURIComponent(id), {
+          method: 'DELETE',
+          headers: getHeaders()
+        });
+        if (!res.ok) {
+          const errText = await res.text();
+          alert('Dismiss failed: ' + errText);
+          return;
+        }
+        await fetchParked();
         await fetchAudit();
       } catch (err) {
         alert('Network error: ' + err.message);
@@ -2148,10 +2348,10 @@ const indexHTML = `<!DOCTYPE html>
 
     function refreshQueue() {
       fetchPatches();
+      fetchParked();
       fetchServices();
       fetchDrafts();
       fetchAudit();
-      fetchStack(false);
     }
 
     async function fetchAudit() {
@@ -2292,10 +2492,10 @@ const indexHTML = `<!DOCTYPE html>
     }
 
     fetchPatches();
+    fetchParked();
     fetchServices();
     fetchDrafts();
     fetchAudit();
-    fetchStack(false);
   </script>
 </body>
 </html>
