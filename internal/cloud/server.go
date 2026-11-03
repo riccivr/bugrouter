@@ -40,6 +40,7 @@ type Server struct {
 	servicesMu      sync.Mutex
 	patchStore      *adapter.PatchStore
 	parkedStore     *adapter.ParkedStore
+	wg              sync.WaitGroup
 }
 
 // NewServer initializes a Cloud Control Plane server with routes registered.
@@ -142,7 +143,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/v1/health", s.handleHealth)
 	s.mux.HandleFunc("GET /api/v1/services", s.handleListServices)
 	s.mux.HandleFunc("POST /api/v1/services", s.handleUpsertService)
-	s.mux.HandleFunc("DELETE /api/v1/services/{name}", s.handleDeleteService)
+	s.mux.HandleFunc("DELETE /api/v1/services/{name...}", s.handleDeleteService)
 	s.mux.HandleFunc("GET /api/v1/patches", s.handleListPatches)
 	s.mux.HandleFunc("POST /api/v1/patches/scan", s.handleScanPatches)
 	s.mux.HandleFunc("POST /api/v1/patches/check", s.handleCheckPatches)
@@ -184,12 +185,14 @@ func (s *Server) Start() error {
 	return s.httpServer.Serve(listener)
 }
 
-// Shutdown terminates the running HTTP server.
+// Shutdown terminates the running HTTP server and awaits in-flight webhooks.
 func (s *Server) Shutdown(ctx context.Context) error {
-	if s.httpServer == nil {
-		return nil
+	var err error
+	if s.httpServer != nil {
+		err = s.httpServer.Shutdown(ctx)
 	}
-	return s.httpServer.Shutdown(ctx)
+	s.wg.Wait()
+	return err
 }
 
 func (s *Server) recordAuditAndNotify(ctx context.Context, ev AuditEvent) {
@@ -199,8 +202,23 @@ func (s *Server) recordAuditAndNotify(ctx context.Context, ev AuditEvent) {
 		}
 	}
 	if s.webhookNotifier != nil {
-		if notifyErr := s.webhookNotifier.Notify(ctx, ev); notifyErr != nil {
-			fmt.Fprintf(os.Stderr, "webhook notify error: %v\n", notifyErr)
-		}
+		s.wg.Add(1)
+		go func() {
+			defer s.wg.Done()
+			notifyCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if notifyErr := s.webhookNotifier.Notify(notifyCtx, ev); notifyErr != nil {
+				fmt.Fprintf(os.Stderr, "webhook notify error: %v\n", notifyErr)
+			}
+		}()
 	}
+}
+
+// extractRemoteIP derives peer IP strictly from RemoteAddr to prevent spoofing.
+func extractRemoteIP(r *http.Request) string {
+	ip, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return ip
 }

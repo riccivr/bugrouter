@@ -48,15 +48,11 @@ func (s *Server) handleScanPatches(w http.ResponseWriter, r *http.Request) {
 		added = []adapter.DependencyPatch{}
 	}
 
-	remoteIP := r.RemoteAddr
-	if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
-		remoteIP = strings.TrimSpace(strings.Split(fwd, ",")[0])
-	}
 	ev := AuditEvent{
 		Timestamp: time.Now().UTC(),
 		Action:    "patch.scanned",
 		Target:    s.stackDir,
-		RemoteIP:  remoteIP,
+		RemoteIP:  extractRemoteIP(r),
 	}
 	s.recordAuditAndNotify(r.Context(), ev)
 
@@ -142,18 +138,13 @@ func (s *Server) handleRecordPatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Record audit event
-	remoteIP := r.RemoteAddr
-	if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
-		remoteIP = strings.TrimSpace(strings.Split(fwd, ",")[0])
-	}
 	ev := AuditEvent{
 		Timestamp: time.Now().UTC(),
 		Action:    "patch.recorded",
 		DraftID:   patch.ID,
 		Target:    patch.Dependency,
 		Protocol:  resolver.Protocol(patch.Ecosystem),
-		RemoteIP:  remoteIP,
+		RemoteIP:  extractRemoteIP(r),
 	}
 	s.recordAuditAndNotify(r.Context(), ev)
 
@@ -185,17 +176,12 @@ func (s *Server) handleDeletePatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Record audit event
-	remoteIP := r.RemoteAddr
-	if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
-		remoteIP = strings.TrimSpace(strings.Split(fwd, ",")[0])
-	}
 	ev := AuditEvent{
 		Timestamp: time.Now().UTC(),
 		Action:    "patch.removed",
 		DraftID:   id,
 		Target:    id,
-		RemoteIP:  remoteIP,
+		RemoteIP:  extractRemoteIP(r),
 	}
 	s.recordAuditAndNotify(r.Context(), ev)
 
@@ -262,17 +248,12 @@ func (s *Server) handleDeleteParked(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Record audit event
-	remoteIP := r.RemoteAddr
-	if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
-		remoteIP = strings.TrimSpace(strings.Split(fwd, ",")[0])
-	}
 	ev := AuditEvent{
 		Timestamp: time.Now().UTC(),
 		Action:    "parked.deleted",
 		DraftID:   id,
 		Target:    id,
-		RemoteIP:  remoteIP,
+		RemoteIP:  extractRemoteIP(r),
 	}
 	s.recordAuditAndNotify(r.Context(), ev)
 

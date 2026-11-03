@@ -3,7 +3,6 @@ package cloud
 import (
 	"encoding/json"
 	"fmt"
-	"net"
 	"net/http"
 	"os"
 	"strings"
@@ -74,7 +73,6 @@ func (s *Server) handleCreateDraft(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Resolve target
 	var target *resolver.Target
 	if s.resolver != nil {
 		t, err := s.resolver.Resolve(r.Context(), req.Query)
@@ -100,14 +98,12 @@ func (s *Server) handleCreateDraft(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Collect hardware telemetry if requested
 	var sysTelemetry *telemetry.SystemTelemetry
 	if req.IncludeTelemetry {
 		telem := telemetry.Collect(r.Context())
 		sysTelemetry = &telem
 	}
 
-	// Query potential duplicates
 	var dups []dedup.ExistingIssue
 	if s.dedupFinder != nil && target != nil {
 		if d, dupErr := s.dedupFinder.FindDuplicates(r.Context(), *target, scrubber.Scrub(req.Title)); dupErr == nil {
@@ -115,7 +111,6 @@ func (s *Server) handleCreateDraft(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Query related dependency duplicates if requested
 	var relatedIssues []dedup.ExistingIssue
 	req.RelatedDependency = strings.TrimSpace(req.RelatedDependency)
 	if req.RelatedDependency != "" && s.resolver != nil && s.dedupFinder != nil {
@@ -128,7 +123,6 @@ func (s *Server) handleCreateDraft(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Introspect issue template and maintainer policy if available
 	var schema *introspector.TemplateSchema
 	if s.introspector != nil && target != nil {
 		if sch, introErr := s.introspector.Introspect(r.Context(), *target); introErr == nil {
@@ -136,7 +130,6 @@ func (s *Server) handleCreateDraft(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Build staged draft
 	draft, err := adapter.BuildDraft(adapter.DraftInput{
 		Target:            *target,
 		Template:          schema,
@@ -156,7 +149,6 @@ func (s *Server) handleCreateDraft(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Strict quality check
 	if req.StrictQuality && !draft.Quality.Passed {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusUnprocessableEntity)
@@ -166,7 +158,6 @@ func (s *Server) handleCreateDraft(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Save to draftStore
 	if s.draftStore != nil {
 		if savedPath, saveErr := s.draftStore.Save(draft); saveErr != nil {
 			http.Error(w, fmt.Sprintf("save draft: %v", saveErr), http.StatusInternalServerError)
@@ -186,18 +177,13 @@ func (s *Server) handleCreateDraft(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Record audit event
-	remoteIP := r.RemoteAddr
-	if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
-		remoteIP = strings.TrimSpace(strings.Split(fwd, ",")[0])
-	}
 	ev := AuditEvent{
 		Timestamp: time.Now().UTC(),
 		Action:    "draft.created",
 		DraftID:   draft.ID,
 		Target:    draft.Target.CanonicalName,
 		Protocol:  draft.Target.Tracker.Protocol,
-		RemoteIP:  remoteIP,
+		RemoteIP:  extractRemoteIP(r),
 	}
 	s.recordAuditAndNotify(r.Context(), ev)
 
@@ -261,34 +247,22 @@ func (s *Server) handleApproveDraft(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	remoteIP, _, ipErr := net.SplitHostPort(r.RemoteAddr)
-	if ipErr != nil {
-		remoteIP = r.RemoteAddr
-	}
+	remoteIP := extractRemoteIP(r)
 
 	var issueURL string
 	if s.submitter != nil {
 		issueURL, err = s.submitter.Submit(r.Context(), draft)
 		if err != nil {
-			if s.auditLogger != nil {
-				failEv := AuditEvent{
-					Timestamp: time.Now().UTC(),
-					Action:    "draft.submit_failed",
-					DraftID:   id,
-					Target:    draft.Target.CanonicalName,
-					Protocol:  draft.Target.Tracker.Protocol,
-					RemoteIP:  remoteIP,
-					Error:     err.Error(),
-				}
-				if logErr := s.auditLogger.Record(failEv); logErr != nil {
-					fmt.Fprintf(os.Stderr, "audit log record error: %v\n", logErr)
-				}
-				if s.webhookNotifier != nil {
-					if notifyErr := s.webhookNotifier.Notify(r.Context(), failEv); notifyErr != nil {
-						fmt.Fprintf(os.Stderr, "webhook notify error: %v\n", notifyErr)
-					}
-				}
+			failEv := AuditEvent{
+				Timestamp: time.Now().UTC(),
+				Action:    "draft.submit_failed",
+				DraftID:   id,
+				Target:    draft.Target.CanonicalName,
+				Protocol:  draft.Target.Tracker.Protocol,
+				RemoteIP:  remoteIP,
+				Error:     err.Error(),
 			}
+			s.recordAuditAndNotify(r.Context(), failEv)
 			http.Error(w, fmt.Sprintf("submit draft to upstream tracker: %v", err), http.StatusInternalServerError)
 			return
 		}
@@ -357,10 +331,7 @@ func (s *Server) handleDiscardDraft(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	remoteIP, _, ipErr := net.SplitHostPort(r.RemoteAddr)
-	if ipErr != nil {
-		remoteIP = r.RemoteAddr
-	}
+	remoteIP := extractRemoteIP(r)
 
 	draft.Status = "discarded"
 	if _, err := s.draftStore.Save(draft); err != nil {

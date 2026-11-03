@@ -124,17 +124,12 @@ func (s *Server) handleUpsertService(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Record audit event
-	remoteIP := r.RemoteAddr
-	if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
-		remoteIP = strings.TrimSpace(strings.Split(fwd, ",")[0])
-	}
 	ev := AuditEvent{
 		Timestamp: time.Now().UTC(),
 		Action:    "service.upserted",
 		Target:    entry.Name,
 		Protocol:  entry.Tracker.Protocol,
-		RemoteIP:  remoteIP,
+		RemoteIP:  extractRemoteIP(r),
 	}
 	s.recordAuditAndNotify(r.Context(), ev)
 
@@ -151,6 +146,7 @@ func (s *Server) handleDeleteService(w http.ResponseWriter, r *http.Request) {
 		trimmed := strings.TrimPrefix(r.URL.Path, "/api/v1/services/")
 		name = strings.Trim(trimmed, "/")
 	}
+	name = strings.Trim(name, "/")
 	name = strings.TrimSpace(name)
 	if name == "" {
 		http.Error(w, "missing service name in path", http.StatusBadRequest)
@@ -209,16 +205,11 @@ func (s *Server) handleDeleteService(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Record audit event
-	remoteIP := r.RemoteAddr
-	if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
-		remoteIP = strings.TrimSpace(strings.Split(fwd, ",")[0])
-	}
 	ev := AuditEvent{
 		Timestamp: time.Now().UTC(),
 		Action:    "service.deleted",
 		Target:    name,
-		RemoteIP:  remoteIP,
+		RemoteIP:  extractRemoteIP(r),
 	}
 	s.recordAuditAndNotify(r.Context(), ev)
 

@@ -666,6 +666,10 @@ func TestServerWebhookNotification(t *testing.T) {
 		t.Fatalf("approve status = %d, want 200", resp.StatusCode)
 	}
 
+	if shutErr := srv.Shutdown(context.Background()); shutErr != nil {
+		t.Fatalf("srv.Shutdown: %v", shutErr)
+	}
+
 	if len(receivedPayloads) != 1 {
 		t.Fatalf("expected 1 webhook received, got %d", len(receivedPayloads))
 	}
@@ -1188,7 +1192,74 @@ func TestServerServicesCatalogEndpoints(t *testing.T) {
 		t.Errorf("expected 404 Not Found, got %d", respDelNon.StatusCode)
 	}
 
-	// 8. Verify indexHTML includes WorkOS-style sections
+	// 8. Support scoped/slashed service names: upsert and delete @myorg/pkg
+	scopedEntry := resolver.ServiceEntry{
+		Name:          "@myorg/pkg",
+		RepositoryURL: "https://github.com/myorg/pkg",
+	}
+	scopedBytes, err := json.Marshal(scopedEntry)
+	if err != nil {
+		t.Fatalf("marshal scopedEntry: %v", err)
+	}
+
+	reqScopedPost, err := http.NewRequest(http.MethodPost, ts.URL+"/api/v1/services", bytes.NewReader(scopedBytes))
+	if err != nil {
+		t.Fatalf("new request for scoped service: %v", err)
+	}
+	reqScopedPost.Header.Set("Content-Type", "application/json")
+	reqScopedPost.Header.Set("X-Bugrouter-Request", "1")
+
+	respScopedPost, err := http.DefaultClient.Do(reqScopedPost)
+	if err != nil {
+		t.Fatalf("POST scoped service failed: %v", err)
+	}
+	respScopedPost.Body.Close()
+	if respScopedPost.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 OK for scoped service POST, got %d", respScopedPost.StatusCode)
+	}
+
+	respGetScoped, err := http.Get(ts.URL + "/api/v1/services")
+	if err != nil {
+		t.Fatalf("GET /api/v1/services after scoped POST failed: %v", err)
+	}
+	defer respGetScoped.Body.Close()
+	var svcListScoped []resolver.ServiceEntry
+	if err := json.NewDecoder(respGetScoped.Body).Decode(&svcListScoped); err != nil {
+		t.Fatalf("decode svcListScoped: %v", err)
+	}
+	if len(svcListScoped) != 1 || svcListScoped[0].Name != "@myorg/pkg" {
+		t.Fatalf("expected 1 service '@myorg/pkg', got %+v", svcListScoped)
+	}
+
+	reqScopedDel, err := http.NewRequest(http.MethodDelete, ts.URL+"/api/v1/services/@myorg/pkg", nil)
+	if err != nil {
+		t.Fatalf("new delete scoped request: %v", err)
+	}
+	reqScopedDel.Header.Set("X-Bugrouter-Request", "1")
+
+	respScopedDel, err := http.DefaultClient.Do(reqScopedDel)
+	if err != nil {
+		t.Fatalf("DELETE /api/v1/services/@myorg/pkg failed: %v", err)
+	}
+	respScopedDel.Body.Close()
+	if respScopedDel.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 OK on deleting scoped service, got %d", respScopedDel.StatusCode)
+	}
+
+	respGetClean, err := http.Get(ts.URL + "/api/v1/services")
+	if err != nil {
+		t.Fatalf("GET /api/v1/services after scoped delete failed: %v", err)
+	}
+	defer respGetClean.Body.Close()
+	var svcListClean []resolver.ServiceEntry
+	if err := json.NewDecoder(respGetClean.Body).Decode(&svcListClean); err != nil {
+		t.Fatalf("decode svcListClean: %v", err)
+	}
+	if len(svcListClean) != 0 {
+		t.Errorf("expected 0 services after deleting scoped service, got %d", len(svcListClean))
+	}
+
+	// 9. Verify indexHTML includes WorkOS-style sections
 	respHTML, err := http.Get(ts.URL + "/")
 	if err != nil {
 		t.Fatalf("GET / failed: %v", err)
@@ -1925,7 +1996,10 @@ replace github.com/gin-gonic/gin => github.com/myfork/gin v1.9.2
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
+		body, readErr := io.ReadAll(resp.Body)
+		if readErr != nil {
+			t.Logf("read body error: %v", readErr)
+		}
 		t.Fatalf("expected 200 OK, got %d: %s", resp.StatusCode, string(body))
 	}
 
@@ -1995,6 +2069,11 @@ func TestConcurrentServicesUpsertAndDelete(t *testing.T) {
 		WithServicesFile(servicesFile).
 		WithAuditLogger(auditLogger).
 		WithWebhookNotifier(notifier)
+	defer func() {
+		if shutErr := srv.Shutdown(context.Background()); shutErr != nil {
+			t.Errorf("srv.Shutdown: %v", shutErr)
+		}
+	}()
 
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
@@ -2205,5 +2284,186 @@ func TestServerPatchPayloadOversizedRejected(t *testing.T) {
 
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("expected 400 Bad Request for oversized payload, got %d", resp.StatusCode)
+	}
+}
+
+func TestExtractRemoteIP(t *testing.T) {
+	tests := []struct {
+		name       string
+		remoteAddr string
+		forwarded  string
+		want       string
+	}{
+		{
+			name:       "ipv4 with port",
+			remoteAddr: "192.0.2.1:54321",
+			forwarded:  "203.0.113.195",
+			want:       "192.0.2.1",
+		},
+		{
+			name:       "ipv6 with port",
+			remoteAddr: "[2001:db8::1]:8080",
+			forwarded:  "198.51.100.1",
+			want:       "2001:db8::1",
+		},
+		{
+			name:       "invalid host port fallback",
+			remoteAddr: "192.0.2.1",
+			forwarded:  "203.0.113.195",
+			want:       "192.0.2.1",
+		},
+		{
+			name:       "empty remote addr",
+			remoteAddr: "",
+			forwarded:  "203.0.113.195",
+			want:       "",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			req, err := http.NewRequest(http.MethodGet, "/api/v1/health", nil)
+			if err != nil {
+				t.Fatalf("new request: %v", err)
+			}
+			req.RemoteAddr = tc.remoteAddr
+			if tc.forwarded != "" {
+				req.Header.Set("X-Forwarded-For", tc.forwarded)
+			}
+			got := extractRemoteIP(req)
+			if got != tc.want {
+				t.Errorf("extractRemoteIP() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestAuditLogSpoofingPrevention(t *testing.T) {
+	tempDir := t.TempDir()
+	servicesFile := filepath.Join(tempDir, "services.json")
+	auditFile := filepath.Join(tempDir, "audit.jsonl")
+	auditLogger := NewAuditLogger(auditFile)
+
+	srv := NewServer(":0", nil, nil).
+		WithServicesFile(servicesFile).
+		WithAuditLogger(auditLogger)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	entry := resolver.ServiceEntry{
+		Name:          "auth-service",
+		RepositoryURL: "https://github.com/example/auth-service",
+	}
+	body, err := json.Marshal(entry)
+	if err != nil {
+		t.Fatalf("marshal entry: %v", err)
+	}
+
+	req, err := http.NewRequest(http.MethodPost, ts.URL+"/api/v1/services", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Bugrouter-Request", "1")
+	req.Header.Set("X-Forwarded-For", "203.0.113.195, 198.51.100.1")
+
+	resp, err := ts.Client().Do(req)
+	if err != nil {
+		t.Fatalf("POST /api/v1/services failed: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d", resp.StatusCode)
+	}
+
+	events, err := auditLogger.ListRecent(10)
+	if err != nil {
+		t.Fatalf("list recent audit events: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("expected 1 audit event, got %d", len(events))
+	}
+	if strings.Contains(events[0].RemoteIP, "203.0.113.195") {
+		t.Errorf("audit log recorded spoofed X-Forwarded-For IP: %q", events[0].RemoteIP)
+	}
+	if events[0].RemoteIP != "127.0.0.1" {
+		t.Errorf("audit log remote IP = %q, want 127.0.0.1", events[0].RemoteIP)
+	}
+}
+
+func TestWebhookDecoupledFromRequestContext(t *testing.T) {
+	releaseWebhook := make(chan struct{})
+	webhookReceived := make(chan AuditEvent, 1)
+
+	tsWebhook := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var ev AuditEvent
+		if decodeErr := json.NewDecoder(r.Body).Decode(&ev); decodeErr == nil {
+			webhookReceived <- ev
+		}
+		<-releaseWebhook
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer tsWebhook.Close()
+
+	tempDir := t.TempDir()
+	servicesFile := filepath.Join(tempDir, "services.json")
+	testClient := httpx.NewTestClient(0)
+	notifier := NewWebhookNotifier(testClient, tsWebhook.URL, "test-secret")
+
+	srv := NewServer(":0", nil, nil).
+		WithServicesFile(servicesFile).
+		WithWebhookNotifier(notifier)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	entry := resolver.ServiceEntry{
+		Name:          "async-test-svc",
+		RepositoryURL: "https://github.com/example/async-test",
+	}
+	body, err := json.Marshal(entry)
+	if err != nil {
+		close(releaseWebhook)
+		t.Fatalf("marshal entry: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, ts.URL+"/api/v1/services", bytes.NewReader(body))
+	if err != nil {
+		cancel()
+		close(releaseWebhook)
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Bugrouter-Request", "1")
+
+	resp, err := ts.Client().Do(req)
+	if err != nil {
+		cancel()
+		close(releaseWebhook)
+		t.Fatalf("POST /api/v1/services failed: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		cancel()
+		close(releaseWebhook)
+		t.Fatalf("expected 200 OK, got %d", resp.StatusCode)
+	}
+
+	cancel()
+	close(releaseWebhook)
+
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer shutdownCancel()
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		t.Fatalf("srv.Shutdown failed: %v", err)
+	}
+
+	select {
+	case ev := <-webhookReceived:
+		if ev.Target != "async-test-svc" {
+			t.Errorf("webhook event target = %q, want async-test-svc", ev.Target)
+		}
+	default:
+		t.Fatal("webhook was not received after Server.Shutdown completed")
 	}
 }
