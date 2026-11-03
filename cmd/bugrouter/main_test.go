@@ -1624,3 +1624,119 @@ func slicesEqual(a, b []string) bool {
 	}
 	return true
 }
+
+func TestRunPaths(t *testing.T) {
+	var out, errOut bytes.Buffer
+	code := runPaths(&out, &errOut, []string{})
+	if code != 0 {
+		t.Fatalf("runPaths failed with code %d: %s", code, errOut.String())
+	}
+	outStr := out.String()
+	for _, key := range []string{"drafts_dir:", "parked_dir:", "patches_file:", "services_file:", "cache_dir:", "audit_log:"} {
+		if !strings.Contains(outStr, key) {
+			t.Errorf("expected paths output to contain %q, got:\n%s", key, outStr)
+		}
+	}
+
+	out.Reset()
+	errOut.Reset()
+	codeJSON := runPaths(&out, &errOut, []string{"--json"})
+	if codeJSON != 0 {
+		t.Fatalf("runPaths --json failed with code %d: %s", codeJSON, errOut.String())
+	}
+	var lp LocalPaths
+	if err := json.Unmarshal(out.Bytes(), &lp); err != nil {
+		t.Fatalf("unmarshal LocalPaths json: %v", err)
+	}
+	if lp.DraftsDir == "" || lp.ParkedDir == "" || lp.PatchesFile == "" || lp.ServicesFile == "" || lp.CacheDir == "" || lp.AuditLog == "" {
+		t.Errorf("unexpected empty path in LocalPaths: %+v", lp)
+	}
+
+	tempDir := t.TempDir()
+	dataDir := filepath.Join(tempDir, "data")
+	cacheDir := filepath.Join(tempDir, "cache")
+	configDir := filepath.Join(tempDir, "config")
+	stateDir := filepath.Join(tempDir, "state")
+	t.Setenv("XDG_DATA_HOME", dataDir)
+	t.Setenv("XDG_CACHE_HOME", cacheDir)
+	t.Setenv("XDG_CONFIG_HOME", configDir)
+	t.Setenv("XDG_STATE_HOME", stateDir)
+
+	out.Reset()
+	errOut.Reset()
+	codeEnv := runPaths(&out, &errOut, []string{"--json"})
+	if codeEnv != 0 {
+		t.Fatalf("runPaths --json with custom XDG failed with code %d: %s", codeEnv, errOut.String())
+	}
+	var lpEnv LocalPaths
+	if err := json.Unmarshal(out.Bytes(), &lpEnv); err != nil {
+		t.Fatalf("unmarshal custom LocalPaths json: %v", err)
+	}
+	if !strings.HasPrefix(lpEnv.DraftsDir, dataDir) {
+		t.Errorf("DraftsDir = %q, want prefix %q", lpEnv.DraftsDir, dataDir)
+	}
+	if !strings.HasPrefix(lpEnv.ParkedDir, dataDir) {
+		t.Errorf("ParkedDir = %q, want prefix %q", lpEnv.ParkedDir, dataDir)
+	}
+	if !strings.HasPrefix(lpEnv.PatchesFile, dataDir) {
+		t.Errorf("PatchesFile = %q, want prefix %q", lpEnv.PatchesFile, dataDir)
+	}
+	if !strings.HasPrefix(lpEnv.CacheDir, cacheDir) {
+		t.Errorf("CacheDir = %q, want prefix %q", lpEnv.CacheDir, cacheDir)
+	}
+	if !strings.HasPrefix(lpEnv.AuditLog, stateDir) {
+		t.Errorf("AuditLog = %q, want prefix %q", lpEnv.AuditLog, stateDir)
+	}
+
+	out.Reset()
+	errOut.Reset()
+	codeBad := runPaths(&out, &errOut, []string{"--invalid-flag"})
+	if codeBad != 1 {
+		t.Errorf("runPaths with invalid flag returned %d, want 1", codeBad)
+	}
+}
+
+func TestRunSelfTest(t *testing.T) {
+	var out, errOut bytes.Buffer
+	code := runSelfTest(&out, &errOut, []string{})
+	if code != 0 {
+		t.Fatalf("runSelfTest failed with code %d: %s", code, errOut.String())
+	}
+	outStr := out.String()
+	if !strings.Contains(outStr, "Self-Resolution: PASS") {
+		t.Errorf("expected 'Self-Resolution: PASS', got:\n%s", outStr)
+	}
+	if !strings.Contains(outStr, "Scrubber Redaction: PASS") {
+		t.Errorf("expected 'Scrubber Redaction: PASS', got:\n%s", outStr)
+	}
+	if !strings.Contains(outStr, "Self-Test: OK") {
+		t.Errorf("expected 'Self-Test: OK', got:\n%s", outStr)
+	}
+
+	out.Reset()
+	errOut.Reset()
+	codeJSON := runSelfTest(&out, &errOut, []string{"--json"})
+	if codeJSON != 0 {
+		t.Fatalf("runSelfTest --json failed with code %d: %s", codeJSON, errOut.String())
+	}
+	var res SelfTestResult
+	if err := json.Unmarshal(out.Bytes(), &res); err != nil {
+		t.Fatalf("unmarshal SelfTestResult json: %v", err)
+	}
+	if res.Status != "ok" {
+		t.Errorf("status = %q, want 'ok'", res.Status)
+	}
+	if res.SelfResolution != "pass" {
+		t.Errorf("self_resolution = %q, want 'pass'", res.SelfResolution)
+	}
+	if res.Scrubber != "pass" {
+		t.Errorf("scrubber = %q, want 'pass'", res.Scrubber)
+	}
+
+	out.Reset()
+	errOut.Reset()
+	codeBad := runSelfTest(&out, &errOut, []string{"--invalid-flag"})
+	if codeBad != 1 {
+		t.Errorf("runSelfTest with invalid flag returned %d, want 1", codeBad)
+	}
+}
