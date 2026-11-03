@@ -246,6 +246,28 @@ func parseGoReplaceDirective(line string) (DependencyPatch, bool) {
 	}, true
 }
 
+func isNPMPatchOrForkValue(val string) bool {
+	s := strings.TrimSpace(val)
+	if s == "" {
+		return false
+	}
+	lower := strings.ToLower(s)
+	return strings.HasPrefix(lower, "patch:") ||
+		strings.HasPrefix(lower, "file:") ||
+		strings.HasPrefix(lower, "link:") ||
+		strings.HasPrefix(lower, "git+") ||
+		strings.HasPrefix(lower, "git:") ||
+		strings.HasPrefix(lower, "git@") ||
+		strings.HasPrefix(lower, "github:") ||
+		strings.HasPrefix(lower, "http://") ||
+		strings.HasPrefix(lower, "https://") ||
+		strings.HasPrefix(lower, "./") ||
+		strings.HasPrefix(lower, "../") ||
+		strings.HasPrefix(lower, ".\\") ||
+		strings.HasPrefix(lower, "..\\") ||
+		strings.Contains(lower, ".patch")
+}
+
 func parsePackageJSONPatches(data []byte) []DependencyPatch {
 	var manifest struct {
 		Dependencies    map[string]any `json:"dependencies"`
@@ -266,11 +288,7 @@ func parsePackageJSONPatches(data []byte) []DependencyPatch {
 				continue
 			}
 			str = strings.TrimSpace(str)
-			lower := strings.ToLower(str)
-			if strings.HasPrefix(lower, "patch:") ||
-				strings.HasPrefix(lower, "file:") ||
-				strings.HasPrefix(lower, "link:") ||
-				strings.HasPrefix(lower, "git+") {
+			if isNPMPatchOrForkValue(str) {
 				patches = append(patches, DependencyPatch{
 					Dependency:   dep,
 					Ecosystem:    "npm",
@@ -285,14 +303,21 @@ func parsePackageJSONPatches(data []byte) []DependencyPatch {
 	checkDepMap(manifest.Dependencies)
 	checkDepMap(manifest.DevDependencies)
 
-	var checkOverrides func(m map[string]any)
-	checkOverrides = func(m map[string]any) {
+	var checkOverrides func(m map[string]any, parent string)
+	checkOverrides = func(m map[string]any, parent string) {
 		for k, v := range m {
 			if str, ok := v.(string); ok {
+				dep := k
+				if dep == "." {
+					dep = parent
+				}
+				if dep == "." || dep == "" {
+					continue
+				}
 				str = strings.TrimSpace(str)
-				if str != "" {
+				if isNPMPatchOrForkValue(str) {
 					patches = append(patches, DependencyPatch{
-						Dependency:   k,
+						Dependency:   dep,
 						Ecosystem:    "npm",
 						PatchTarget:  str,
 						ManifestFile: "package.json",
@@ -301,20 +326,31 @@ func parsePackageJSONPatches(data []byte) []DependencyPatch {
 					})
 				}
 			} else if subMap, ok := v.(map[string]any); ok {
-				checkOverrides(subMap)
+				parentKey := k
+				if parentKey == "." {
+					parentKey = parent
+				}
+				checkOverrides(subMap, parentKey)
 			}
 		}
 	}
-	checkOverrides(manifest.Overrides)
+	checkOverrides(manifest.Overrides, "")
 
-	var checkResolutions func(m map[string]any)
-	checkResolutions = func(m map[string]any) {
+	var checkResolutions func(m map[string]any, parent string)
+	checkResolutions = func(m map[string]any, parent string) {
 		for k, v := range m {
 			if str, ok := v.(string); ok {
+				dep := k
+				if dep == "." {
+					dep = parent
+				}
+				if dep == "." || dep == "" {
+					continue
+				}
 				str = strings.TrimSpace(str)
-				if str != "" {
+				if isNPMPatchOrForkValue(str) {
 					patches = append(patches, DependencyPatch{
-						Dependency:   k,
+						Dependency:   dep,
 						Ecosystem:    "npm",
 						PatchTarget:  str,
 						ManifestFile: "package.json",
@@ -323,11 +359,15 @@ func parsePackageJSONPatches(data []byte) []DependencyPatch {
 					})
 				}
 			} else if subMap, ok := v.(map[string]any); ok {
-				checkResolutions(subMap)
+				parentKey := k
+				if parentKey == "." {
+					parentKey = parent
+				}
+				checkResolutions(subMap, parentKey)
 			}
 		}
 	}
-	checkResolutions(manifest.Resolutions)
+	checkResolutions(manifest.Resolutions, "")
 
 	return patches
 }
@@ -478,7 +518,7 @@ func extractCargoTarget(val string) string {
 	val = strings.TrimSpace(val)
 	if strings.HasPrefix(val, "{") && strings.HasSuffix(val, "}") {
 		inner := strings.TrimSpace(val[1 : len(val)-1])
-		pairs := strings.Split(inner, ",")
+		pairs := splitInlineTablePairs(inner)
 		var pathTarget, gitTarget string
 		for _, pair := range pairs {
 			kv := strings.SplitN(pair, "=", 2)
@@ -499,9 +539,69 @@ func extractCargoTarget(val string) string {
 		if gitTarget != "" {
 			return gitTarget
 		}
-		return inner
+		return ""
 	}
 	return strings.Trim(val, `"'`)
+}
+
+func splitInlineTablePairs(s string) []string {
+	var pairs []string
+	var cur strings.Builder
+	inQuote := false
+	var quoteChar rune
+	escaped := false
+	bracketDepth := 0
+	braceDepth := 0
+
+	for _, r := range s {
+		if inQuote {
+			cur.WriteRune(r)
+			if escaped {
+				escaped = false
+			} else if r == '\\' && quoteChar == '"' {
+				escaped = true
+			} else if r == quoteChar {
+				inQuote = false
+			}
+			continue
+		}
+
+		switch r {
+		case '"', '\'':
+			inQuote = true
+			quoteChar = r
+			cur.WriteRune(r)
+		case '[':
+			bracketDepth++
+			cur.WriteRune(r)
+		case ']':
+			if bracketDepth > 0 {
+				bracketDepth--
+			}
+			cur.WriteRune(r)
+		case '{':
+			braceDepth++
+			cur.WriteRune(r)
+		case '}':
+			if braceDepth > 0 {
+				braceDepth--
+			}
+			cur.WriteRune(r)
+		case ',':
+			if bracketDepth == 0 && braceDepth == 0 {
+				pairs = append(pairs, cur.String())
+				cur.Reset()
+			} else {
+				cur.WriteRune(r)
+			}
+		default:
+			cur.WriteRune(r)
+		}
+	}
+	if cur.Len() > 0 {
+		pairs = append(pairs, cur.String())
+	}
+	return pairs
 }
 
 func parsePyprojectTomlPatches(data []byte) []DependencyPatch {

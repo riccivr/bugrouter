@@ -185,11 +185,8 @@ func queryGitLabIssueState(ctx context.Context, client *httpx.Client, u *url.URL
 	}
 
 	var headers map[string]string
-	for _, env := range []string{"GITLAB_TOKEN", "GL_TOKEN", "BUGROUTER_GITLAB_TOKEN"} {
-		if tok := os.Getenv(env); tok != "" {
-			headers = map[string]string{"PRIVATE-TOKEN": tok}
-			break
-		}
+	if hName, hVal := gitLabAuthHeader(u.Host); hName != "" {
+		headers = map[string]string{hName: hVal}
 	}
 
 	data, err := client.GetBytesWithHeaders(ctx, apiURL, "application/json", headers)
@@ -235,11 +232,8 @@ func queryGiteaIssueState(ctx context.Context, client *httpx.Client, u *url.URL,
 	}
 
 	var headers map[string]string
-	for _, env := range []string{"GITEA_TOKEN", "BUGROUTER_GITEA_TOKEN", "CODEBERG_TOKEN"} {
-		if tok := os.Getenv(env); tok != "" {
-			headers = map[string]string{"Authorization": "token " + tok}
-			break
-		}
+	if hName, hVal := giteaAuthHeader(u.Host); hName != "" {
+		headers = map[string]string{hName: hVal}
 	}
 
 	data, err := client.GetBytesWithHeaders(ctx, apiURL, "application/json", headers)
@@ -293,11 +287,8 @@ func queryGitHubIssueState(ctx context.Context, client *httpx.Client, u *url.URL
 	}
 
 	var headers map[string]string
-	for _, env := range []string{"GITHUB_TOKEN", "GH_TOKEN", "BUGROUTER_GITHUB_TOKEN"} {
-		if tok := os.Getenv(env); tok != "" {
-			headers = map[string]string{"Authorization": "Bearer " + tok}
-			break
-		}
+	if hName, hVal := gitHubAuthHeader(u.Host); hName != "" {
+		headers = map[string]string{hName: hVal}
 	}
 
 	data, err := client.GetBytesWithHeaders(ctx, apiURL, "application/vnd.github.v3+json", headers)
@@ -323,4 +314,49 @@ func queryGitHubIssueState(ctx context.Context, client *httpx.Client, u *url.URL
 		return st, nil
 	}
 	return "unknown", nil
+}
+
+func gitHubAuthHeader(host string) (string, string) {
+	if explicit := os.Getenv("BUGROUTER_GITHUB_TOKEN"); explicit != "" {
+		return "Authorization", "Bearer " + explicit
+	}
+	if strings.EqualFold(host, "github.com") || strings.Contains(strings.ToLower(host), "github") {
+		for _, env := range []string{"GITHUB_TOKEN", "GH_TOKEN"} {
+			if tok := os.Getenv(env); tok != "" {
+				return "Authorization", "Bearer " + tok
+			}
+		}
+	}
+	return "", ""
+}
+
+func gitLabAuthHeader(host string) (string, string) {
+	if explicit := os.Getenv("BUGROUTER_GITLAB_TOKEN"); explicit != "" {
+		return "PRIVATE-TOKEN", explicit
+	}
+	if strings.Contains(strings.ToLower(host), "gitlab") {
+		for _, env := range []string{"GITLAB_TOKEN", "GL_TOKEN"} {
+			if tok := os.Getenv(env); tok != "" {
+				return "PRIVATE-TOKEN", tok
+			}
+		}
+	}
+	return "", ""
+}
+
+func giteaAuthHeader(host string) (string, string) {
+	if explicit := os.Getenv("BUGROUTER_GITEA_TOKEN"); explicit != "" {
+		return "Authorization", "token " + explicit
+	}
+	lowerHost := strings.ToLower(host)
+	if strings.Contains(lowerHost, "codeberg.org") {
+		if tok := os.Getenv("CODEBERG_TOKEN"); tok != "" {
+			return "Authorization", "token " + tok
+		}
+	} else if strings.Contains(lowerHost, "gitea") || strings.Contains(lowerHost, "forgejo") || strings.Contains(lowerHost, "blender.org") {
+		if tok := os.Getenv("GITEA_TOKEN"); tok != "" {
+			return "Authorization", "token " + tok
+		}
+	}
+	return "", ""
 }

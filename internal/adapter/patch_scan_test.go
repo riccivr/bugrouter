@@ -80,10 +80,10 @@ func TestScanPackageJSONAndPatchesDir(t *testing.T) {
     "normal-dev": "^2.0.0"
   },
   "overrides": {
-    "glob": "10.0.0-override"
+    "glob": "patch:glob@10.0.0#./patches/glob.patch"
   },
   "resolutions": {
-    "lodash": "4.17.21-res"
+    "lodash": "github:myorg/lodash-fork"
   }
 }`
 	if err := os.WriteFile(filepath.Join(tempDir, "package.json"), []byte(pkgJSONContent), 0600); err != nil {
@@ -121,10 +121,10 @@ func TestScanPackageJSONAndPatchesDir(t *testing.T) {
 	}{
 		{dep: "@types/node", target: "patches/@types+node+20.1.0.patch"},
 		{dep: "git-fork", target: "git+https://github.com/test/fork.git#v1.0.0"},
-		{dep: "glob", target: "10.0.0-override"},
+		{dep: "glob", target: "patch:glob@10.0.0#./patches/glob.patch"},
 		{dep: "linked-lib", target: "link:../../libs/linked"},
 		{dep: "local-pkg", target: "file:../local-pkg"},
-		{dep: "lodash", target: "4.17.21-res"},
+		{dep: "lodash", target: "github:myorg/lodash-fork"},
 		{dep: "sharp", target: "patch:sharp@0.33.0#./patches/sharp.patch"},
 	}
 
@@ -143,6 +143,79 @@ func TestScanPackageJSONAndPatchesDir(t *testing.T) {
 	}
 }
 
+func TestScanPackageJSONOverridesFiltering(t *testing.T) {
+	tempDir := t.TempDir()
+	pkgJSONContent := `{
+  "name": "test-overrides-project",
+  "overrides": {
+    "glob": "10.0.0",
+    "semver": "7.5.4",
+    "patched-pkg": "patch:patched-pkg@1.0.0#./patches/pkg.patch",
+    "fork-pkg": "github:myorg/fork-pkg",
+    "nested-pkg": {
+      ".": "patch:nested-pkg@2.0.0#./patches/nested.patch",
+      "plain-child": "1.2.3",
+      "fork-child": "git+https://github.com/myorg/fork-child.git"
+    },
+    "nested-plain": {
+      ".": "3.0.0"
+    }
+  },
+  "resolutions": {
+    "plain-res": "2.0.0",
+    "patch-res": "file:../patch-res"
+  }
+}`
+	if err := os.WriteFile(filepath.Join(tempDir, "package.json"), []byte(pkgJSONContent), 0600); err != nil {
+		t.Fatalf("write package.json: %v", err)
+	}
+
+	patches, err := ScanWorkspacePatches(tempDir)
+	if err != nil {
+		t.Fatalf("ScanWorkspacePatches failed: %v", err)
+	}
+
+	depMap := make(map[string]string)
+	for _, p := range patches {
+		if p.Dependency == "." {
+			t.Errorf("scanned patch has '.' as dependency key")
+		}
+		depMap[p.Dependency] = p.PatchTarget
+	}
+
+	if _, found := depMap["glob"]; found {
+		t.Errorf("plain semver override 'glob' should be ignored")
+	}
+	if _, found := depMap["semver"]; found {
+		t.Errorf("plain semver override 'semver' should be ignored")
+	}
+	if _, found := depMap["plain-child"]; found {
+		t.Errorf("plain semver child override 'plain-child' should be ignored")
+	}
+	if _, found := depMap["nested-plain"]; found {
+		t.Errorf("plain semver nested override 'nested-plain' should be ignored")
+	}
+	if _, found := depMap["plain-res"]; found {
+		t.Errorf("plain semver resolution 'plain-res' should be ignored")
+	}
+
+	if depMap["patched-pkg"] != "patch:patched-pkg@1.0.0#./patches/pkg.patch" {
+		t.Errorf("expected patched-pkg patch target, got %q", depMap["patched-pkg"])
+	}
+	if depMap["fork-pkg"] != "github:myorg/fork-pkg" {
+		t.Errorf("expected fork-pkg target, got %q", depMap["fork-pkg"])
+	}
+	if depMap["nested-pkg"] != "patch:nested-pkg@2.0.0#./patches/nested.patch" {
+		t.Errorf("expected nested-pkg target for '.', got %q", depMap["nested-pkg"])
+	}
+	if depMap["fork-child"] != "git+https://github.com/myorg/fork-child.git" {
+		t.Errorf("expected fork-child target, got %q", depMap["fork-child"])
+	}
+	if depMap["patch-res"] != "file:../patch-res" {
+		t.Errorf("expected patch-res target, got %q", depMap["patch-res"])
+	}
+}
+
 func TestScanCargoTomlPatches(t *testing.T) {
 	tempDir := t.TempDir()
 	cargoContent := `[package]
@@ -156,6 +229,8 @@ serde = "1.0"
 [patch.crates-io]
 tokio = { path = "../tokio-fork" }
 serde = { git = "https://github.com/myfork/serde.git", branch = "patch" }
+crate-with-features = { path = "../crate-fork", features = ["derive", "extra"] }
+normal-crate = { version = "1.0", features = ["derive", "alloc"] }
 
 [patch.crates-io.hyper]
 path = "../hyper-fork"
@@ -173,6 +248,7 @@ path = "../hyper-fork"
 		dep    string
 		target string
 	}{
+		{dep: "crate-with-features", target: "../crate-fork"},
 		{dep: "hyper", target: "../hyper-fork"},
 		{dep: "serde", target: "https://github.com/myfork/serde.git"},
 		{dep: "tokio", target: "../tokio-fork"},
@@ -209,6 +285,9 @@ python = "^3.11"
 requests = { path = "../requests-fork" }
 urllib3 = { git = "https://github.com/myfork/urllib3.git" }
 normal-dep = "^2.0.0"
+uvicorn = { version = "^0.23.0", extras = ["standard"] }
+fastapi = { version = "^0.100.0", extras = ["all", "standard"] }
+custom-pkg = { path = "../custom-fork", extras = ["a", "b"] }
 `
 	if err := os.WriteFile(filepath.Join(tempDir, "pyproject.toml"), []byte(pyContent), 0600); err != nil {
 		t.Fatalf("write pyproject.toml: %v", err)
@@ -219,15 +298,32 @@ normal-dep = "^2.0.0"
 		t.Fatalf("ScanWorkspacePatches failed: %v", err)
 	}
 
-	if len(patches) != 2 {
-		t.Fatalf("expected 2 python patches, got %d: %+v", len(patches), patches)
+	depMap := make(map[string]string)
+	for _, p := range patches {
+		depMap[p.Dependency] = p.PatchTarget
 	}
 
-	if patches[0].Dependency != "requests" || patches[0].PatchTarget != "../requests-fork" {
-		t.Errorf("unexpected patch[0]: %+v", patches[0])
+	if _, found := depMap["uvicorn"]; found {
+		t.Errorf("uvicorn with extras should not be flagged as a patch")
 	}
-	if patches[1].Dependency != "urllib3" || patches[1].PatchTarget != "https://github.com/myfork/urllib3.git" {
-		t.Errorf("unexpected patch[1]: %+v", patches[1])
+	if _, found := depMap["fastapi"]; found {
+		t.Errorf("fastapi with extras should not be flagged as a patch")
+	}
+	if _, found := depMap["normal-dep"]; found {
+		t.Errorf("normal-dep should not be flagged as a patch")
+	}
+
+	if depMap["requests"] != "../requests-fork" {
+		t.Errorf("unexpected requests patch target: %q", depMap["requests"])
+	}
+	if depMap["urllib3"] != "https://github.com/myfork/urllib3.git" {
+		t.Errorf("unexpected urllib3 patch target: %q", depMap["urllib3"])
+	}
+	if depMap["custom-pkg"] != "../custom-fork" {
+		t.Errorf("unexpected custom-pkg patch target: %q", depMap["custom-pkg"])
+	}
+	if len(patches) != 3 {
+		t.Fatalf("expected 3 python patches, got %d: %+v", len(patches), patches)
 	}
 }
 
