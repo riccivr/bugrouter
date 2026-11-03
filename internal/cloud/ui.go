@@ -602,7 +602,12 @@ const indexHTML = `<!DOCTYPE html>
         const upstreamState = item.upstream_state;
         let issueLink = '<span style="color: var(--muted);">-</span>';
         if (p.upstream_issue_url) {
-          issueLink = '<a href="' + escapeHTML(p.upstream_issue_url) + '" target="_blank" style="color: var(--accent);">' + escapeHTML(p.upstream_issue_url) + '</a>';
+          const u = p.upstream_issue_url;
+          if (u.startsWith('https://') || u.startsWith('http://')) {
+            issueLink = '<a href="' + escapeHTML(u) + '" target="_blank" style="color: var(--accent);">' + escapeHTML(u) + '</a>';
+          } else {
+            issueLink = '<span>' + escapeHTML(u) + '</span>';
+          }
         }
         let stateBadge = '';
         if (canRevert) {
@@ -996,7 +1001,13 @@ const indexHTML = `<!DOCTYPE html>
         const targetName = (d.target && d.target.canonical_name) || 'unknown';
         const protocol = (d.target && d.target.tracker && d.target.tracker.protocol) || 'none';
         const approveBtn = (!isCompanion && d.status !== 'submitted' && d.status !== 'discarded') ? '<button class="btn btn-approve" onclick="approveDraft(\'' + d.id + '\')">Approve</button>' : '';
-        const manualLink = (isCompanion && d.submission_url) ? '<a href="' + escapeHTML(d.submission_url) + '" target="_blank" class="btn btn-approve" style="text-decoration:none; display:inline-block;">Open Form</a>' : '';
+        let manualLink = '';
+        if (isCompanion && d.submission_url) {
+          const u = d.submission_url;
+          if (u.startsWith('https://') || u.startsWith('http://') || u.startsWith('mailto:')) {
+            manualLink = '<a href="' + escapeHTML(u) + '" target="_blank" class="btn btn-approve" style="text-decoration:none; display:inline-block;">Open Form</a>';
+          }
+        }
         const discardBtn = (d.status !== 'discarded' && d.status !== 'submitted') ? '<button class="btn btn-discard" onclick="discardDraft(\'' + d.id + '\')">Discard</button>' : '';
         return '<tr>' +
           '<td><code>' + d.id + '</code></td>' +
@@ -1035,7 +1046,10 @@ const indexHTML = `<!DOCTYPE html>
           bodyHtml += '</ul>';
         }
         if (d.submission_url) {
-          bodyHtml += '<div style="margin-top:10px;"><a href="' + escapeHTML(d.submission_url) + '" target="_blank" class="btn btn-approve" style="text-decoration:none; display:inline-block;">Open Submission Form (Manual Filing)</a></div>';
+          const u = d.submission_url;
+          if (u.startsWith('https://') || u.startsWith('http://') || u.startsWith('mailto:')) {
+            bodyHtml += '<div style="margin-top:10px;"><a href="' + escapeHTML(u) + '" target="_blank" class="btn btn-approve" style="text-decoration:none; display:inline-block;">Open Submission Form (Manual Filing)</a></div>';
+          }
         }
         bodyHtml += '</div>';
       }

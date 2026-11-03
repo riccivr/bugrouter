@@ -153,28 +153,126 @@ func shouldSendGitHubAuth(downloadURL, apiBaseURL string) bool {
 	return false
 }
 
-func gitHubAuthHeader() map[string]string {
-	for _, env := range []string{"GITHUB_TOKEN", "GH_TOKEN", "BUGROUTER_GITHUB_TOKEN"} {
-		if tok := os.Getenv(env); tok != "" {
-			return map[string]string{"Authorization": "Bearer " + tok}
+func cleanHost(host string) string {
+	host = strings.TrimSpace(host)
+	if strings.HasPrefix(host, "[") && strings.Contains(host, "]") {
+		end := strings.Index(host, "]")
+		return strings.ToLower(host[1:end])
+	}
+	if idx := strings.IndexByte(host, ':'); idx != -1 {
+		host = host[:idx]
+	}
+	return strings.ToLower(host)
+}
+
+func extractURLHostname(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	if strings.HasPrefix(raw, "git@") && strings.Contains(raw, ":") {
+		parts := strings.SplitN(strings.TrimPrefix(raw, "git@"), ":", 2)
+		return parts[0]
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	return u.Hostname()
+}
+
+func gitHubAuthHeader(host string) map[string]string {
+	if explicit := os.Getenv("BUGROUTER_GITHUB_TOKEN"); explicit != "" {
+		return map[string]string{"Authorization": "Bearer " + explicit}
+	}
+	h := cleanHost(host)
+	if strings.EqualFold(h, "github.com") || strings.EqualFold(h, "api.github.com") || strings.HasSuffix(h, ".github.com") {
+		for _, env := range []string{"GITHUB_TOKEN", "GH_TOKEN"} {
+			if tok := os.Getenv(env); tok != "" {
+				return map[string]string{"Authorization": "Bearer " + tok}
+			}
 		}
 	}
 	return nil
 }
 
-func gitLabAuthHeader() map[string]string {
-	for _, env := range []string{"GITLAB_TOKEN", "GL_TOKEN", "BUGROUTER_GITLAB_TOKEN"} {
-		if tok := os.Getenv(env); tok != "" {
-			return map[string]string{"PRIVATE-TOKEN": tok}
+func gitLabAuthHeader(host string) map[string]string {
+	if explicit := os.Getenv("BUGROUTER_GITLAB_TOKEN"); explicit != "" {
+		return map[string]string{"PRIVATE-TOKEN": explicit}
+	}
+	h := cleanHost(host)
+	if strings.EqualFold(h, "gitlab.com") || strings.HasSuffix(h, ".gitlab.com") {
+		for _, env := range []string{"GITLAB_TOKEN", "GL_TOKEN"} {
+			if tok := os.Getenv(env); tok != "" {
+				return map[string]string{"PRIVATE-TOKEN": tok}
+			}
 		}
 	}
 	return nil
 }
 
-func giteaAuthHeader() map[string]string {
-	for _, env := range []string{"GITEA_TOKEN", "BUGROUTER_GITEA_TOKEN", "CODEBERG_TOKEN"} {
-		if tok := os.Getenv(env); tok != "" {
+func giteaAuthHeader(host string) map[string]string {
+	if explicit := os.Getenv("BUGROUTER_GITEA_TOKEN"); explicit != "" {
+		return map[string]string{"Authorization": "token " + explicit}
+	}
+	h := cleanHost(host)
+	if strings.EqualFold(h, "codeberg.org") {
+		if tok := os.Getenv("CODEBERG_TOKEN"); tok != "" {
 			return map[string]string{"Authorization": "token " + tok}
+		}
+	} else if strings.EqualFold(h, "gitea.com") || strings.EqualFold(h, "projects.blender.org") {
+		if tok := os.Getenv("GITEA_TOKEN"); tok != "" {
+			return map[string]string{"Authorization": "token " + tok}
+		}
+	}
+	return nil
+}
+
+func resolveGitHubAuth(reqHost string, target resolver.Target) map[string]string {
+	if h := gitHubAuthHeader(reqHost); h != nil {
+		return h
+	}
+	if th := extractURLHostname(target.Tracker.URL); th != "" {
+		if h := gitHubAuthHeader(th); h != nil {
+			return h
+		}
+	}
+	if rh := extractURLHostname(target.RepositoryURL); rh != "" {
+		if h := gitHubAuthHeader(rh); h != nil {
+			return h
+		}
+	}
+	return nil
+}
+
+func resolveGitLabAuth(reqHost string, target resolver.Target) map[string]string {
+	if h := gitLabAuthHeader(reqHost); h != nil {
+		return h
+	}
+	if th := extractURLHostname(target.Tracker.URL); th != "" {
+		if h := gitLabAuthHeader(th); h != nil {
+			return h
+		}
+	}
+	if rh := extractURLHostname(target.RepositoryURL); rh != "" {
+		if h := gitLabAuthHeader(rh); h != nil {
+			return h
+		}
+	}
+	return nil
+}
+
+func resolveGiteaAuth(reqHost string, target resolver.Target) map[string]string {
+	if h := giteaAuthHeader(reqHost); h != nil {
+		return h
+	}
+	if th := extractURLHostname(target.Tracker.URL); th != "" {
+		if h := giteaAuthHeader(th); h != nil {
+			return h
+		}
+	}
+	if rh := extractURLHostname(target.RepositoryURL); rh != "" {
+		if h := giteaAuthHeader(rh); h != nil {
+			return h
 		}
 	}
 	return nil
@@ -200,21 +298,24 @@ func (intro *Introspector) introspectGitHub(ctx context.Context, target resolver
 	}
 	baseURL = strings.TrimRight(baseURL, "/")
 
+	reqHost := extractURLHostname(baseURL)
+	headers := resolveGitHubAuth(reqHost, target)
+
 	dirURL := fmt.Sprintf("%s/repos/%s/%s/contents/.github/ISSUE_TEMPLATE", baseURL, owner, repo)
 
 	fetchContributing := func() *MaintainerPolicy {
 		paths := []string{"CONTRIBUTING.md", ".github/CONTRIBUTING.md"}
 		for _, p := range paths {
 			rawURL := fmt.Sprintf("%s/repos/%s/%s/contents/%s", baseURL, owner, repo, p)
-			contentData, fetchErr := intro.client.GetBytesWithHeaders(ctx, rawURL, "application/vnd.github.v3.raw", gitHubAuthHeader())
+			contentData, fetchErr := intro.client.GetBytesWithHeaders(ctx, rawURL, "application/vnd.github.v3.raw", headers)
 			if fetchErr == nil && len(contentData) > 0 {
 				var item ghContentItem
 				if json.Unmarshal(contentData, &item) == nil && item.DownloadURL != "" {
-					var headers map[string]string
+					var dlHeaders map[string]string
 					if shouldSendGitHubAuth(item.DownloadURL, baseURL) {
-						headers = gitHubAuthHeader()
+						dlHeaders = headers
 					}
-					downData, downErr := intro.client.GetBytesWithHeaders(ctx, item.DownloadURL, "text/plain", headers)
+					downData, downErr := intro.client.GetBytesWithHeaders(ctx, item.DownloadURL, "text/plain", dlHeaders)
 					if downErr == nil && len(downData) > 0 {
 						if pol := ParseMaintainerPolicy(string(downData)); pol != nil {
 							return pol
@@ -230,7 +331,7 @@ func (intro *Introspector) introspectGitHub(ctx context.Context, target resolver
 	}
 
 	var candidates []ghContentItem
-	data, err := intro.client.GetBytesWithHeaders(ctx, dirURL, "application/json", gitHubAuthHeader())
+	data, err := intro.client.GetBytesWithHeaders(ctx, dirURL, "application/json", headers)
 	if err == nil {
 		var items []ghContentItem
 		if unmarshalErr := json.Unmarshal(data, &items); unmarshalErr == nil {
@@ -245,7 +346,7 @@ func (intro *Introspector) introspectGitHub(ctx context.Context, target resolver
 
 	if len(candidates) == 0 {
 		fileURL := fmt.Sprintf("%s/repos/%s/%s/contents/.github/ISSUE_TEMPLATE.md", baseURL, owner, repo)
-		fileData, fileErr := intro.client.GetBytesWithHeaders(ctx, fileURL, "application/json", gitHubAuthHeader())
+		fileData, fileErr := intro.client.GetBytesWithHeaders(ctx, fileURL, "application/json", headers)
 		if fileErr == nil {
 			var singleItem ghContentItem
 			if unmarshalErr := json.Unmarshal(fileData, &singleItem); unmarshalErr == nil {
@@ -293,17 +394,17 @@ func (intro *Introspector) introspectGitHub(ctx context.Context, target resolver
 	best := candidates[0]
 	var rawData []byte
 	if best.DownloadURL != "" {
-		var headers map[string]string
+		var dlHeaders map[string]string
 		if shouldSendGitHubAuth(best.DownloadURL, baseURL) {
-			headers = gitHubAuthHeader()
+			dlHeaders = headers
 		}
-		rawData, err = intro.client.GetBytesWithHeaders(ctx, best.DownloadURL, "text/plain", headers)
+		rawData, err = intro.client.GetBytesWithHeaders(ctx, best.DownloadURL, "text/plain", dlHeaders)
 		if err != nil {
 			return nil, fmt.Errorf("fetch raw template %s: %w", best.DownloadURL, err)
 		}
 	} else {
 		rawURL := fmt.Sprintf("%s/repos/%s/%s/contents/.github/ISSUE_TEMPLATE/%s", baseURL, owner, repo, best.Name)
-		rawData, err = intro.client.GetBytesWithHeaders(ctx, rawURL, "application/vnd.github.v3.raw", gitHubAuthHeader())
+		rawData, err = intro.client.GetBytesWithHeaders(ctx, rawURL, "application/vnd.github.v3.raw", headers)
 		if err != nil {
 			return nil, fmt.Errorf("fetch raw template %s: %w", rawURL, err)
 		}
@@ -374,9 +475,12 @@ func (intro *Introspector) introspectGitLab(ctx context.Context, target resolver
 	}
 	baseURL = strings.TrimRight(baseURL, "/")
 
+	reqHost := extractURLHostname(baseURL)
+	headers := resolveGitLabAuth(reqHost, target)
+
 	treeURL := fmt.Sprintf("%s/api/v4/projects/%s/repository/tree?path=.gitlab/issue_templates", baseURL, encodedPath)
 
-	data, err := intro.client.GetBytesWithHeaders(ctx, treeURL, "application/json", gitLabAuthHeader())
+	data, err := intro.client.GetBytesWithHeaders(ctx, treeURL, "application/json", headers)
 	if err != nil {
 		return nil, ErrNoTemplateFound
 	}
@@ -414,7 +518,7 @@ func (intro *Introspector) introspectGitLab(ctx context.Context, target resolver
 	encodedFilePath := url.PathEscape(filePath)
 
 	rawURL := fmt.Sprintf("%s/api/v4/projects/%s/repository/files/%s/raw?ref=HEAD", baseURL, encodedPath, encodedFilePath)
-	rawData, err := intro.client.GetBytesWithHeaders(ctx, rawURL, "text/plain", gitLabAuthHeader())
+	rawData, err := intro.client.GetBytesWithHeaders(ctx, rawURL, "text/plain", headers)
 	if err != nil {
 		return nil, fmt.Errorf("fetch gitlab raw template %s: %w", rawURL, err)
 	}
@@ -470,11 +574,14 @@ func (intro *Introspector) introspectGitea(ctx context.Context, target resolver.
 	repo := strings.TrimSuffix(parts[1], ".git")
 	baseURL := fmt.Sprintf("%s://%s", u.Scheme, u.Host)
 
+	reqHost := extractURLHostname(baseURL)
+	headers := resolveGiteaAuth(reqHost, target)
+
 	fetchGiteaContributing := func() *MaintainerPolicy {
 		paths := []string{"CONTRIBUTING.md", ".github/CONTRIBUTING.md"}
 		for _, p := range paths {
 			rawURL := fmt.Sprintf("%s/api/v1/repos/%s/%s/raw/%s", baseURL, owner, repo, p)
-			contentData, fetchErr := intro.client.GetBytesWithHeaders(ctx, rawURL, "text/plain", giteaAuthHeader())
+			contentData, fetchErr := intro.client.GetBytesWithHeaders(ctx, rawURL, "text/plain", headers)
 			if fetchErr == nil && len(contentData) > 0 {
 				if pol := ParseMaintainerPolicy(string(contentData)); pol != nil {
 					return pol
@@ -485,7 +592,7 @@ func (intro *Introspector) introspectGitea(ctx context.Context, target resolver.
 	}
 
 	apiURL := fmt.Sprintf("%s/api/v1/repos/%s/%s/issue_templates", baseURL, owner, repo)
-	data, err := intro.client.GetBytesWithHeaders(ctx, apiURL, "application/json", giteaAuthHeader())
+	data, err := intro.client.GetBytesWithHeaders(ctx, apiURL, "application/json", headers)
 	if err == nil {
 		var templates []struct {
 			Name    string `json:"name"`

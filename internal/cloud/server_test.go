@@ -2170,3 +2170,40 @@ func TestConcurrentServicesUpsertAndDelete(t *testing.T) {
 		}
 	}
 }
+
+func TestServerPatchPayloadOversizedRejected(t *testing.T) {
+	tempDir := t.TempDir()
+	patchFile := filepath.Join(tempDir, "patches.json")
+	patchStore := adapter.NewPatchStore(patchFile)
+
+	srv := NewServer(":0", nil, nil).
+		WithPatchStore(patchStore)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	oversizedReason := strings.Repeat("A", 1024*1024+10)
+	payload := fmt.Sprintf(`{
+		"dependency": "sharp",
+		"ecosystem": "npm",
+		"patch_target": "patches/sharp.patch",
+		"manifest_file": "package.json",
+		"reason": %q
+	}`, oversizedReason)
+
+	req, err := http.NewRequest(http.MethodPost, ts.URL+"/api/v1/patches", strings.NewReader(payload))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Bugrouter-Request", "1")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST /api/v1/patches oversized payload failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 Bad Request for oversized payload, got %d", resp.StatusCode)
+	}
+}

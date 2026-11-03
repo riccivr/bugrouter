@@ -297,13 +297,7 @@ func (f *Finder) findGitHub(ctx context.Context, target resolver.Target, terms [
 	q := fmt.Sprintf("repo:%s/%s is:issue %s", owner, repo, strings.Join(terms, " "))
 	reqURL := fmt.Sprintf("%s/search/issues?q=%s&per_page=5", baseURL, url.QueryEscape(q))
 
-	var headers map[string]string
-	for _, env := range []string{"GITHUB_TOKEN", "GH_TOKEN", "BUGROUTER_GITHUB_TOKEN"} {
-		if tok := os.Getenv(env); tok != "" {
-			headers = map[string]string{"Authorization": "Bearer " + tok}
-			break
-		}
-	}
+	headers := resolveGitHubAuth(extractURLHostname(reqURL), target)
 	data, err := f.client.GetBytesWithHeaders(ctx, reqURL, "application/vnd.github.v3+json", headers)
 	if err != nil {
 		return nil, fmt.Errorf("github search: %w", err)
@@ -362,13 +356,7 @@ func (f *Finder) findGitLab(ctx context.Context, target resolver.Target, terms [
 	searchParam := strings.Join(terms, " ")
 	reqURL := fmt.Sprintf("%s/api/v4/projects/%s/issues?search=%s&per_page=5", baseURL, encodedPath, url.QueryEscape(searchParam))
 
-	var headers map[string]string
-	for _, env := range []string{"GITLAB_TOKEN", "GL_TOKEN", "BUGROUTER_GITLAB_TOKEN"} {
-		if tok := os.Getenv(env); tok != "" {
-			headers = map[string]string{"PRIVATE-TOKEN": tok}
-			break
-		}
-	}
+	headers := resolveGitLabAuth(extractURLHostname(reqURL), target)
 	data, err := f.client.GetBytesWithHeaders(ctx, reqURL, "application/json", headers)
 	if err != nil {
 		return nil, fmt.Errorf("gitlab search: %w", err)
@@ -486,14 +474,7 @@ func (f *Finder) findGitea(ctx context.Context, target resolver.Target, terms []
 	searchParam := strings.Join(terms, " ")
 	reqURL := fmt.Sprintf("%s/api/v1/repos/%s/%s/issues?type=issues&state=open&q=%s&limit=5", baseURL, owner, repo, url.QueryEscape(searchParam))
 
-	var headers map[string]string
-	for _, env := range []string{"GITEA_TOKEN", "BUGROUTER_GITEA_TOKEN", "CODEBERG_TOKEN"} {
-		if tok := os.Getenv(env); tok != "" {
-			headers = map[string]string{"Authorization": "token " + tok}
-			break
-		}
-	}
-
+	headers := resolveGiteaAuth(extractURLHostname(reqURL), target)
 	data, err := f.client.GetBytesWithHeaders(ctx, reqURL, "application/json", headers)
 	if err != nil {
 		return nil, fmt.Errorf("gitea search: %w", err)
@@ -584,13 +565,7 @@ func (f *Finder) listActiveGitHub(ctx context.Context, target resolver.Target, v
 	}
 	baseURL = strings.TrimRight(baseURL, "/")
 
-	var headers map[string]string
-	for _, env := range []string{"GITHUB_TOKEN", "GH_TOKEN", "BUGROUTER_GITHUB_TOKEN"} {
-		if tok := os.Getenv(env); tok != "" {
-			headers = map[string]string{"Authorization": "Bearer " + tok}
-			break
-		}
-	}
+	headers := resolveGitHubAuth(extractURLHostname(baseURL), target)
 
 	fetchGH := func(q string) ([]ExistingIssue, error) {
 		reqURL := fmt.Sprintf("%s/search/issues?q=%s&per_page=5", baseURL, url.QueryEscape(q))
@@ -666,13 +641,7 @@ func (f *Finder) listActiveGitLab(ctx context.Context, target resolver.Target, v
 	baseURL = strings.TrimRight(baseURL, "/")
 	encodedPath := url.PathEscape(projectPath)
 
-	var headers map[string]string
-	for _, env := range []string{"GITLAB_TOKEN", "GL_TOKEN", "BUGROUTER_GITLAB_TOKEN"} {
-		if tok := os.Getenv(env); tok != "" {
-			headers = map[string]string{"PRIVATE-TOKEN": tok}
-			break
-		}
-	}
+	headers := resolveGitLabAuth(extractURLHostname(baseURL), target)
 
 	fetchGL := func(search string) ([]ExistingIssue, error) {
 		reqURL := fmt.Sprintf("%s/api/v4/projects/%s/issues?state=opened&per_page=5", baseURL, encodedPath)
@@ -813,13 +782,7 @@ func (f *Finder) listActiveGitea(ctx context.Context, target resolver.Target, ve
 	}
 	baseURL = strings.TrimRight(baseURL, "/")
 
-	var headers map[string]string
-	for _, env := range []string{"GITEA_TOKEN", "BUGROUTER_GITEA_TOKEN", "CODEBERG_TOKEN"} {
-		if tok := os.Getenv(env); tok != "" {
-			headers = map[string]string{"Authorization": "token " + tok}
-			break
-		}
-	}
+	headers := resolveGiteaAuth(extractURLHostname(baseURL), target)
 
 	fetchGitea := func(q string) ([]ExistingIssue, error) {
 		reqURL := fmt.Sprintf("%s/api/v1/repos/%s/%s/issues?type=issues&state=open&limit=5", baseURL, owner, repo)
@@ -871,4 +834,129 @@ func (f *Finder) listActiveGitea(ctx context.Context, target resolver.Target, ve
 		results = results[:5]
 	}
 	return results, nil
+}
+
+func cleanHost(host string) string {
+	host = strings.TrimSpace(host)
+	if strings.HasPrefix(host, "[") && strings.Contains(host, "]") {
+		end := strings.Index(host, "]")
+		return strings.ToLower(host[1:end])
+	}
+	if idx := strings.IndexByte(host, ':'); idx != -1 {
+		host = host[:idx]
+	}
+	return strings.ToLower(host)
+}
+
+func extractURLHostname(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	if strings.HasPrefix(raw, "git@") && strings.Contains(raw, ":") {
+		parts := strings.SplitN(strings.TrimPrefix(raw, "git@"), ":", 2)
+		return parts[0]
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	return u.Hostname()
+}
+
+func gitHubAuthHeader(host string) map[string]string {
+	if explicit := os.Getenv("BUGROUTER_GITHUB_TOKEN"); explicit != "" {
+		return map[string]string{"Authorization": "Bearer " + explicit}
+	}
+	h := cleanHost(host)
+	if strings.EqualFold(h, "github.com") || strings.EqualFold(h, "api.github.com") || strings.HasSuffix(h, ".github.com") {
+		for _, env := range []string{"GITHUB_TOKEN", "GH_TOKEN"} {
+			if tok := os.Getenv(env); tok != "" {
+				return map[string]string{"Authorization": "Bearer " + tok}
+			}
+		}
+	}
+	return nil
+}
+
+func gitLabAuthHeader(host string) map[string]string {
+	if explicit := os.Getenv("BUGROUTER_GITLAB_TOKEN"); explicit != "" {
+		return map[string]string{"PRIVATE-TOKEN": explicit}
+	}
+	h := cleanHost(host)
+	if strings.EqualFold(h, "gitlab.com") || strings.HasSuffix(h, ".gitlab.com") {
+		for _, env := range []string{"GITLAB_TOKEN", "GL_TOKEN"} {
+			if tok := os.Getenv(env); tok != "" {
+				return map[string]string{"PRIVATE-TOKEN": tok}
+			}
+		}
+	}
+	return nil
+}
+
+func giteaAuthHeader(host string) map[string]string {
+	if explicit := os.Getenv("BUGROUTER_GITEA_TOKEN"); explicit != "" {
+		return map[string]string{"Authorization": "token " + explicit}
+	}
+	h := cleanHost(host)
+	if strings.EqualFold(h, "codeberg.org") {
+		if tok := os.Getenv("CODEBERG_TOKEN"); tok != "" {
+			return map[string]string{"Authorization": "token " + tok}
+		}
+	} else if strings.EqualFold(h, "gitea.com") || strings.EqualFold(h, "projects.blender.org") {
+		if tok := os.Getenv("GITEA_TOKEN"); tok != "" {
+			return map[string]string{"Authorization": "token " + tok}
+		}
+	}
+	return nil
+}
+
+func resolveGitHubAuth(reqHost string, target resolver.Target) map[string]string {
+	if h := gitHubAuthHeader(reqHost); h != nil {
+		return h
+	}
+	if th := extractURLHostname(target.Tracker.URL); th != "" {
+		if h := gitHubAuthHeader(th); h != nil {
+			return h
+		}
+	}
+	if rh := extractURLHostname(target.RepositoryURL); rh != "" {
+		if h := gitHubAuthHeader(rh); h != nil {
+			return h
+		}
+	}
+	return nil
+}
+
+func resolveGitLabAuth(reqHost string, target resolver.Target) map[string]string {
+	if h := gitLabAuthHeader(reqHost); h != nil {
+		return h
+	}
+	if th := extractURLHostname(target.Tracker.URL); th != "" {
+		if h := gitLabAuthHeader(th); h != nil {
+			return h
+		}
+	}
+	if rh := extractURLHostname(target.RepositoryURL); rh != "" {
+		if h := gitLabAuthHeader(rh); h != nil {
+			return h
+		}
+	}
+	return nil
+}
+
+func resolveGiteaAuth(reqHost string, target resolver.Target) map[string]string {
+	if h := giteaAuthHeader(reqHost); h != nil {
+		return h
+	}
+	if th := extractURLHostname(target.Tracker.URL); th != "" {
+		if h := giteaAuthHeader(th); h != nil {
+			return h
+		}
+	}
+	if rh := extractURLHostname(target.RepositoryURL); rh != "" {
+		if h := giteaAuthHeader(rh); h != nil {
+			return h
+		}
+	}
+	return nil
 }

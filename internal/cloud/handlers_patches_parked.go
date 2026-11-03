@@ -114,7 +114,7 @@ func (s *Server) handleRecordPatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req RecordPatchRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1024*1024)).Decode(&req); err != nil {
 		http.Error(w, fmt.Sprintf("invalid json payload: %v", err), http.StatusBadRequest)
 		return
 	}
