@@ -1060,6 +1060,20 @@ Strictly NO AI-generated issues or automated bots allowed.
 		t.Errorf("expected schema.Policy.AIOptOut=true, got %+v", schema.Policy)
 	}
 
+	outIntro.Reset()
+	errIntro.Reset()
+	codeIntroTrailing := runIntrospect(context.Background(), testClient, &outIntro, &errIntro, []string{"sample-app", "--json"})
+	if codeIntroTrailing != 0 {
+		t.Fatalf("runIntrospect with trailing --json failed: %s", errIntro.String())
+	}
+	var schemaTrailing introspector.TemplateSchema
+	if err := json.Unmarshal(outIntro.Bytes(), &schemaTrailing); err != nil {
+		t.Fatalf("decode schema json: %v", err)
+	}
+	if schemaTrailing.Name != "Bug Report Form" {
+		t.Errorf("schema.Name = %q, want 'Bug Report Form'", schemaTrailing.Name)
+	}
+
 	// 3. Introspect: missing target
 	outIntro.Reset()
 	errIntro.Reset()
@@ -1093,6 +1107,20 @@ Strictly NO AI-generated issues or automated bots allowed.
 	}
 	if len(dups) != 1 || dups[0].ID != "101" {
 		t.Errorf("expected issue 101, got %+v", dups)
+	}
+
+	outDedup.Reset()
+	errDedup.Reset()
+	codeDedupTrailing := runDedup(context.Background(), testClient, &outDedup, &errDedup, []string{"sample-app", "Crash on startup", "--json"})
+	if codeDedupTrailing != 0 {
+		t.Fatalf("runDedup with trailing --json failed: %s", errDedup.String())
+	}
+	var dupsTrailing []dedup.ExistingIssue
+	if err := json.Unmarshal(outDedup.Bytes(), &dupsTrailing); err != nil {
+		t.Fatalf("decode dups json: %v", err)
+	}
+	if len(dupsTrailing) != 1 || dupsTrailing[0].ID != "101" {
+		t.Errorf("expected issue 101, got %+v", dupsTrailing)
 	}
 
 	// 6. Dedup: no duplicates found
@@ -1513,4 +1541,86 @@ replace github.com/gin-gonic/gin => github.com/myfork/gin v1.9.2
 	if jsonAdded[0].Dependency != "lodash" {
 		t.Errorf("Dependency = %q, want lodash", jsonAdded[0].Dependency)
 	}
+}
+
+func TestSplitInterleavedFlags(t *testing.T) {
+	valueFlags := map[string]bool{
+		"timeout":    true,
+		"snippet":    true,
+		"workaround": true,
+	}
+
+	tests := []struct {
+		name         string
+		args         []string
+		wantFlagArgs []string
+		wantPosArgs  []string
+	}{
+		{
+			name:         "flags before positional args",
+			args:         []string{"--timeout", "5s", "--json", "target-query"},
+			wantFlagArgs: []string{"--timeout", "5s", "--json"},
+			wantPosArgs:  []string{"target-query"},
+		},
+		{
+			name:         "flags after positional args",
+			args:         []string{"target-query", "-json", "--timeout", "5s"},
+			wantFlagArgs: []string{"-json", "--timeout", "5s"},
+			wantPosArgs:  []string{"target-query"},
+		},
+		{
+			name:         "interleaved flags around multiple positional args",
+			args:         []string{"--snippet", "stack-trace", "dep-name", "bug-title", "--workaround", "use-v1"},
+			wantFlagArgs: []string{"--snippet", "stack-trace", "--workaround", "use-v1"},
+			wantPosArgs:  []string{"dep-name", "bug-title"},
+		},
+		{
+			name:         "flag=value syntax",
+			args:         []string{"--timeout=10s", "-workaround=use-v2", "--json=true", "target-query"},
+			wantFlagArgs: []string{"--timeout=10s", "-workaround=use-v2", "--json=true"},
+			wantPosArgs:  []string{"target-query"},
+		},
+		{
+			name:         "terminator -- stops flag parsing",
+			args:         []string{"--json", "target-query", "--", "--timeout", "5s", "extra-arg"},
+			wantFlagArgs: []string{"--json"},
+			wantPosArgs:  []string{"target-query", "--timeout", "5s", "extra-arg"},
+		},
+		{
+			name:         "dash stdin treated as positional argument",
+			args:         []string{"-", "--timeout", "5s"},
+			wantFlagArgs: []string{"--timeout", "5s"},
+			wantPosArgs:  []string{"-"},
+		},
+		{
+			name:         "empty args",
+			args:         []string{},
+			wantFlagArgs: nil,
+			wantPosArgs:  nil,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			gotFlagArgs, gotPosArgs := splitInterleavedFlags(tc.args, valueFlags)
+			if !slicesEqual(gotFlagArgs, tc.wantFlagArgs) {
+				t.Errorf("splitInterleavedFlags() flagArgs = %v, want %v", gotFlagArgs, tc.wantFlagArgs)
+			}
+			if !slicesEqual(gotPosArgs, tc.wantPosArgs) {
+				t.Errorf("splitInterleavedFlags() posArgs = %v, want %v", gotPosArgs, tc.wantPosArgs)
+			}
+		})
+	}
+}
+
+func slicesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }

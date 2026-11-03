@@ -101,10 +101,11 @@ runs:
 
         # 3. Export GitHub Action step outputs
         if [ -n "${GITHUB_OUTPUT:-}" ]; then
+          EOF_DELIM="BUGROUTER_EOF_$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
           {
-            echo "result-json<<EOF"
+            echo "result-json<<$EOF_DELIM"
             echo "$RESULT_JSON"
-            echo "EOF"
+            echo "$EOF_DELIM"
           } >> "$GITHUB_OUTPUT"
           echo "revertable-count=$REVERTABLE_COUNT" >> "$GITHUB_OUTPUT"
         fi

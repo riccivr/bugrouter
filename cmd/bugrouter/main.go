@@ -128,7 +128,6 @@ type ReportOptions struct {
 	ExpectedBehavior string
 	ActualBehavior   string
 	Logs             string
-	WithTelemetry    bool
 	NoTelemetry      bool
 	JSON             bool
 	NoCache          bool
@@ -530,6 +529,30 @@ func runTriage(ctx context.Context, httpClient *httpx.Client, in io.Reader, out 
 	return 0
 }
 
+func splitInterleavedFlags(args []string, valueFlags map[string]bool) (flagArgs, posArgs []string) {
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
+			posArgs = append(posArgs, args[i+1:]...)
+			break
+		}
+		if arg == "-" || !strings.HasPrefix(arg, "-") {
+			posArgs = append(posArgs, arg)
+			continue
+		}
+		flagArgs = append(flagArgs, arg)
+		if strings.Contains(arg, "=") {
+			continue
+		}
+		flagName := strings.TrimLeft(arg, "-")
+		if (valueFlags[flagName] || valueFlags[arg]) && i+1 < len(args) {
+			i++
+			flagArgs = append(flagArgs, args[i])
+		}
+	}
+	return flagArgs, posArgs
+}
+
 func runIntrospect(ctx context.Context, httpClient *httpx.Client, out io.Writer, errOut io.Writer, args []string) int {
 	fs := flag.NewFlagSet("introspect", flag.ContinueOnError)
 	fs.SetOutput(errOut)
@@ -537,20 +560,9 @@ func runIntrospect(ctx context.Context, httpClient *httpx.Client, out io.Writer,
 	noCache := fs.Bool("no-cache", false, "disable disk cache")
 	timeout := fs.Duration("timeout", 15*time.Second, "request and probe timeout duration")
 
-	var flagArgs []string
-	var posArgs []string
-	for i := 0; i < len(args); i++ {
-		arg := args[i]
-		if strings.HasPrefix(arg, "-") {
-			flagArgs = append(flagArgs, arg)
-			if (arg == "--timeout" || arg == "-timeout") && i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
-				i++
-				flagArgs = append(flagArgs, args[i])
-			}
-		} else {
-			posArgs = append(posArgs, arg)
-		}
-	}
+	flagArgs, posArgs := splitInterleavedFlags(args, map[string]bool{
+		"timeout": true,
+	})
 
 	if err := fs.Parse(flagArgs); err != nil {
 		return 1
@@ -638,20 +650,9 @@ func runDedup(ctx context.Context, httpClient *httpx.Client, out io.Writer, errO
 	noCache := fs.Bool("no-cache", false, "disable disk cache")
 	timeout := fs.Duration("timeout", 15*time.Second, "request and probe timeout duration")
 
-	var flagArgs []string
-	var posArgs []string
-	for i := 0; i < len(args); i++ {
-		arg := args[i]
-		if strings.HasPrefix(arg, "-") {
-			flagArgs = append(flagArgs, arg)
-			if (arg == "--timeout" || arg == "-timeout") && i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
-				i++
-				flagArgs = append(flagArgs, args[i])
-			}
-		} else {
-			posArgs = append(posArgs, arg)
-		}
-	}
+	flagArgs, posArgs := splitInterleavedFlags(args, map[string]bool{
+		"timeout": true,
+	})
 
 	if err := fs.Parse(flagArgs); err != nil {
 		return 1
@@ -1184,21 +1185,12 @@ func main() {
 		relatedDep := fs.String("related-dep", "", "secondary/related dependency causing interaction anomaly")
 		jsonOut := fs.Bool("json", false, "output JSON handoff payload")
 
-		// Reorder flags and positional args so flags can precede or follow dependency and title
-		var flagArgs []string
-		var posArgs []string
-		for i := 2; i < len(os.Args); i++ {
-			arg := os.Args[i]
-			if strings.HasPrefix(arg, "-") {
-				flagArgs = append(flagArgs, arg)
-				if (arg == "--snippet" || arg == "-snippet" || arg == "--workaround" || arg == "-workaround" || arg == "--file" || arg == "-file" || arg == "--related-dep" || arg == "-related-dep") && i+1 < len(os.Args) && !strings.HasPrefix(os.Args[i+1], "-") {
-					i++
-					flagArgs = append(flagArgs, os.Args[i])
-				}
-			} else {
-				posArgs = append(posArgs, arg)
-			}
-		}
+		flagArgs, posArgs := splitInterleavedFlags(os.Args[2:], map[string]bool{
+			"snippet":     true,
+			"workaround":  true,
+			"file":        true,
+			"related-dep": true,
+		})
 
 		if err := fs.Parse(flagArgs); err != nil {
 			os.Exit(1)
@@ -1568,7 +1560,7 @@ func main() {
 			parkedBug.Status = "triaged"
 			parkStore := adapter.NewParkedStore("")
 			if parkSaveErr := parkStore.Save(parkedBug); parkSaveErr != nil {
-				// Non-fatal status update failure
+				fmt.Fprintf(os.Stderr, "warning: update parked bug %s status: %v\n", parkedBug.ID, parkSaveErr)
 			}
 		}
 
@@ -1607,7 +1599,7 @@ func main() {
 		expected := fs.String("expected", "", "expected behavior")
 		actual := fs.String("actual", "", "actual behavior")
 		logs := fs.String("logs", "", "error logs or console output")
-		withTelemetry := fs.Bool("with-telemetry", false, "collect hardware/OS telemetry (default enabled)")
+		fs.Bool("with-telemetry", false, "collect hardware/OS telemetry (default enabled)")
 		noTelemetry := fs.Bool("no-telemetry", false, "disable hardware/OS telemetry collection")
 		jsonOut := fs.Bool("json", false, "output structured JSON")
 		noCache := fs.Bool("no-cache", false, "disable disk cache")
@@ -1633,7 +1625,6 @@ func main() {
 			ExpectedBehavior: *expected,
 			ActualBehavior:   *actual,
 			Logs:             *logs,
-			WithTelemetry:    *withTelemetry,
 			NoTelemetry:      *noTelemetry,
 			JSON:             *jsonOut,
 			NoCache:          *noCache,
