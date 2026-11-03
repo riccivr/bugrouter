@@ -2,10 +2,6 @@
 
 **Universal Bug Triage & Upstream Router for Autonomous Coding Agents**
 
-Current Version: **2026.10.0** (CalVer)  
-License: **MIT**  
-Dependencies: **Standard Library Only (Zero Third-Party Dependencies)**
-
 ---
 
 ## 1. Core Product Principles
