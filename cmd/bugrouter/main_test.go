@@ -1875,3 +1875,96 @@ func TestDraftAndReportTrailingFlags(t *testing.T) {
 		t.Errorf("report draft title = %q, want 'Report Bug Title'", reportResp.Draft.Title)
 	}
 }
+
+func TestEscapeMarkdownTableCell(t *testing.T) {
+	cases := []struct {
+		input string
+		want  string
+	}{
+		{"plain text", "plain text"},
+		{"text\r\nwith\nnewlines\r", "text  with newlines "},
+		{"value | with | pipes", `value \| with \| pipes`},
+		{"`code` inside `backticks`", "\\`code\\` inside \\`backticks\\`"},
+		{"col | `cmd`\r\nline2", "col \\| \\`cmd\\`  line2"},
+	}
+	for _, tc := range cases {
+		got := escapeMarkdownTableCell(tc.input)
+		if got != tc.want {
+			t.Errorf("escapeMarkdownTableCell(%q) = %q, want %q", tc.input, got, tc.want)
+		}
+	}
+}
+
+func TestTriageSummaryMDEscaping(t *testing.T) {
+	crashLog := `goroutine 1 [running]:
+github.com/myorg/checkout-api|malicious/worker.Process` + "`" + `Payment()
+	/app/worker.go:42 +0x123
+panic: connection timeout
+`
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	code := runTriage(context.Background(), nil, strings.NewReader(crashLog), &out, &errOut, []string{"--summary-md"})
+	if code != 0 {
+		t.Fatalf("expected exit code 0, got %d (err: %s)", code, errOut.String())
+	}
+
+	summary := out.String()
+	if strings.Contains(summary, "checkout-api|malicious") {
+		t.Errorf("raw pipe unescaped in triage summary table: %s", summary)
+	}
+	if !strings.Contains(summary, `checkout-api\|malicious`) {
+		t.Errorf("expected escaped pipe in triage summary table: %s", summary)
+	}
+	if strings.Contains(summary, "Process`Payment") {
+		t.Errorf("raw backtick unescaped in triage summary table: %s", summary)
+	}
+	if !strings.Contains(summary, "Process\\`Payment") {
+		t.Errorf("expected escaped backtick in triage summary table: %s", summary)
+	}
+}
+
+func TestPatchCheckSummaryMDEscaping(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"state": "open"}`)
+	}))
+	defer ts.Close()
+
+	tempDir := t.TempDir()
+	patchFile := filepath.Join(tempDir, "patches.json")
+	t.Setenv("BUGROUTER_PATCHES_FILE", patchFile)
+
+	store := adapter.NewPatchStore(patchFile)
+	_, err := store.Record(
+		"react|pkg`injection",
+		"npm",
+		"patches/react|dom`patch.patch",
+		"package.json",
+		ts.URL+"/repos/facebook/react/issues/100",
+		"Work around bug",
+	)
+	if err != nil {
+		t.Fatalf("Record patch failed: %v", err)
+	}
+
+	var out, errOut bytes.Buffer
+	testClient := httpx.NewTestClient(5 * time.Second)
+	code := runPatchCheck(context.Background(), testClient, &out, &errOut, []string{"--summary-md"})
+	if code != 0 {
+		t.Fatalf("runPatchCheck failed with code %d: %s", code, errOut.String())
+	}
+
+	summary := out.String()
+	if strings.Contains(summary, "react|pkg") || strings.Contains(summary, "react|dom") {
+		t.Errorf("raw pipe unescaped in patch check table: %s", summary)
+	}
+	if !strings.Contains(summary, `react\|pkg`) {
+		t.Errorf("expected escaped pipe in patch check table: %s", summary)
+	}
+	if strings.Contains(summary, "pkg`injection") || strings.Contains(summary, "dom`patch") {
+		t.Errorf("raw backtick unescaped in patch check table: %s", summary)
+	}
+	if !strings.Contains(summary, "pkg\\`injection") {
+		t.Errorf("expected escaped backtick in patch check table: %s", summary)
+	}
+}

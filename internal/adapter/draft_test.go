@@ -789,3 +789,57 @@ func TestBuildDraftWithRelatedDependencyEvidence(t *testing.T) {
 		t.Errorf("expected Correlated Evidence before Environment section (corr=%d, env=%d)", idxCorr, idxEnv)
 	}
 }
+
+func TestSanitizeMarkdownInline(t *testing.T) {
+	cases := []struct {
+		input    string
+		expected string
+	}{
+		{"normal text", "normal text"},
+		{"text\r\nwith\nnewlines\r", "textwithnewlines"},
+		{"[link text](url)", `\[link text\]\(url\)`},
+		{"nested [brackets] and (parentheses)", `nested \[brackets\] and \(parentheses\)`},
+		{"https://example.com/path(1)?query=[a]", `https://example.com/path\(1\)?query=\[a\]`},
+	}
+	for _, tc := range cases {
+		got := sanitizeMarkdownInline(tc.input)
+		if got != tc.expected {
+			t.Errorf("sanitizeMarkdownInline(%q) = %q, want %q", tc.input, got, tc.expected)
+		}
+	}
+}
+
+func TestBuildDraftRelatedIssuesMarkdownSanitization(t *testing.T) {
+	in := DraftInput{
+		Target: resolver.Target{
+			CanonicalName: "facebook/react",
+			LocalVersion:  "18.2.0",
+			Tracker: resolver.TrackerInfo{
+				Protocol: resolver.ProtocolGitHub,
+				URL:      "https://github.com/facebook/react/issues",
+			},
+		},
+		Title:             "Issue with third party dependency",
+		Summary:           "Bug description",
+		RelatedDependency: "bad-dep",
+		RelatedIssues: []dedup.ExistingIssue{
+			{
+				ID:    "101]\n[evil](http://attack.com",
+				Title: "Title with [brackets] and (parentheses)\r\nnewline",
+				URL:   "https://example.com/issue(1)\n",
+				State: "open)\n- injected",
+			},
+		},
+	}
+
+	draft, err := BuildDraft(in)
+	if err != nil {
+		t.Fatalf("BuildDraft failed: %v", err)
+	}
+
+	body := string(draft.MarkdownBody)
+	wantLine := `- [#101\]\[evil\]\(http://attack.com](https://example.com/issue\(1\)): Title with \[brackets\] and \(parentheses\)newline (open\)- injected)`
+	if !strings.Contains(body, wantLine) {
+		t.Errorf("expected sanitized markdown line %q in body, got:\n%s", wantLine, body)
+	}
+}

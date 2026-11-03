@@ -3,6 +3,8 @@ package adapter
 import (
 	"bufio"
 	"bytes"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +13,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 )
 
 // MaxManifestReadBytes limits manifest ingestion to 1 MiB to prevent memory exhaustion.
@@ -116,15 +119,20 @@ func (s *PatchStore) SyncWorkspace(rootDir string) ([]DependencyPatch, error) {
 		return nil, fmt.Errorf("scan workspace patches: %w", err)
 	}
 
-	existing, err := s.List()
-	if err != nil {
-		return nil, fmt.Errorf("list existing patches: %w", err)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	patches, err := s.readPatchesLocked()
+	if err != nil && !os.IsNotExist(err) {
+		return nil, fmt.Errorf("read patches: %w", err)
 	}
 
-	existingSet := make(map[string]bool, len(existing))
-	for _, p := range existing {
+	existingSet := make(map[string]bool, len(patches))
+	existingIDs := make(map[string]bool, len(patches))
+	for _, p := range patches {
 		key := strings.ToLower(strings.TrimSpace(p.Dependency)) + "|" + strings.TrimSpace(p.PatchTarget)
 		existingSet[key] = true
+		existingIDs[p.ID] = true
 	}
 
 	var newlyAdded []DependencyPatch
@@ -133,24 +141,63 @@ func (s *PatchStore) SyncWorkspace(rootDir string) ([]DependencyPatch, error) {
 		if existingSet[key] {
 			continue
 		}
+		existingSet[key] = true
 
-		recorded, recErr := s.Record(
-			p.Dependency,
-			p.Ecosystem,
-			p.PatchTarget,
-			p.ManifestFile,
-			p.UpstreamIssueURL,
-			p.Reason,
-		)
-		if recErr != nil {
-			return nil, fmt.Errorf("record discovered patch for %s: %w", p.Dependency, recErr)
+		var id string
+		for {
+			b := make([]byte, 8)
+			if _, err := rand.Read(b); err != nil {
+				return nil, fmt.Errorf("generate patch id: %w", err)
+			}
+			id = hex.EncodeToString(b)
+			if !existingIDs[id] {
+				existingIDs[id] = true
+				break
+			}
 		}
 
-		existingSet[key] = true
-		newlyAdded = append(newlyAdded, *recorded)
+		ecosystem := strings.ToLower(strings.TrimSpace(p.Ecosystem))
+		if ecosystem == "" {
+			if strings.Contains(p.ManifestFile, "go.mod") || strings.Contains(p.Dependency, "github.com/") {
+				ecosystem = "go"
+			} else if strings.Contains(p.ManifestFile, "package.json") {
+				ecosystem = "npm"
+			} else if strings.Contains(p.ManifestFile, "Cargo.toml") {
+				ecosystem = "cargo"
+			} else if strings.Contains(p.ManifestFile, "pyproject.toml") {
+				ecosystem = "python"
+			} else {
+				ecosystem = "custom"
+			}
+		}
+
+		reason := strings.TrimSpace(p.Reason)
+		if reason == "" {
+			reason = "Discovered in workspace scan"
+		}
+
+		newPatch := DependencyPatch{
+			ID:               id,
+			CreatedAt:        time.Now().UTC(),
+			Dependency:       strings.TrimSpace(p.Dependency),
+			Ecosystem:        ecosystem,
+			PatchTarget:      strings.TrimSpace(p.PatchTarget),
+			ManifestFile:     strings.TrimSpace(p.ManifestFile),
+			UpstreamIssueURL: strings.TrimSpace(p.UpstreamIssueURL),
+			Reason:           reason,
+			Status:           "active",
+		}
+		newlyAdded = append(newlyAdded, newPatch)
 	}
 
-	if newlyAdded == nil {
+	if len(newlyAdded) > 0 {
+		merged := make([]DependencyPatch, 0, len(newlyAdded)+len(patches))
+		merged = append(merged, newlyAdded...)
+		merged = append(merged, patches...)
+		if err := s.writePatchesLocked(merged); err != nil {
+			return nil, err
+		}
+	} else if newlyAdded == nil {
 		newlyAdded = []DependencyPatch{}
 	}
 

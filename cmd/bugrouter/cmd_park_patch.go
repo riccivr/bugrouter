@@ -192,6 +192,14 @@ func runPatchScan(store *adapter.PatchStore, out, errOut io.Writer, args []strin
 	return 0
 }
 
+func escapeMarkdownTableCell(s string) string {
+	s = strings.ReplaceAll(s, "\r", " ")
+	s = strings.ReplaceAll(s, "\n", " ")
+	s = strings.ReplaceAll(s, "|", `\|`)
+	s = strings.ReplaceAll(s, "`", "\\`")
+	return s
+}
+
 func runPatchCheck(ctx context.Context, httpClient *httpx.Client, out, errOut io.Writer, args []string) int {
 	fs := flag.NewFlagSet("patch check", flag.ContinueOnError)
 	fs.SetOutput(errOut)
@@ -252,7 +260,12 @@ func runPatchCheck(ctx context.Context, httpClient *httpx.Client, out, errOut io
 					if url == "" {
 						url = "-"
 					}
-					sb.WriteString(fmt.Sprintf("| `%s` | **%s** | `%s` | %s |\n", r.Patch.Dependency, r.UpstreamState, r.Patch.PatchTarget, url))
+					sb.WriteString(fmt.Sprintf("| `%s` | **%s** | `%s` | %s |\n",
+						escapeMarkdownTableCell(r.Patch.Dependency),
+						escapeMarkdownTableCell(r.UpstreamState),
+						escapeMarkdownTableCell(r.Patch.PatchTarget),
+						url,
+					))
 				}
 			}
 			sb.WriteString("\n<details><summary>All Tracked Patches</summary>\n\n")
@@ -267,7 +280,12 @@ func runPatchCheck(ctx context.Context, httpClient *httpx.Client, out, errOut io
 				if url == "" {
 					url = "-"
 				}
-				sb.WriteString(fmt.Sprintf("| `%s` | %s | %s | %s |\n", r.Patch.Dependency, r.UpstreamState, status, url))
+				sb.WriteString(fmt.Sprintf("| `%s` | %s | %s | %s |\n",
+					escapeMarkdownTableCell(r.Patch.Dependency),
+					escapeMarkdownTableCell(r.UpstreamState),
+					status,
+					url,
+				))
 			}
 			sb.WriteString("\n</details>\n")
 		} else {
@@ -279,7 +297,12 @@ func runPatchCheck(ctx context.Context, httpClient *httpx.Client, out, errOut io
 				if url == "" {
 					url = "-"
 				}
-				sb.WriteString(fmt.Sprintf("| `%s` | %s | `%s` | %s |\n", r.Patch.Dependency, r.UpstreamState, r.Patch.PatchTarget, url))
+				sb.WriteString(fmt.Sprintf("| `%s` | %s | `%s` | %s |\n",
+					escapeMarkdownTableCell(r.Patch.Dependency),
+					escapeMarkdownTableCell(r.UpstreamState),
+					escapeMarkdownTableCell(r.Patch.PatchTarget),
+					url,
+				))
 			}
 		}
 		fmt.Fprint(out, sb.String())

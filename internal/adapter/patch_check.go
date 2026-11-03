@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"strings"
@@ -222,9 +223,9 @@ func queryGiteaIssueState(ctx context.Context, client *httpx.Client, u *url.URL,
 	} else {
 		parts := strings.Split(cleanPath, "/")
 		if len(parts) >= 4 && (parts[2] == "issues" || parts[2] == "pulls") {
-			owner := parts[0]
-			repo := parts[1]
-			index := parts[3]
+			owner := url.PathEscape(parts[0])
+			repo := url.PathEscape(parts[1])
+			index := url.PathEscape(parts[3])
 			apiURL = fmt.Sprintf("%s://%s/api/v1/repos/%s/%s/issues/%s", u.Scheme, u.Host, owner, repo, index)
 		} else {
 			return "", errors.New("cannot parse gitea issue path")
@@ -270,12 +271,13 @@ func queryGitHubIssueState(ctx context.Context, client *httpx.Client, u *url.URL
 	} else {
 		parts := strings.Split(cleanPath, "/")
 		if len(parts) >= 4 && (parts[2] == "issues" || parts[2] == "pull") {
-			owner := parts[0]
-			repo := parts[1]
-			num := parts[3]
+			owner := url.PathEscape(parts[0])
+			repo := url.PathEscape(parts[1])
+			num := url.PathEscape(parts[3])
+			h := cleanHost(u.Host)
 			if strings.EqualFold(u.Host, "github.com") {
 				apiURL = fmt.Sprintf("https://api.github.com/repos/%s/%s/issues/%s", owner, repo, num)
-			} else if strings.Contains(strings.ToLower(u.Host), "github") {
+			} else if h == "api.github.com" || strings.HasSuffix(h, ".github.com") {
 				apiURL = fmt.Sprintf("%s://%s/api/v3/repos/%s/%s/issues/%s", u.Scheme, u.Host, owner, repo, num)
 			} else {
 				// Local test server or custom enterprise proxy
@@ -316,11 +318,22 @@ func queryGitHubIssueState(ctx context.Context, client *httpx.Client, u *url.URL
 	return "unknown", nil
 }
 
+func cleanHost(host string) string {
+	h := strings.ToLower(strings.TrimSpace(host))
+	if sh, _, err := net.SplitHostPort(h); err == nil {
+		h = sh
+	}
+	h = strings.TrimPrefix(h, "[")
+	h = strings.TrimSuffix(h, "]")
+	return h
+}
+
 func gitHubAuthHeader(host string) (string, string) {
 	if explicit := os.Getenv("BUGROUTER_GITHUB_TOKEN"); explicit != "" {
 		return "Authorization", "Bearer " + explicit
 	}
-	if strings.EqualFold(host, "github.com") || strings.Contains(strings.ToLower(host), "github") {
+	h := cleanHost(host)
+	if h == "github.com" || h == "api.github.com" || strings.HasSuffix(h, ".github.com") {
 		for _, env := range []string{"GITHUB_TOKEN", "GH_TOKEN"} {
 			if tok := os.Getenv(env); tok != "" {
 				return "Authorization", "Bearer " + tok
@@ -334,7 +347,8 @@ func gitLabAuthHeader(host string) (string, string) {
 	if explicit := os.Getenv("BUGROUTER_GITLAB_TOKEN"); explicit != "" {
 		return "PRIVATE-TOKEN", explicit
 	}
-	if strings.Contains(strings.ToLower(host), "gitlab") {
+	h := cleanHost(host)
+	if h == "gitlab.com" || strings.HasSuffix(h, ".gitlab.com") {
 		for _, env := range []string{"GITLAB_TOKEN", "GL_TOKEN"} {
 			if tok := os.Getenv(env); tok != "" {
 				return "PRIVATE-TOKEN", tok
@@ -348,12 +362,12 @@ func giteaAuthHeader(host string) (string, string) {
 	if explicit := os.Getenv("BUGROUTER_GITEA_TOKEN"); explicit != "" {
 		return "Authorization", "token " + explicit
 	}
-	lowerHost := strings.ToLower(host)
-	if strings.Contains(lowerHost, "codeberg.org") {
+	h := cleanHost(host)
+	if h == "codeberg.org" {
 		if tok := os.Getenv("CODEBERG_TOKEN"); tok != "" {
 			return "Authorization", "token " + tok
 		}
-	} else if strings.Contains(lowerHost, "gitea") || strings.Contains(lowerHost, "forgejo") || strings.Contains(lowerHost, "blender.org") {
+	} else if h == "gitea.com" || h == "projects.blender.org" || strings.HasSuffix(h, ".gitea.com") || strings.HasPrefix(h, "gitea.") || strings.HasPrefix(h, "forgejo.") {
 		if tok := os.Getenv("GITEA_TOKEN"); tok != "" {
 			return "Authorization", "token " + tok
 		}

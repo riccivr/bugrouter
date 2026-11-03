@@ -222,6 +222,53 @@ func TestCheckPatchUpstreamStatusTokenGuards(t *testing.T) {
 	}
 	mu.Unlock()
 
+	t.Setenv("HTTP_PROXY", ts.URL)
+	t.Setenv("http_proxy", ts.URL)
+
+	spoofedGHPatch := DependencyPatch{
+		ID:               "gh-spoof-check",
+		Dependency:       "spoof-gh",
+		UpstreamIssueURL: "http://evil-github.com/repos/owner/repo/issues/1",
+	}
+
+	mu.Lock()
+	capturedAuth = ""
+	capturedPrivateToken = ""
+	mu.Unlock()
+
+	_, err = CheckPatchUpstreamStatus(context.Background(), client, []DependencyPatch{spoofedGHPatch})
+	if err != nil {
+		t.Fatalf("CheckPatchUpstreamStatus spoofed github failed: %v", err)
+	}
+
+	mu.Lock()
+	if capturedAuth != "" {
+		t.Errorf("GITHUB_TOKEN was leaked to spoofed host evil-github.com: %q", capturedAuth)
+	}
+	mu.Unlock()
+
+	spoofedGLPatch := DependencyPatch{
+		ID:               "gl-spoof-check",
+		Dependency:       "spoof-gl",
+		UpstreamIssueURL: "http://evil-gitlab.com/group/project/-/issues/1",
+	}
+
+	mu.Lock()
+	capturedAuth = ""
+	capturedPrivateToken = ""
+	mu.Unlock()
+
+	_, err = CheckPatchUpstreamStatus(context.Background(), client, []DependencyPatch{spoofedGLPatch})
+	if err != nil {
+		t.Fatalf("CheckPatchUpstreamStatus spoofed gitlab failed: %v", err)
+	}
+
+	mu.Lock()
+	if capturedPrivateToken != "" {
+		t.Errorf("GITLAB_TOKEN was leaked to spoofed host evil-gitlab.com: %q", capturedPrivateToken)
+	}
+	mu.Unlock()
+
 	t.Setenv("GITEA_TOKEN", "leak-gitea-token")
 	t.Setenv("CODEBERG_TOKEN", "leak-codeberg-token")
 	t.Setenv("BUGROUTER_GITEA_TOKEN", "")
@@ -269,6 +316,12 @@ func TestAuthHeaderResolution(t *testing.T) {
 	if hName, hVal := gitHubAuthHeader("untrusted.org"); hName != "" || hVal != "" {
 		t.Errorf("expected no auth for untrusted.org, got %s=%s", hName, hVal)
 	}
+	if hName, hVal := gitHubAuthHeader("evil-github.com"); hName != "" || hVal != "" {
+		t.Errorf("expected no auth for evil-github.com, got %s=%s", hName, hVal)
+	}
+	if hName, hVal := gitHubAuthHeader("evil-github.com:443"); hName != "" || hVal != "" {
+		t.Errorf("expected no auth for evil-github.com:443, got %s=%s", hName, hVal)
+	}
 	t.Setenv("BUGROUTER_GITHUB_TOKEN", "br-gh")
 	if hName, hVal := gitHubAuthHeader("untrusted.org"); hName != "Authorization" || hVal != "Bearer br-gh" {
 		t.Errorf("expected Bearer br-gh for untrusted.org with BUGROUTER_GITHUB_TOKEN, got %s=%s", hName, hVal)
@@ -282,6 +335,12 @@ func TestAuthHeaderResolution(t *testing.T) {
 	}
 	if hName, hVal := gitLabAuthHeader("untrusted.org"); hName != "" || hVal != "" {
 		t.Errorf("expected no auth for untrusted.org, got %s=%s", hName, hVal)
+	}
+	if hName, hVal := gitLabAuthHeader("evil-gitlab.com"); hName != "" || hVal != "" {
+		t.Errorf("expected no auth for evil-gitlab.com, got %s=%s", hName, hVal)
+	}
+	if hName, hVal := gitLabAuthHeader("evil-gitlab.com:443"); hName != "" || hVal != "" {
+		t.Errorf("expected no auth for evil-gitlab.com:443, got %s=%s", hName, hVal)
 	}
 	t.Setenv("BUGROUTER_GITLAB_TOKEN", "br-gl")
 	if hName, hVal := gitLabAuthHeader("untrusted.org"); hName != "PRIVATE-TOKEN" || hVal != "br-gl" {
@@ -305,6 +364,12 @@ func TestAuthHeaderResolution(t *testing.T) {
 	}
 	if hName, hVal := giteaAuthHeader("untrusted.org"); hName != "" || hVal != "" {
 		t.Errorf("expected no auth for untrusted.org, got %s=%s", hName, hVal)
+	}
+	if hName, hVal := giteaAuthHeader("evil-gitea.com"); hName != "" || hVal != "" {
+		t.Errorf("expected no auth for evil-gitea.com, got %s=%s", hName, hVal)
+	}
+	if hName, hVal := giteaAuthHeader("evil-codeberg.org"); hName != "" || hVal != "" {
+		t.Errorf("expected no auth for evil-codeberg.org, got %s=%s", hName, hVal)
 	}
 	t.Setenv("BUGROUTER_GITEA_TOKEN", "br-gt")
 	if hName, hVal := giteaAuthHeader("untrusted.org"); hName != "Authorization" || hVal != "token br-gt" {

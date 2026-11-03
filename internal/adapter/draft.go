@@ -76,6 +76,16 @@ func sanitizeTitle(t string) string {
 	return strings.Join(strings.Fields(t), " ")
 }
 
+func sanitizeMarkdownInline(s string) string {
+	s = strings.ReplaceAll(s, "\r", "")
+	s = strings.ReplaceAll(s, "\n", "")
+	s = strings.ReplaceAll(s, "[", `\[`)
+	s = strings.ReplaceAll(s, "]", `\]`)
+	s = strings.ReplaceAll(s, "(", `\(`)
+	s = strings.ReplaceAll(s, ")", `\)`)
+	return s
+}
+
 func mapFieldToValue(f introspector.FieldSchema, scrubbedSummary, scrubbedSteps, scrubbedExpected, scrubbedActual, scrubbedLogs, canonicalName, localVersion, severity string, format introspector.TemplateFormat, telem *telemetry.SystemTelemetry) string {
 	id := strings.ToLower(strings.ReplaceAll(strings.ReplaceAll(f.ID, "-", "_"), " ", "_"))
 	lbl := strings.ToLower(f.Label)
@@ -202,7 +212,12 @@ func BuildDraft(in DraftInput) (*StagedDraft, error) {
 			}
 			sb.WriteString(fmt.Sprintf("## Correlated Evidence (%s)\n\n", relName))
 			for _, iss := range in.RelatedIssues {
-				sb.WriteString(fmt.Sprintf("- [#%s](%s): %s (%s)\n", iss.ID, iss.URL, iss.Title, iss.State))
+				sb.WriteString(fmt.Sprintf("- [#%s](%s): %s (%s)\n",
+					sanitizeMarkdownInline(iss.ID),
+					sanitizeMarkdownInline(iss.URL),
+					sanitizeMarkdownInline(iss.Title),
+					sanitizeMarkdownInline(iss.State),
+				))
 			}
 			sb.WriteString("\n")
 		}
@@ -257,7 +272,12 @@ func BuildDraft(in DraftInput) (*StagedDraft, error) {
 			}
 			sb.WriteString(fmt.Sprintf("## Correlated Evidence (%s)\n\n", relName))
 			for _, iss := range in.RelatedIssues {
-				sb.WriteString(fmt.Sprintf("- [#%s](%s): %s (%s)\n", iss.ID, iss.URL, iss.Title, iss.State))
+				sb.WriteString(fmt.Sprintf("- [#%s](%s): %s (%s)\n",
+					sanitizeMarkdownInline(iss.ID),
+					sanitizeMarkdownInline(iss.URL),
+					sanitizeMarkdownInline(iss.Title),
+					sanitizeMarkdownInline(iss.State),
+				))
 			}
 			sb.WriteString("\n")
 		}

@@ -248,7 +248,11 @@ func runTriage(ctx context.Context, httpClient *httpx.Client, in io.Reader, out 
 			sb.WriteString("| Source | Candidate Query | Evidence |\n")
 			sb.WriteString("| :--- | :--- | :--- |\n")
 			for _, c := range result.Candidates {
-				sb.WriteString(fmt.Sprintf("| `%s` | `%s` | `%s` |\n", c.Source, c.Query, c.Evidence))
+				sb.WriteString(fmt.Sprintf("| `%s` | `%s` | `%s` |\n",
+					escapeMarkdownTableCell(c.Source),
+					escapeMarkdownTableCell(c.Query),
+					escapeMarkdownTableCell(c.Evidence),
+				))
 			}
 			sb.WriteString("\n")
 		}
