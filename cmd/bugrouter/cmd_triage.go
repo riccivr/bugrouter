@@ -30,19 +30,55 @@ type AgentTriageResult struct {
 	NextActions         []string                     `json:"next_actions"`
 }
 
+// stringSlice implements flag.Value for repeatable string flags.
+type stringSlice []string
+
+func (s *stringSlice) String() string {
+	return strings.Join(*s, " ")
+}
+
+func (s *stringSlice) Set(val string) error {
+	*s = append(*s, val)
+	return nil
+}
+
 func runVerify(ctx context.Context, out io.Writer, errOut io.Writer, args []string) int {
 	fs := flag.NewFlagSet("verify", flag.ContinueOnError)
 	fs.SetOutput(errOut)
-	cmd := fs.String("cmd", "", "reproduction command to execute")
+	cmd := fs.String("cmd", "", "reproduction command to execute via shell")
 	timeout := fs.Duration("timeout", 15*time.Second, "execution timeout duration")
 	expectExit := fs.Int("expect-exit", 0, "expected exit code (0 means any non-zero exit code is considered reproduced)")
 	workDir := fs.String("work-dir", "", "working directory for reproduction command")
-	if err := fs.Parse(args); err != nil {
+
+	var argFlags stringSlice
+	fs.Var(&argFlags, "arg", "argument for direct argv execution (repeatable)")
+
+	flagArgs, posArgs := splitInterleavedFlags(args, map[string]bool{
+		"cmd":         true,
+		"timeout":     true,
+		"expect-exit": true,
+		"work-dir":    true,
+		"arg":         true,
+	})
+
+	if err := fs.Parse(flagArgs); err != nil {
 		return 1
 	}
 
-	if strings.TrimSpace(*cmd) == "" {
-		fmt.Fprintln(errOut, "error: --cmd is required")
+	var argv []string
+	if len(argFlags) > 0 {
+		argv = append(argv, argFlags...)
+	}
+	if len(posArgs) > 0 {
+		argv = append(argv, posArgs...)
+	}
+	if len(fs.Args()) > 0 {
+		argv = append(argv, fs.Args()...)
+	}
+
+	cmdStr := strings.TrimSpace(*cmd)
+	if cmdStr == "" && len(argv) == 0 {
+		fmt.Fprintln(errOut, "error: --cmd is required or positional arguments after '--'")
 		return 1
 	}
 
@@ -50,7 +86,8 @@ func runVerify(ctx context.Context, out io.Writer, errOut io.Writer, args []stri
 		ctx = context.Background()
 	}
 	proof, err := verifier.Verify(ctx, verifier.VerifyOptions{
-		Command:    *cmd,
+		Command:    cmdStr,
+		Args:       argv,
 		Timeout:    *timeout,
 		ExpectExit: *expectExit,
 		WorkDir:    *workDir,

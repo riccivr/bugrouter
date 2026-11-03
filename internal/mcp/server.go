@@ -651,20 +651,20 @@ func (s *Server) toolDefinitions() []map[string]any {
 		},
 		{
 			"name":        "verify_reproduction",
-			"description": "Executes a bounded reproduction command, captures and scrubs stdout/stderr, extracts faulting package candidates, and returns a deterministic VerificationProof. Supplying 'args' is preferred for safe direct execution without shell interpretation.",
+			"description": "Executes a bounded reproduction command, captures and scrubs stdout/stderr, extracts faulting package candidates, and returns a deterministic VerificationProof. Recommends 'args' (shell-free argv execution) when possible; 'command' executes via shell.",
 			"inputSchema": map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"command": map[string]any{
-						"type":        "string",
-						"description": "Reproduction shell command string to execute (fallback if args is omitted)",
-					},
 					"args": map[string]any{
 						"type": "array",
 						"items": map[string]any{
 							"type": "string",
 						},
-						"description": "Tokenized command arguments for direct execution without shell interpretation (preferred)",
+						"description": "Tokenized command arguments for direct execution without shell interpretation (recommended, shell-free)",
+					},
+					"command": map[string]any{
+						"type":        "string",
+						"description": "Reproduction command string executed via shell (sh -c or cmd /C); fallback if args is omitted",
 					},
 					"timeout_seconds": map[string]any{
 						"type":        "integer",

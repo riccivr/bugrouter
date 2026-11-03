@@ -213,52 +213,75 @@ func runScrub(in io.Reader, out io.Writer, errOut io.Writer, args []string) int 
 	return 0
 }
 
-func cmdResolve(args []string) {
+func runResolve(ctx context.Context, httpClient *httpx.Client, out, errOut io.Writer, args []string) int {
 	fs := flag.NewFlagSet("resolve", flag.ContinueOnError)
+	fs.SetOutput(errOut)
 	jsonOut := fs.Bool("json", false, "output structured JSON")
 	noCache := fs.Bool("no-cache", false, "disable disk cache")
 	timeout := fs.Duration("timeout", 15*time.Second, "request and probe timeout duration")
-	if err := fs.Parse(args); err != nil {
-		os.Exit(1)
+
+	flagArgs, posArgs := splitInterleavedFlags(args, map[string]bool{
+		"timeout": true,
+	})
+
+	if err := fs.Parse(flagArgs); err != nil {
+		return 1
 	}
 
-	posArgs := fs.Args()
+	if len(fs.Args()) > 0 {
+		posArgs = append(posArgs, fs.Args()...)
+	}
+
 	if len(posArgs) < 1 {
-		fmt.Fprintln(os.Stderr, "error: resolve requires a target query")
-		os.Exit(1)
+		fmt.Fprintln(errOut, "error: resolve requires a target query")
+		fmt.Fprintln(errOut, "Usage: bugrouter resolve [--json] [--no-cache] [--timeout <dur>] <target>")
+		return 1
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(ctx, *timeout)
 	defer cancel()
 
-	httpClient := httpx.NewClient(0)
+	if httpClient == nil {
+		httpClient = httpx.NewClient(0)
+	}
+
 	target, err := resolveTarget(ctx, httpClient, posArgs[0], *noCache)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
+		fmt.Fprintf(errOut, "error: %v\n", err)
+		return 1
 	}
 
 	if *jsonOut {
-		enc := json.NewEncoder(os.Stdout)
+		enc := json.NewEncoder(out)
 		enc.SetIndent("", "  ")
 		if err := enc.Encode(target); err != nil {
-			fmt.Fprintf(os.Stderr, "encode json: %v\n", err)
-			os.Exit(1)
+			fmt.Fprintf(errOut, "encode json: %v\n", err)
+			return 1
 		}
-		return
+		return 0
 	}
 
-	fmt.Printf("Canonical Name: %s\n", target.CanonicalName)
+	fmt.Fprintf(out, "Canonical Name: %s\n", target.CanonicalName)
 	if target.LocalVersion != "" {
-		fmt.Printf("Local Version:  %s\n", target.LocalVersion)
+		fmt.Fprintf(out, "Local Version:  %s\n", target.LocalVersion)
 	}
-	fmt.Printf("Layer:          %s\n", target.Layer)
-	fmt.Printf("Protocol:       %s\n", target.Tracker.Protocol)
+	fmt.Fprintf(out, "Layer:          %s\n", target.Layer)
+	fmt.Fprintf(out, "Protocol:       %s\n", target.Tracker.Protocol)
 	if target.Tracker.URL != "" {
-		fmt.Printf("Tracker URL:    %s\n", target.Tracker.URL)
+		fmt.Fprintf(out, "Tracker URL:    %s\n", target.Tracker.URL)
 	}
 	if target.Tracker.Email != "" {
-		fmt.Printf("Tracker Email:  %s\n", target.Tracker.Email)
+		fmt.Fprintf(out, "Tracker Email:  %s\n", target.Tracker.Email)
+	}
+	return 0
+}
+
+func cmdResolve(args []string) {
+	if code := runResolve(context.Background(), nil, os.Stdout, os.Stderr, args); code != 0 {
+		os.Exit(code)
 	}
 }
 
@@ -280,18 +303,33 @@ func cmdScrub(args []string) {
 	}
 }
 
-func cmdStack(args []string) {
+func runStack(ctx context.Context, out, errOut io.Writer, args []string) int {
 	fs := flag.NewFlagSet("stack", flag.ContinueOnError)
+	fs.SetOutput(errOut)
 	dir := fs.String("dir", ".", "workspace directory to scan")
 	checkUpstream := fs.Bool("check-upstream", false, "query upstream trackers for active bugs matching dependencies")
 	jsonOut := fs.Bool("json", false, "output structured JSON")
 	noCache := fs.Bool("no-cache", false, "disable disk cache")
 	timeout := fs.Duration("timeout", 30*time.Second, "request and scan timeout duration")
-	if err := fs.Parse(args); err != nil {
-		os.Exit(1)
+
+	flagArgs, posArgs := splitInterleavedFlags(args, map[string]bool{
+		"dir":     true,
+		"timeout": true,
+	})
+
+	if err := fs.Parse(flagArgs); err != nil {
+		return 1
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+	scanDir := *dir
+	if len(posArgs) > 0 && scanDir == "." {
+		scanDir = posArgs[0]
+	}
+
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(ctx, *timeout)
 	defer cancel()
 
 	httpClient := httpx.NewClient(0)
@@ -299,7 +337,7 @@ func cmdStack(args []string) {
 		0,
 		resolver.NewOrgCloudProbe(),
 		resolver.NewDirectProbe(),
-		resolver.NewWorkspaceProbe(*dir),
+		resolver.NewWorkspaceProbe(scanDir),
 		resolver.NewOSPackageProbe(),
 		resolver.NewRegistryProbe(httpClient, resolver.DefaultRegistryEndpoints()),
 		resolver.NewWebDomainProbe(httpClient),
@@ -309,23 +347,23 @@ func cmdStack(args []string) {
 	}
 
 	finder := dedup.NewFinder(httpClient)
-	report, err := dedup.BuildStackRadar(ctx, wf, finder, *dir, *checkUpstream)
+	report, err := dedup.BuildStackRadar(ctx, wf, finder, scanDir, *checkUpstream)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: scan stack: %v\n", err)
-		os.Exit(1)
+		fmt.Fprintf(errOut, "error: scan stack: %v\n", err)
+		return 1
 	}
 
 	if *jsonOut {
-		enc := json.NewEncoder(os.Stdout)
+		enc := json.NewEncoder(out)
 		enc.SetIndent("", "  ")
 		if err := enc.Encode(report); err != nil {
-			fmt.Fprintf(os.Stderr, "error: encode json: %v\n", err)
-			os.Exit(1)
+			fmt.Fprintf(errOut, "error: encode json: %v\n", err)
+			return 1
 		}
-		return
+		return 0
 	}
 
-	fmt.Printf("Workspace Stack Inventory (%s): %d dependencies (%d resolved)\n", report.RootDir, report.Total, report.Resolved)
+	fmt.Fprintf(out, "Workspace Stack Inventory (%s): %d dependencies (%d resolved)\n", report.RootDir, report.Total, report.Resolved)
 	for _, entry := range report.Entries {
 		dep := entry.Dependency
 		verStr := ""
@@ -339,20 +377,27 @@ func cmdStack(args []string) {
 			} else if dep.Target.Tracker.Email != "" {
 				trackerInfo = fmt.Sprintf(" -> %s: %s", dep.Target.Tracker.Protocol, dep.Target.Tracker.Email)
 			}
-			fmt.Printf("- [%s] %s%s%s\n", dep.Ecosystem, dep.Name, verStr, trackerInfo)
+			fmt.Fprintf(out, "- [%s] %s%s%s\n", dep.Ecosystem, dep.Name, verStr, trackerInfo)
 		} else {
 			errInfo := ""
 			if dep.ResolutionErr != "" {
 				errInfo = fmt.Sprintf(" (error: %s)", dep.ResolutionErr)
 			}
-			fmt.Printf("- [%s] %s%s [unresolved%s]\n", dep.Ecosystem, dep.Name, verStr, errInfo)
+			fmt.Fprintf(out, "- [%s] %s%s [unresolved%s]\n", dep.Ecosystem, dep.Name, verStr, errInfo)
 		}
 
 		if len(entry.UpstreamBugs) > 0 {
 			for _, bug := range entry.UpstreamBugs {
-				fmt.Printf("    * [#%s] %s (%s)\n", bug.ID, bug.Title, bug.URL)
+				fmt.Fprintf(out, "    * [#%s] %s (%s)\n", bug.ID, bug.Title, bug.URL)
 			}
 		}
+	}
+	return 0
+}
+
+func cmdStack(args []string) {
+	if code := runStack(context.Background(), os.Stdout, os.Stderr, args); code != 0 {
+		os.Exit(code)
 	}
 }
 

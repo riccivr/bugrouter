@@ -896,7 +896,7 @@ func TestRunVerify(t *testing.T) {
 		t.Errorf("expected error message to mention --cmd, got: %s", errOut.String())
 	}
 
-	// 2. Success execution
+	// 2. Success execution via --cmd
 	out.Reset()
 	errOut.Reset()
 	codeSuccess := runVerify(context.Background(), &out, &errOut, []string{"--cmd", "echo test-verification-output"})
@@ -912,6 +912,42 @@ func TestRunVerify(t *testing.T) {
 	}
 	if proof.ProofDigest == "" {
 		t.Errorf("expected non-empty ProofDigest")
+	}
+
+	// 3. Success execution via positional argv after '--'
+	out.Reset()
+	errOut.Reset()
+	codeArgv := runVerify(context.Background(), &out, &errOut, []string{"--", "echo", "argv-positional-output"})
+	if codeArgv != 0 {
+		t.Fatalf("expected exit code 0, got %d (err: %s)", codeArgv, errOut.String())
+	}
+	var proofArgv verifier.VerificationProof
+	if err := json.Unmarshal(out.Bytes(), &proofArgv); err != nil {
+		t.Fatalf("decode verification proof JSON: %v", err)
+	}
+	if proofArgv.Command != "echo argv-positional-output" {
+		t.Errorf("proofArgv.Command = %q, want echo argv-positional-output", proofArgv.Command)
+	}
+	if !strings.Contains(string(proofArgv.ScrubbedOutput), "argv-positional-output") {
+		t.Errorf("expected scrubbed output to contain 'argv-positional-output', got: %s", proofArgv.ScrubbedOutput)
+	}
+
+	// 4. Success execution via repeatable --arg flags
+	out.Reset()
+	errOut.Reset()
+	codeArgFlag := runVerify(context.Background(), &out, &errOut, []string{"--arg", "echo", "--arg", "arg-flag-output"})
+	if codeArgFlag != 0 {
+		t.Fatalf("expected exit code 0, got %d (err: %s)", codeArgFlag, errOut.String())
+	}
+	var proofArgFlag verifier.VerificationProof
+	if err := json.Unmarshal(out.Bytes(), &proofArgFlag); err != nil {
+		t.Fatalf("decode verification proof JSON: %v", err)
+	}
+	if proofArgFlag.Command != "echo arg-flag-output" {
+		t.Errorf("proofArgFlag.Command = %q, want echo arg-flag-output", proofArgFlag.Command)
+	}
+	if !strings.Contains(string(proofArgFlag.ScrubbedOutput), "arg-flag-output") {
+		t.Errorf("expected scrubbed output to contain 'arg-flag-output', got: %s", proofArgFlag.ScrubbedOutput)
 	}
 }
 
@@ -1738,5 +1774,104 @@ func TestRunSelfTest(t *testing.T) {
 	codeBad := runSelfTest(&out, &errOut, []string{"--invalid-flag"})
 	if codeBad != 1 {
 		t.Errorf("runSelfTest with invalid flag returned %d, want 1", codeBad)
+	}
+}
+
+func TestRunResolveTrailingFlags(t *testing.T) {
+	// 1. Missing target query
+	var out, errOut bytes.Buffer
+	codeMissing := runResolve(context.Background(), nil, &out, &errOut, []string{})
+	if codeMissing != 1 {
+		t.Fatalf("expected code 1 for missing target, got %d", codeMissing)
+	}
+	if !strings.Contains(errOut.String(), "error: resolve requires a target query") {
+		t.Errorf("expected error message to mention target query, got: %s", errOut.String())
+	}
+
+	// 2. Trailing --json flag
+	out.Reset()
+	errOut.Reset()
+	codeJSON := runResolve(context.Background(), nil, &out, &errOut, []string{"bugrouter", "--json"})
+	if codeJSON != 0 {
+		t.Fatalf("runResolve with trailing --json failed with code %d: %s", codeJSON, errOut.String())
+	}
+	var target resolver.Target
+	if err := json.Unmarshal(out.Bytes(), &target); err != nil {
+		t.Fatalf("unmarshal target json: %v\noutput: %s", err, out.String())
+	}
+	if target.CanonicalName != "bugrouter" {
+		t.Errorf("CanonicalName = %q, want 'bugrouter'", target.CanonicalName)
+	}
+
+	// 3. Trailing --timeout and --no-cache flags
+	out.Reset()
+	errOut.Reset()
+	codeFlags := runResolve(context.Background(), nil, &out, &errOut, []string{"bugrouter", "--timeout", "5s", "--no-cache"})
+	if codeFlags != 0 {
+		t.Fatalf("runResolve with trailing flags failed with code %d: %s", codeFlags, errOut.String())
+	}
+	if !strings.Contains(out.String(), "Canonical Name: bugrouter") {
+		t.Errorf("expected text output to contain 'Canonical Name: bugrouter', got:\n%s", out.String())
+	}
+}
+
+func TestDraftAndReportTrailingFlags(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", tempDir)
+	t.Setenv("XDG_CACHE_HOME", tempDir)
+	t.Setenv("XDG_CONFIG_HOME", tempDir)
+
+	var out, errOut bytes.Buffer
+	// Test runDraft with trailing flags after target
+	codeDraft := runDraft(context.Background(), nil, strings.NewReader(""), &out, &errOut, []string{
+		"bugrouter",
+		"--title", "Draft Bug Title",
+		"--summary", "Draft Bug Summary",
+		"--steps", "Draft Steps to reproduce",
+		"--logs", "panic: test",
+		"--json",
+	})
+	if codeDraft != 0 {
+		t.Fatalf("runDraft with trailing flags failed with code %d: %s", codeDraft, errOut.String())
+	}
+	var draft adapter.StagedDraft
+	if err := json.Unmarshal(out.Bytes(), &draft); err != nil {
+		t.Fatalf("unmarshal draft json: %v\noutput: %s", err, out.String())
+	}
+	if draft.Target.CanonicalName != "bugrouter" {
+		t.Errorf("draft.Target.CanonicalName = %q, want 'bugrouter'", draft.Target.CanonicalName)
+	}
+	if draft.Title != "Draft Bug Title" {
+		t.Errorf("draft.Title = %q, want 'Draft Bug Title'", draft.Title)
+	}
+
+	// Test runReport with trailing flags after target
+	out.Reset()
+	errOut.Reset()
+	codeReport := runReport(context.Background(), nil, strings.NewReader(""), &out, &errOut, []string{
+		"bugrouter",
+		"--title", "Report Bug Title",
+		"--summary", "Report Bug Summary",
+		"--steps", "Report Steps to reproduce",
+		"--expected", "Expected behavior",
+		"--actual", "Actual behavior",
+		"--no-telemetry",
+		"--json",
+	})
+	if codeReport != 0 {
+		t.Fatalf("runReport with trailing flags failed with code %d: %s", codeReport, errOut.String())
+	}
+	var reportResp struct {
+		Draft      adapter.StagedDraft `json:"draft"`
+		StagedPath string              `json:"staged_path"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &reportResp); err != nil {
+		t.Fatalf("unmarshal report json: %v\noutput: %s", err, out.String())
+	}
+	if reportResp.Draft.Target.CanonicalName != "bugrouter" {
+		t.Errorf("report draft target = %q, want 'bugrouter'", reportResp.Draft.Target.CanonicalName)
+	}
+	if reportResp.Draft.Title != "Report Bug Title" {
+		t.Errorf("report draft title = %q, want 'Report Bug Title'", reportResp.Draft.Title)
 	}
 }

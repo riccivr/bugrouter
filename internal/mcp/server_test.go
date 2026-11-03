@@ -408,6 +408,93 @@ func TestVerifyReproductionTool(t *testing.T) {
 	}
 }
 
+func TestMCPToolCallVerifyReproductionArgsMode(t *testing.T) {
+	tempDir := t.TempDir()
+	store := adapter.NewDraftStore(tempDir)
+	wf := resolver.NewWaterfall(time.Second, resolver.NewDirectProbe())
+	server := NewServer(wf, store)
+
+	var in, out bytes.Buffer
+	reqPayload := map[string]any{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"method":  "tools/call",
+		"params": map[string]any{
+			"name": "verify_reproduction",
+			"arguments": map[string]any{
+				"args": []string{"echo", "argv-mode-output"},
+			},
+		},
+	}
+	reqBytes, err := json.Marshal(reqPayload)
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	in.Write(append(reqBytes, '\n'))
+
+	if err := server.Run(context.Background(), &in, &out); err != nil {
+		t.Fatalf("server.Run failed: %v", err)
+	}
+
+	var resp jsonrpcResponse
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out.String())), &resp); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+
+	resMap, ok := resp.Result.(map[string]any)
+	if !ok {
+		t.Fatalf("expected result map, got: %v", resp.Result)
+	}
+	if resMap["isError"] != false {
+		t.Fatalf("verify_reproduction isError = true: %v", resMap)
+	}
+
+	rawText := resMap["content"].([]any)[0].(map[string]any)["text"].(string)
+	if !strings.Contains(rawText, "argv-mode-output") || !strings.Contains(rawText, "proof_digest") {
+		t.Errorf("verify result missing expected content: %s", rawText)
+	}
+}
+
+func TestMCPToolCallVerifyReproductionMissingArgsAndCommand(t *testing.T) {
+	tempDir := t.TempDir()
+	store := adapter.NewDraftStore(tempDir)
+	wf := resolver.NewWaterfall(time.Second, resolver.NewDirectProbe())
+	server := NewServer(wf, store)
+
+	var in, out bytes.Buffer
+	reqPayload := map[string]any{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"method":  "tools/call",
+		"params": map[string]any{
+			"name":      "verify_reproduction",
+			"arguments": map[string]any{},
+		},
+	}
+	reqBytes, err := json.Marshal(reqPayload)
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	in.Write(append(reqBytes, '\n'))
+
+	if err := server.Run(context.Background(), &in, &out); err != nil {
+		t.Fatalf("server.Run failed: %v", err)
+	}
+
+	var resp jsonrpcResponse
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out.String())), &resp); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+
+	resMap, ok := resp.Result.(map[string]any)
+	if !ok {
+		t.Fatalf("expected result map, got: %v", resp.Result)
+	}
+	if resMap["isError"] != true {
+		t.Fatalf("expected isError = true for missing args/command: %v", resMap)
+	}
+}
+
 func TestDraftBugReportStrictQualityRejection(t *testing.T) {
 	tempDir := t.TempDir()
 	store := adapter.NewDraftStore(tempDir)

@@ -254,8 +254,9 @@ func runGuidedReport(ctx context.Context, in io.Reader, out io.Writer, httpClien
 	return draft, stagedPath, nil
 }
 
-func cmdDraft(args []string) {
+func runDraft(ctx context.Context, httpClient *httpx.Client, in io.Reader, out, errOut io.Writer, args []string) int {
 	fs := flag.NewFlagSet("draft", flag.ContinueOnError)
+	fs.SetOutput(errOut)
 	title := fs.String("title", "", "bug report title")
 	summary := fs.String("summary", "", "summary of the issue")
 	steps := fs.String("steps", "", "steps to reproduce")
@@ -269,8 +270,25 @@ func cmdDraft(args []string) {
 	withTelemetry := fs.Bool("with-telemetry", false, "collect and attach local hardware/OS telemetry")
 	jsonOut := fs.Bool("json", false, "output structured JSON")
 	noCache := fs.Bool("no-cache", false, "disable disk cache")
-	if err := fs.Parse(args); err != nil {
-		os.Exit(1)
+
+	flagArgs, posArgs := splitInterleavedFlags(args, map[string]bool{
+		"title":       true,
+		"summary":     true,
+		"steps":       true,
+		"logs":        true,
+		"body-file":   true,
+		"from-parked": true,
+		"related-dep": true,
+		"timeout":     true,
+		"verify-cmd":  true,
+	})
+
+	if err := fs.Parse(flagArgs); err != nil {
+		return 1
+	}
+
+	if len(fs.Args()) > 0 {
+		posArgs = append(posArgs, fs.Args()...)
 	}
 
 	var parkedBug *adapter.ParkedBug
@@ -278,8 +296,8 @@ func cmdDraft(args []string) {
 		parkStore := adapter.NewParkedStore("")
 		p, err := parkStore.Get(*fromParked)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "error: load parked bug %s: %v\n", *fromParked, err)
-			os.Exit(1)
+			fmt.Fprintf(errOut, "error: load parked bug %s: %v\n", *fromParked, err)
+			return 1
 		}
 		parkedBug = p
 		if *title == "" {
@@ -302,31 +320,29 @@ func cmdDraft(args []string) {
 			*relatedDep = parkedBug.RelatedDependency
 		}
 	}
-
-	posArgs := fs.Args()
 	var targetQuery string
 	if len(posArgs) > 0 {
 		targetQuery = posArgs[0]
 	} else if parkedBug != nil {
 		targetQuery = parkedBug.Dependency
 	} else {
-		fmt.Fprintln(os.Stderr, "error: draft requires a target query or --from-parked <id>")
-		os.Exit(1)
+		fmt.Fprintln(errOut, "error: draft requires a target query or --from-parked <id>")
+		return 1
 	}
 	if strings.TrimSpace(*title) == "" {
-		fmt.Fprintln(os.Stderr, "error: --title is required")
-		os.Exit(1)
+		fmt.Fprintln(errOut, "error: --title is required")
+		return 1
 	}
 
 	if *bodyFile != "" {
 		var r io.Reader
 		if *bodyFile == "-" {
-			r = os.Stdin
+			r = in
 		} else {
 			f, err := os.Open(*bodyFile)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "error: open body file %s: %v\n", *bodyFile, err)
-				os.Exit(1)
+				fmt.Fprintf(errOut, "error: open body file %s: %v\n", *bodyFile, err)
+				return 1
 			}
 			defer f.Close()
 			r = f
@@ -334,8 +350,8 @@ func cmdDraft(args []string) {
 		const maxBodyBytes = 512 * 1024
 		data, err := io.ReadAll(io.LimitReader(r, maxBodyBytes))
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "error: read body file: %v\n", err)
-			os.Exit(1)
+			fmt.Fprintf(errOut, "error: read body file: %v\n", err)
+			return 1
 		}
 		fSummary, fSteps, fLogs := parseMarkdownBodyFile(string(data))
 		if *summary == "" {
@@ -349,14 +365,19 @@ func cmdDraft(args []string) {
 		}
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(ctx, *timeout)
 	defer cancel()
 
-	httpClient := httpx.NewClient(0)
+	if httpClient == nil {
+		httpClient = httpx.NewClient(0)
+	}
 	target, err := resolveTarget(ctx, httpClient, targetQuery, *noCache)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
+		fmt.Fprintf(errOut, "error: %v\n", err)
+		return 1
 	}
 
 	intro := introspector.New(httpClient)
@@ -381,8 +402,8 @@ func cmdDraft(args []string) {
 			Timeout: *timeout,
 		})
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "error: verify reproduction: %v\n", err)
-			os.Exit(1)
+			fmt.Fprintf(errOut, "error: verify reproduction: %v\n", err)
+			return 1
 		}
 		proof = p
 		if *logs == "" && proof.ScrubbedOutput != "" {
@@ -422,71 +443,79 @@ func cmdDraft(args []string) {
 		RelatedIssues:     relatedIssues,
 	})
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: build draft: %v\n", err)
-		os.Exit(1)
+		fmt.Fprintf(errOut, "error: build draft: %v\n", err)
+		return 1
 	}
 
 	if *strictQuality && !draft.Quality.Passed {
 		if *jsonOut {
-			enc := json.NewEncoder(os.Stdout)
+			enc := json.NewEncoder(out)
 			enc.SetIndent("", "  ")
 			if err := enc.Encode(draft.Quality); err != nil {
-				fmt.Fprintf(os.Stderr, "encode json: %v\n", err)
+				fmt.Fprintf(errOut, "encode json: %v\n", err)
 			}
 		} else {
-			fmt.Fprintf(os.Stderr, "error: strict quality gate failed (Score: %d/100, Grade: %s):\n", draft.Quality.Score, draft.Quality.Grade)
+			fmt.Fprintf(errOut, "error: strict quality gate failed (Score: %d/100, Grade: %s):\n", draft.Quality.Score, draft.Quality.Grade)
 			for _, issue := range draft.Quality.Issues {
-				fmt.Fprintf(os.Stderr, "  - %s\n", issue)
+				fmt.Fprintf(errOut, "  - %s\n", issue)
 			}
 		}
-		os.Exit(2)
+		return 2
 	}
 
 	draftStore := adapter.NewDraftStore("")
 	savedPath, err := draftStore.Save(draft)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: save draft: %v\n", err)
-		os.Exit(1)
+		fmt.Fprintf(errOut, "error: save draft: %v\n", err)
+		return 1
 	}
 
 	if parkedBug != nil {
 		parkedBug.Status = "triaged"
 		parkStore := adapter.NewParkedStore("")
 		if parkSaveErr := parkStore.Save(parkedBug); parkSaveErr != nil {
-			fmt.Fprintf(os.Stderr, "warning: update parked bug %s status: %v\n", parkedBug.ID, parkSaveErr)
+			fmt.Fprintf(errOut, "warning: update parked bug %s status: %v\n", parkedBug.ID, parkSaveErr)
 		}
 	}
 
 	if *jsonOut {
-		enc := json.NewEncoder(os.Stdout)
+		enc := json.NewEncoder(out)
 		enc.SetIndent("", "  ")
 		if err := enc.Encode(draft); err != nil {
-			fmt.Fprintf(os.Stderr, "encode json: %v\n", err)
-			os.Exit(1)
+			fmt.Fprintf(errOut, "error: encode json: %v\n", err)
+			return 1
 		}
-		return
+		return 0
 	}
 
-	fmt.Printf("Draft ID:       %s\n", draft.ID)
-	fmt.Printf("Staged Path:    %s\n", savedPath)
-	fmt.Printf("Target:         %s\n", draft.Target.CanonicalName)
-	fmt.Printf("Title:          %s\n", draft.Title)
+	fmt.Fprintf(out, "Draft ID:       %s\n", draft.ID)
+	fmt.Fprintf(out, "Staged Path:    %s\n", savedPath)
+	fmt.Fprintf(out, "Target:         %s\n", draft.Target.CanonicalName)
+	fmt.Fprintf(out, "Title:          %s\n", draft.Title)
 	if draft.SubmissionURL != "" {
-		fmt.Printf("Submission URL: %s\n", draft.SubmissionURL)
+		fmt.Fprintf(out, "Submission URL: %s\n", draft.SubmissionURL)
 	}
 	if len(draft.PotentialDuplicates) > 0 {
-		fmt.Printf("\nPotential Upstream Duplicates (%d found):\n", len(draft.PotentialDuplicates))
+		fmt.Fprintf(out, "\nPotential Upstream Duplicates (%d found):\n", len(draft.PotentialDuplicates))
 		for _, d := range draft.PotentialDuplicates {
-			fmt.Printf("  - [%s] (%.0f%% match) %s\n    %s\n", d.State, d.Score*100, d.Title, d.URL)
+			fmt.Fprintf(out, "  - [%s] (%.0f%% match) %s\n    %s\n", d.State, d.Score*100, d.Title, d.URL)
 		}
 	}
 	if draft.DebbugsEmail != "" {
-		fmt.Printf("\n--- Debbugs Email ---\n%s\n", draft.DebbugsEmail)
+		fmt.Fprintf(out, "\n--- Debbugs Email ---\n%s\n", draft.DebbugsEmail)
+	}
+	return 0
+}
+
+func cmdDraft(args []string) {
+	if code := runDraft(context.Background(), nil, os.Stdin, os.Stdout, os.Stderr, args); code != 0 {
+		os.Exit(code)
 	}
 }
 
-func cmdReport(args []string) {
+func runReport(ctx context.Context, httpClient *httpx.Client, in io.Reader, out, errOut io.Writer, args []string) int {
 	fs := flag.NewFlagSet("report", flag.ContinueOnError)
+	fs.SetOutput(errOut)
 	title := fs.String("title", "", "bug report title")
 	summary := fs.String("summary", "", "summary of the issue")
 	steps := fs.String("steps", "", "steps to reproduce")
@@ -498,18 +527,39 @@ func cmdReport(args []string) {
 	jsonOut := fs.Bool("json", false, "output structured JSON")
 	noCache := fs.Bool("no-cache", false, "disable disk cache")
 	timeout := fs.Duration("timeout", 20*time.Second, "request and probe timeout duration")
-	if err := fs.Parse(args); err != nil {
-		os.Exit(1)
+
+	flagArgs, posArgs := splitInterleavedFlags(args, map[string]bool{
+		"title":    true,
+		"summary":  true,
+		"steps":    true,
+		"expected": true,
+		"actual":   true,
+		"logs":     true,
+		"timeout":  true,
+	})
+
+	if err := fs.Parse(flagArgs); err != nil {
+		return 1
 	}
 
-	posArgs := fs.Args()
+	if len(fs.Args()) > 0 {
+		posArgs = append(posArgs, fs.Args()...)
+	}
+
 	if len(posArgs) < 1 {
-		fmt.Fprintln(os.Stderr, "error: report requires a target query")
-		os.Exit(1)
+		fmt.Fprintln(errOut, "error: report requires a target query")
+		return 1
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(ctx, *timeout)
 	defer cancel()
+
+	if httpClient == nil {
+		httpClient = httpx.NewClient(0)
+	}
 
 	opts := ReportOptions{
 		Query:            posArgs[0],
@@ -525,21 +575,28 @@ func cmdReport(args []string) {
 		Timeout:          *timeout,
 	}
 
-	draft, stagedPath, err := runGuidedReport(ctx, os.Stdin, os.Stdout, nil, opts)
+	draft, stagedPath, err := runGuidedReport(ctx, in, out, httpClient, opts)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
+		fmt.Fprintf(errOut, "error: %v\n", err)
+		return 1
 	}
 
 	if *jsonOut {
-		enc := json.NewEncoder(os.Stdout)
+		enc := json.NewEncoder(out)
 		enc.SetIndent("", "  ")
 		if encErr := enc.Encode(map[string]any{
 			"draft":       draft,
 			"staged_path": stagedPath,
 		}); encErr != nil {
-			fmt.Fprintf(os.Stderr, "error: encode json: %v\n", encErr)
-			os.Exit(1)
+			fmt.Fprintf(errOut, "error: encode json: %v\n", encErr)
+			return 1
 		}
+	}
+	return 0
+}
+
+func cmdReport(args []string) {
+	if code := runReport(context.Background(), nil, os.Stdin, os.Stdout, os.Stderr, args); code != 0 {
+		os.Exit(code)
 	}
 }
