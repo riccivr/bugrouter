@@ -207,6 +207,62 @@ func TestClientStripsAuthHeadersOnCrossHostRedirect(t *testing.T) {
 	}
 }
 
+func TestClientStripsAuthHeadersOnPortOrSchemeRedirect(t *testing.T) {
+	var capturedAuth, capturedPrivateToken string
+	destServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedAuth = r.Header.Get("Authorization")
+		capturedPrivateToken = r.Header.Get("PRIVATE-TOKEN")
+		w.Header().Set("Content-Type", "text/plain")
+		fmt.Fprint(w, "redirect-dest-ok")
+	}))
+	defer destServer.Close()
+
+	redirectServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, destServer.URL, http.StatusFound)
+	}))
+	defer redirectServer.Close()
+
+	client := NewTestClient(time.Second)
+	data, err := client.GetBytesWithHeaders(context.Background(), redirectServer.URL, "text/plain", map[string]string{
+		"Authorization": "Bearer secret-port-token",
+		"PRIVATE-TOKEN": "glpat-secret-port-token",
+	})
+	if err != nil {
+		t.Fatalf("GetBytesWithHeaders failed: %v", err)
+	}
+	if string(data) != "redirect-dest-ok" {
+		t.Errorf("data = %q, want redirect-dest-ok", string(data))
+	}
+	if capturedAuth != "" {
+		t.Errorf("Authorization header leaked across ports on same host: %q", capturedAuth)
+	}
+	if capturedPrivateToken != "" {
+		t.Errorf("PRIVATE-TOKEN header leaked across ports on same host: %q", capturedPrivateToken)
+	}
+
+	checkRedirect := client.httpClient.CheckRedirect
+	reqHTTPS, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "https://example.com/api", nil)
+	if err != nil {
+		t.Fatalf("create https req: %v", err)
+	}
+	reqHTTP, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "http://example.com/api", nil)
+	if err != nil {
+		t.Fatalf("create http req: %v", err)
+	}
+	reqHTTP.Header.Set("Authorization", "Bearer secret-scheme-token")
+	reqHTTP.Header.Set("PRIVATE-TOKEN", "glpat-secret-scheme-token")
+
+	if err := checkRedirect(reqHTTP, []*http.Request{reqHTTPS}); err != nil {
+		t.Fatalf("checkRedirect returned unexpected error: %v", err)
+	}
+	if reqHTTP.Header.Get("Authorization") != "" {
+		t.Errorf("Authorization header leaked across scheme downgrade: %q", reqHTTP.Header.Get("Authorization"))
+	}
+	if reqHTTP.Header.Get("PRIVATE-TOKEN") != "" {
+		t.Errorf("PRIVATE-TOKEN header leaked across scheme downgrade: %q", reqHTTP.Header.Get("PRIVATE-TOKEN"))
+	}
+}
+
 func TestSSRFDialerAllIPValidation(t *testing.T) {
 	client := NewClient(time.Second)
 
@@ -220,7 +276,8 @@ func TestSSRFDialerAllIPValidation(t *testing.T) {
 	dialed := false
 	client.dialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
 		dialed = true
-		c1, _ := net.Pipe()
+		c1, c2 := net.Pipe()
+		defer c2.Close()
 		return c1, nil
 	}
 

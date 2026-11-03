@@ -78,7 +78,7 @@ func (s *Store) Get(key string, dst any) (bool, error) {
 
 // Put writes an entry atomically to the cache store with the current timestamp.
 func (s *Store) Put(key string, val any) error {
-	if err := os.MkdirAll(s.dir, 0755); err != nil {
+	if err := os.MkdirAll(s.dir, 0700); err != nil {
 		return fmt.Errorf("create cache directory %s: %w", s.dir, err)
 	}
 
@@ -105,6 +105,18 @@ func (s *Store) Put(key string, val any) error {
 		return fmt.Errorf("create temp cache file in %s: %w", s.dir, err)
 	}
 	tmpName := tmpFile.Name()
+
+	if err := tmpFile.Chmod(0600); err != nil {
+		closeErr := tmpFile.Close()
+		cleanupErr := os.Remove(tmpName)
+		if cleanupErr != nil && !os.IsNotExist(cleanupErr) {
+			return fmt.Errorf("chmod temp cache file %s: %w (close: %v, cleanup: %v)", tmpName, err, closeErr, cleanupErr)
+		}
+		if closeErr != nil {
+			return fmt.Errorf("chmod temp cache file %s: %w (close: %v)", tmpName, err, closeErr)
+		}
+		return fmt.Errorf("chmod temp cache file %s: %w", tmpName, err)
+	}
 
 	if _, err := tmpFile.Write(data); err != nil {
 		closeErr := tmpFile.Close()

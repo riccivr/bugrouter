@@ -1,7 +1,9 @@
 package cache
 
 import (
+	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 )
@@ -29,6 +31,17 @@ func TestDiskCacheHitAndMiss(t *testing.T) {
 	val := sampleData{Name: "express", URL: "https://github.com/expressjs/express"}
 	if err := store.Put("express", val); err != nil {
 		t.Fatalf("unexpected error on Put: %v", err)
+	}
+
+	info, err := os.Stat(store.keyPath("express"))
+	if err != nil {
+		t.Fatalf("Stat cache file failed: %v", err)
+	}
+	if runtime.GOOS != "windows" {
+		perm := info.Mode().Perm()
+		if perm != 0600 {
+			t.Errorf("cache file mode = %o, want 0600", perm)
+		}
 	}
 
 	hit, err = store.Get("express", &out)

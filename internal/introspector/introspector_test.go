@@ -446,7 +446,9 @@ func TestIntrospectTokenHostGuards(t *testing.T) {
 			URL:      ts.URL + "/untrusted/repo/issues",
 		},
 	}
-	_, _ = intro.Introspect(context.Background(), untrustedGHTarget)
+	if schema, err := intro.Introspect(context.Background(), untrustedGHTarget); !errors.Is(err, ErrNoTemplateFound) || schema != nil {
+		t.Fatalf("expected ErrNoTemplateFound, got: %v", err)
+	}
 	if receivedAuth != "" {
 		t.Errorf("ambient GITHUB_TOKEN leaked to untrusted custom host: %q", receivedAuth)
 	}
@@ -460,7 +462,9 @@ func TestIntrospectTokenHostGuards(t *testing.T) {
 			URL:      ts.URL + "/untrusted/project/-/issues",
 		},
 	}
-	_, _ = intro.Introspect(context.Background(), untrustedGLTarget)
+	if schema, err := intro.Introspect(context.Background(), untrustedGLTarget); !errors.Is(err, ErrNoTemplateFound) || schema != nil {
+		t.Fatalf("expected ErrNoTemplateFound, got: %v", err)
+	}
 	if receivedPrivateToken != "" {
 		t.Errorf("ambient GITLAB_TOKEN leaked to untrusted custom host: %q", receivedPrivateToken)
 	}
@@ -475,7 +479,9 @@ func TestIntrospectTokenHostGuards(t *testing.T) {
 		},
 	}
 	receivedAuth = ""
-	_, _ = intro.Introspect(context.Background(), untrustedGiteaTarget)
+	if schema, err := intro.Introspect(context.Background(), untrustedGiteaTarget); !errors.Is(err, ErrNoTemplateFound) || schema != nil {
+		t.Fatalf("expected ErrNoTemplateFound, got: %v", err)
+	}
 	if receivedAuth != "" {
 		t.Errorf("ambient GITEA_TOKEN leaked to untrusted custom host: %q", receivedAuth)
 	}
@@ -483,21 +489,27 @@ func TestIntrospectTokenHostGuards(t *testing.T) {
 	// Explicit override works even on untrusted hosts
 	t.Setenv("BUGROUTER_GITHUB_TOKEN", "explicit-authorized-key")
 	receivedAuth = ""
-	_, _ = intro.Introspect(context.Background(), untrustedGHTarget)
+	if schema, err := intro.Introspect(context.Background(), untrustedGHTarget); !errors.Is(err, ErrNoTemplateFound) || schema != nil {
+		t.Fatalf("expected ErrNoTemplateFound, got: %v", err)
+	}
 	if receivedAuth != "Bearer explicit-authorized-key" {
 		t.Errorf("expected explicit BUGROUTER_GITHUB_TOKEN to be sent, got: %q", receivedAuth)
 	}
 
 	t.Setenv("BUGROUTER_GITLAB_TOKEN", "explicit-gl-authorized-key")
 	receivedPrivateToken = ""
-	_, _ = intro.Introspect(context.Background(), untrustedGLTarget)
+	if schema, err := intro.Introspect(context.Background(), untrustedGLTarget); !errors.Is(err, ErrNoTemplateFound) || schema != nil {
+		t.Fatalf("expected ErrNoTemplateFound, got: %v", err)
+	}
 	if receivedPrivateToken != "explicit-gl-authorized-key" {
 		t.Errorf("expected explicit BUGROUTER_GITLAB_TOKEN to be sent, got: %q", receivedPrivateToken)
 	}
 
 	t.Setenv("BUGROUTER_GITEA_TOKEN", "explicit-gt-authorized-key")
 	receivedAuth = ""
-	_, _ = intro.Introspect(context.Background(), untrustedGiteaTarget)
+	if schema, err := intro.Introspect(context.Background(), untrustedGiteaTarget); !errors.Is(err, ErrNoTemplateFound) || schema != nil {
+		t.Fatalf("expected ErrNoTemplateFound, got: %v", err)
+	}
 	if receivedAuth != "token explicit-gt-authorized-key" {
 		t.Errorf("expected explicit BUGROUTER_GITEA_TOKEN to be sent, got: %q", receivedAuth)
 	}

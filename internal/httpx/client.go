@@ -141,32 +141,9 @@ func NewClient(timeout time.Duration) *Client {
 				return errors.New("stopped after 5 redirects")
 			}
 
-			if len(via) > 0 && !strings.EqualFold(req.URL.Hostname(), via[0].URL.Hostname()) {
+			if len(via) > 0 && (!strings.EqualFold(req.URL.Scheme, via[0].URL.Scheme) || !strings.EqualFold(req.URL.Host, via[0].URL.Host)) {
 				req.Header.Del("Authorization")
 				req.Header.Del("PRIVATE-TOKEN")
-			}
-
-			if !c.allowPrivateHosts {
-				host := req.URL.Hostname()
-				parsedIP := net.ParseIP(host)
-				if parsedIP != nil {
-					if isBlockedIP(parsedIP) {
-						return fmt.Errorf("blocked connection to private or loopback address %s", parsedIP)
-					}
-				} else {
-					lookup := net.DefaultResolver.LookupIP
-					if c.lookupIP != nil {
-						lookup = c.lookupIP
-					}
-					ips, lookupErr := lookup(req.Context(), "ip", host)
-					if lookupErr == nil {
-						for _, ip := range ips {
-							if isBlockedIP(ip) {
-								return fmt.Errorf("blocked connection to private or loopback address %s", ip)
-							}
-						}
-					}
-				}
 			}
 
 			return nil
