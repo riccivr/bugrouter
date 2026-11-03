@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1972,5 +1973,200 @@ replace github.com/gin-gonic/gin => github.com/myfork/gin v1.9.2
 	}
 	if !foundAudit {
 		t.Errorf("expected audit event patch.scanned for target %q, got: %+v", stackDir, events)
+	}
+}
+
+func TestConcurrentServicesUpsertAndDelete(t *testing.T) {
+	tempDir := t.TempDir()
+	servicesFile := filepath.Join(tempDir, "services.json")
+	auditFile := filepath.Join(tempDir, "audit.jsonl")
+	auditLogger := NewAuditLogger(auditFile)
+
+	tsWebhook := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(5 * time.Millisecond)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer tsWebhook.Close()
+
+	testClient := httpx.NewTestClient(0)
+	notifier := NewWebhookNotifier(testClient, tsWebhook.URL, "test-secret")
+
+	srv := NewServer(":0", nil, nil).
+		WithServicesFile(servicesFile).
+		WithAuditLogger(auditLogger).
+		WithWebhookNotifier(notifier)
+
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	const (
+		numPersistent = 15
+		numEphemeral  = 15
+		numReaders    = 10
+		readRounds    = 20
+	)
+
+	var wg sync.WaitGroup
+
+	for i := 0; i < numPersistent; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			svcName := fmt.Sprintf("svc-persist-%d", id)
+			entry := resolver.ServiceEntry{
+				Name:          svcName,
+				RepositoryURL: fmt.Sprintf("https://github.com/example/%s", svcName),
+			}
+			body, err := json.Marshal(entry)
+			if err != nil {
+				t.Errorf("marshal %s: %v", svcName, err)
+				return
+			}
+
+			for round := 0; round < 2; round++ {
+				req, err := http.NewRequest(http.MethodPost, ts.URL+"/api/v1/services", bytes.NewReader(body))
+				if err != nil {
+					t.Errorf("new post request for %s: %v", svcName, err)
+					return
+				}
+				req.Header.Set("Content-Type", "application/json")
+				req.Header.Set("X-Bugrouter-Request", "1")
+
+				resp, err := ts.Client().Do(req)
+				if err != nil {
+					t.Errorf("post %s failed: %v", svcName, err)
+					return
+				}
+				resp.Body.Close()
+				if resp.StatusCode != http.StatusOK {
+					t.Errorf("post %s status = %d, want 200", svcName, resp.StatusCode)
+					return
+				}
+			}
+		}(i)
+	}
+
+	for i := 0; i < numEphemeral; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			svcName := fmt.Sprintf("svc-ephemeral-%d", id)
+			entry := resolver.ServiceEntry{
+				Name:          svcName,
+				RepositoryURL: fmt.Sprintf("https://github.com/example/%s", svcName),
+			}
+			body, err := json.Marshal(entry)
+			if err != nil {
+				t.Errorf("marshal %s: %v", svcName, err)
+				return
+			}
+
+			reqPost, err := http.NewRequest(http.MethodPost, ts.URL+"/api/v1/services", bytes.NewReader(body))
+			if err != nil {
+				t.Errorf("new post ephemeral request: %v", err)
+				return
+			}
+			reqPost.Header.Set("Content-Type", "application/json")
+			reqPost.Header.Set("X-Bugrouter-Request", "1")
+
+			respPost, err := ts.Client().Do(reqPost)
+			if err != nil {
+				t.Errorf("post ephemeral %s failed: %v", svcName, err)
+				return
+			}
+			respPost.Body.Close()
+			if respPost.StatusCode != http.StatusOK {
+				t.Errorf("post ephemeral %s status = %d, want 200", svcName, respPost.StatusCode)
+				return
+			}
+
+			reqDel, err := http.NewRequest(http.MethodDelete, ts.URL+"/api/v1/services/"+svcName, nil)
+			if err != nil {
+				t.Errorf("new delete ephemeral request: %v", err)
+				return
+			}
+			reqDel.Header.Set("X-Bugrouter-Request", "1")
+
+			respDel, err := ts.Client().Do(reqDel)
+			if err != nil {
+				t.Errorf("delete ephemeral %s failed: %v", svcName, err)
+				return
+			}
+			respDel.Body.Close()
+			if respDel.StatusCode != http.StatusOK {
+				t.Errorf("delete ephemeral %s status = %d, want 200", svcName, respDel.StatusCode)
+				return
+			}
+		}(i)
+	}
+
+	for i := 0; i < numReaders; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for r := 0; r < readRounds; r++ {
+				resp, err := ts.Client().Get(ts.URL + "/api/v1/services")
+				if err != nil {
+					t.Errorf("get services failed: %v", err)
+					return
+				}
+				var entries []resolver.ServiceEntry
+				decodeErr := json.NewDecoder(resp.Body).Decode(&entries)
+				resp.Body.Close()
+				if resp.StatusCode != http.StatusOK {
+					t.Errorf("get services status = %d, want 200", resp.StatusCode)
+					return
+				}
+				if decodeErr != nil {
+					t.Errorf("decode get services response: %v", decodeErr)
+					return
+				}
+				for _, entry := range entries {
+					if entry.Name == "" {
+						t.Errorf("service entry with empty name: %+v", entry)
+					}
+				}
+			}
+		}()
+	}
+
+	wg.Wait()
+
+	resp, err := ts.Client().Get(ts.URL + "/api/v1/services")
+	if err != nil {
+		t.Fatalf("final GET /api/v1/services failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("final GET status = %d, want 200", resp.StatusCode)
+	}
+
+	var finalServices []resolver.ServiceEntry
+	if err := json.NewDecoder(resp.Body).Decode(&finalServices); err != nil {
+		t.Fatalf("decode final services: %v", err)
+	}
+
+	if len(finalServices) != numPersistent {
+		t.Fatalf("expected %d persisted services, got %d", numPersistent, len(finalServices))
+	}
+
+	persistedMap := make(map[string]bool)
+	for _, s := range finalServices {
+		persistedMap[s.Name] = true
+	}
+
+	for i := 0; i < numPersistent; i++ {
+		name := fmt.Sprintf("svc-persist-%d", i)
+		if !persistedMap[name] {
+			t.Errorf("missing persistent service %s", name)
+		}
+	}
+
+	for i := 0; i < numEphemeral; i++ {
+		name := fmt.Sprintf("svc-ephemeral-%d", i)
+		if persistedMap[name] {
+			t.Errorf("ephemeral service %s should have been deleted", name)
+		}
 	}
 }

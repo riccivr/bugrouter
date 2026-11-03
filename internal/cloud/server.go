@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/riccivr/bugrouter/internal/adapter"
@@ -43,6 +44,7 @@ type Server struct {
 	httpClient      *httpx.Client
 	stackDir        string
 	servicesPath    string
+	servicesMu      sync.Mutex
 	patchStore      *adapter.PatchStore
 	parkedStore     *adapter.ParkedStore
 }
@@ -268,6 +270,9 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleListServices(w http.ResponseWriter, r *http.Request) {
+	s.servicesMu.Lock()
+	defer s.servicesMu.Unlock()
+
 	if s.servicesPath == "" {
 		w.Header().Set("Content-Type", "application/json")
 		if _, err := w.Write([]byte("[]")); err != nil {
@@ -340,31 +345,37 @@ func (s *Server) handleUpsertService(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Load existing registry or initialize empty
-	var reg resolver.OrgCloudRegistry
-	if data, err := os.ReadFile(s.servicesPath); err == nil {
-		if unmarshalErr := json.Unmarshal(data, &reg); unmarshalErr != nil {
-			http.Error(w, fmt.Sprintf("read existing services file: %v", unmarshalErr), http.StatusInternalServerError)
-			return
-		}
-	}
+	if err := func() error {
+		s.servicesMu.Lock()
+		defer s.servicesMu.Unlock()
 
-	// Upsert entry by name (case-insensitive)
-	found := false
-	for i, existing := range reg.Services {
-		if strings.EqualFold(existing.Name, entry.Name) {
-			reg.Services[i] = entry
-			found = true
-			break
+		var reg resolver.OrgCloudRegistry
+		if data, err := os.ReadFile(s.servicesPath); err == nil {
+			if unmarshalErr := json.Unmarshal(data, &reg); unmarshalErr != nil {
+				return fmt.Errorf("read existing services file: %w", unmarshalErr)
+			}
+		} else if !os.IsNotExist(err) {
+			return fmt.Errorf("read existing services file: %w", err)
 		}
-	}
-	if !found {
-		reg.Services = append(reg.Services, entry)
-	}
 
-	// Write atomically with 0600 permissions
-	if err := writeRegistryAtomic(s.servicesPath, &reg); err != nil {
-		http.Error(w, fmt.Sprintf("save services: %v", err), http.StatusInternalServerError)
+		found := false
+		for i, existing := range reg.Services {
+			if strings.EqualFold(existing.Name, entry.Name) {
+				reg.Services[i] = entry
+				found = true
+				break
+			}
+		}
+		if !found {
+			reg.Services = append(reg.Services, entry)
+		}
+
+		if err := writeRegistryAtomic(s.servicesPath, &reg); err != nil {
+			return fmt.Errorf("save services: %w", err)
+		}
+		return nil
+	}(); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
@@ -415,39 +426,50 @@ func (s *Server) handleDeleteService(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	data, err := os.ReadFile(s.servicesPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			http.Error(w, fmt.Sprintf("service %q not found", name), http.StatusNotFound)
-			return
+	var notFound bool
+	if err := func() error {
+		s.servicesMu.Lock()
+		defer s.servicesMu.Unlock()
+
+		data, err := os.ReadFile(s.servicesPath)
+		if err != nil {
+			if os.IsNotExist(err) {
+				notFound = true
+				return nil
+			}
+			return fmt.Errorf("read services file: %w", err)
 		}
-		http.Error(w, fmt.Sprintf("read services file: %v", err), http.StatusInternalServerError)
+
+		var reg resolver.OrgCloudRegistry
+		if err := json.Unmarshal(data, &reg); err != nil {
+			return fmt.Errorf("unmarshal services: %w", err)
+		}
+
+		found := false
+		var updated []resolver.ServiceEntry
+		for _, existing := range reg.Services {
+			if strings.EqualFold(existing.Name, name) {
+				found = true
+				continue
+			}
+			updated = append(updated, existing)
+		}
+		if !found {
+			notFound = true
+			return nil
+		}
+
+		reg.Services = updated
+		if err := writeRegistryAtomic(s.servicesPath, &reg); err != nil {
+			return fmt.Errorf("save services: %w", err)
+		}
+		return nil
+	}(); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-
-	var reg resolver.OrgCloudRegistry
-	if err := json.Unmarshal(data, &reg); err != nil {
-		http.Error(w, fmt.Sprintf("unmarshal services: %v", err), http.StatusInternalServerError)
-		return
-	}
-
-	found := false
-	var updated []resolver.ServiceEntry
-	for _, existing := range reg.Services {
-		if strings.EqualFold(existing.Name, name) {
-			found = true
-			continue
-		}
-		updated = append(updated, existing)
-	}
-	if !found {
+	if notFound {
 		http.Error(w, fmt.Sprintf("service %q not found", name), http.StatusNotFound)
-		return
-	}
-
-	reg.Services = updated
-	if err := writeRegistryAtomic(s.servicesPath, &reg); err != nil {
-		http.Error(w, fmt.Sprintf("save services: %v", err), http.StatusInternalServerError)
 		return
 	}
 
