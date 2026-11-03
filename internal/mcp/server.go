@@ -651,13 +651,20 @@ func (s *Server) toolDefinitions() []map[string]any {
 		},
 		{
 			"name":        "verify_reproduction",
-			"description": "Executes a bounded reproduction command, captures and scrubs stdout/stderr, extracts faulting package candidates, and returns a deterministic VerificationProof.",
+			"description": "Executes a bounded reproduction command, captures and scrubs stdout/stderr, extracts faulting package candidates, and returns a deterministic VerificationProof. Supplying 'args' is preferred for safe direct execution without shell interpretation.",
 			"inputSchema": map[string]any{
 				"type": "object",
 				"properties": map[string]any{
 					"command": map[string]any{
 						"type":        "string",
-						"description": "Reproduction shell command string to execute",
+						"description": "Reproduction shell command string to execute (fallback if args is omitted)",
+					},
+					"args": map[string]any{
+						"type": "array",
+						"items": map[string]any{
+							"type": "string",
+						},
+						"description": "Tokenized command arguments for direct execution without shell interpretation (preferred)",
 					},
 					"timeout_seconds": map[string]any{
 						"type":        "integer",
@@ -668,7 +675,6 @@ func (s *Server) toolDefinitions() []map[string]any {
 						"description": "Optional expected non-zero exit code to confirm reproduction",
 					},
 				},
-				"required": []string{"command"},
 			},
 		},
 		{
@@ -1469,9 +1475,10 @@ func (s *Server) handleToolCall(ctx context.Context, params toolCallParams, out 
 
 	case "verify_reproduction":
 		var args struct {
-			Command        string `json:"command"`
-			TimeoutSeconds int    `json:"timeout_seconds"`
-			ExpectExit     int    `json:"expect_exit"`
+			Command        string   `json:"command"`
+			Args           []string `json:"args"`
+			TimeoutSeconds int      `json:"timeout_seconds"`
+			ExpectExit     int      `json:"expect_exit"`
 		}
 		if err := json.Unmarshal(params.Arguments, &args); err != nil {
 			return toolCallResult{
@@ -1479,9 +1486,9 @@ func (s *Server) handleToolCall(ctx context.Context, params toolCallParams, out 
 				IsError: true,
 			}
 		}
-		if strings.TrimSpace(args.Command) == "" {
+		if len(args.Args) == 0 && strings.TrimSpace(args.Command) == "" {
 			return toolCallResult{
-				Content: []toolContent{{Type: "text", Text: "command parameter cannot be empty"}},
+				Content: []toolContent{{Type: "text", Text: "either args or command parameter must be provided"}},
 				IsError: true,
 			}
 		}
@@ -1493,6 +1500,7 @@ func (s *Server) handleToolCall(ctx context.Context, params toolCallParams, out 
 
 		proof, err := verifier.Verify(ctx, verifier.VerifyOptions{
 			Command:    args.Command,
+			Args:       args.Args,
 			Timeout:    timeout,
 			ExpectExit: args.ExpectExit,
 		})

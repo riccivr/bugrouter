@@ -81,6 +81,31 @@ func TestScrub(t *testing.T) {
 			in:   "Stack trace: /Users/bob/workspace/app.go:42",
 			want: "Stack trace: ~/workspace/app.go:42",
 		},
+		{
+			name: "windows home path backslashes",
+			in:   `Crash log at C:\Users\Administrator\AppData\Local\Temp\crash.log`,
+			want: `Crash log at ~\AppData\Local\Temp\crash.log`,
+		},
+		{
+			name: "windows home path forward slashes",
+			in:   "Error reading c:/Users/alice/workspace/main.go",
+			want: "Error reading ~/workspace/main.go",
+		},
+		{
+			name: "google api key",
+			in:   "GOOGLE_API_KEY=AIzaSyD12345678901234567890123456789012",
+			want: "GOOGLE_API_KEY=[REDACTED_GCP_KEY]",
+		},
+		{
+			name: "jwt token",
+			in:   "token: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c",
+			want: "token: [REDACTED_JWT]",
+		},
+		{
+			name: "azure storage account key",
+			in:   "DefaultEndpointsProtocol=https;AccountName=myacc;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;EndpointSuffix=core.windows.net",
+			want: "DefaultEndpointsProtocol=https;AccountName=myacc;AccountKey=[REDACTED_AZURE_KEY];EndpointSuffix=core.windows.net",
+		},
 	}
 
 	for _, tc := range tests {

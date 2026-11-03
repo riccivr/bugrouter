@@ -23,6 +23,7 @@ const maxVerifyOutputBytes = 256 * 1024
 // VerifyOptions configures a bounded reproduction run.
 type VerifyOptions struct {
 	Command    string        // Command string executed via sh -c (or cmd /C on Windows)
+	Args       []string      // Optional tokenized arguments for direct execution without shell interpretation
 	WorkDir    string        // Optional working directory
 	Timeout    time.Duration // Default: 15 * time.Second
 	ExpectExit int           // Optional expected exit code; if 0, any non-zero exit code is considered reproduced
@@ -74,24 +75,43 @@ func (b *boundedBuffer) String() string {
 // Verify executes a bounded reproduction command, captures/scrubs output, extracts faulting
 // package candidates, and returns a deterministic VerificationProof.
 func Verify(ctx context.Context, opts VerifyOptions) (*VerificationProof, error) {
-	trimmedCmd := strings.TrimSpace(opts.Command)
-	if trimmedCmd == "" {
-		return nil, errors.New("command cannot be empty")
-	}
+	var (
+		cmd        *exec.Cmd
+		displayCmd string
+	)
 
 	timeout := opts.Timeout
 	if timeout <= 0 {
 		timeout = 15 * time.Second
 	}
 
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	runCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	var cmd *exec.Cmd
-	if runtime.GOOS == "windows" {
-		cmd = exec.CommandContext(runCtx, "cmd", "/C", trimmedCmd)
+	if len(opts.Args) > 0 {
+		if strings.TrimSpace(opts.Args[0]) == "" {
+			return nil, errors.New("command argument cannot be empty")
+		}
+		cmd = exec.CommandContext(runCtx, opts.Args[0], opts.Args[1:]...)
+		if trimmedCmd := strings.TrimSpace(opts.Command); trimmedCmd != "" {
+			displayCmd = trimmedCmd
+		} else {
+			displayCmd = strings.Join(opts.Args, " ")
+		}
 	} else {
-		cmd = exec.CommandContext(runCtx, "sh", "-c", trimmedCmd)
+		trimmedCmd := strings.TrimSpace(opts.Command)
+		if trimmedCmd == "" {
+			return nil, errors.New("command cannot be empty")
+		}
+		displayCmd = trimmedCmd
+		if runtime.GOOS == "windows" {
+			cmd = exec.CommandContext(runCtx, "cmd", "/C", trimmedCmd)
+		} else {
+			cmd = exec.CommandContext(runCtx, "sh", "-c", trimmedCmd)
+		}
 	}
 
 	if strings.TrimSpace(opts.WorkDir) != "" {
@@ -133,7 +153,7 @@ func Verify(ctx context.Context, opts VerifyOptions) (*VerificationProof, error)
 	}
 
 	rawOutput := outBuf.String()
-	scrubbedCmd := string(scrubber.Scrub(trimmedCmd))
+	scrubbedCmd := string(scrubber.Scrub(displayCmd))
 	scrubbedOutput := scrubber.Scrub(rawOutput)
 
 	candidates := resolver.ExtractTargetsFromLog(rawOutput)

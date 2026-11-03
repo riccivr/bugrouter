@@ -91,11 +91,30 @@ func (s *PatchStore) Record(dep, ecosystem, patchTarget, manifestFile, upstreamU
 		}
 	}
 
-	b := make([]byte, 4)
-	if _, err := rand.Read(b); err != nil {
-		return nil, fmt.Errorf("generate patch id: %w", err)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	patches, err := s.readPatchesLocked()
+	if err != nil && !os.IsNotExist(err) {
+		return nil, fmt.Errorf("read patches: %w", err)
 	}
-	id := hex.EncodeToString(b)
+
+	existingIDs := make(map[string]bool, len(patches))
+	for _, p := range patches {
+		existingIDs[p.ID] = true
+	}
+
+	var id string
+	for {
+		b := make([]byte, 8)
+		if _, err := rand.Read(b); err != nil {
+			return nil, fmt.Errorf("generate patch id: %w", err)
+		}
+		id = hex.EncodeToString(b)
+		if !existingIDs[id] {
+			break
+		}
+	}
 
 	patch := DependencyPatch{
 		ID:               id,
@@ -107,14 +126,6 @@ func (s *PatchStore) Record(dep, ecosystem, patchTarget, manifestFile, upstreamU
 		UpstreamIssueURL: strings.TrimSpace(upstreamURL),
 		Reason:           reason,
 		Status:           "active",
-	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	patches, err := s.readPatchesLocked()
-	if err != nil && !os.IsNotExist(err) {
-		return nil, fmt.Errorf("read patches: %w", err)
 	}
 
 	// Prepend new patch to preserve descending order
@@ -147,7 +158,7 @@ func (s *PatchStore) List() ([]DependencyPatch, error) {
 	return patches, nil
 }
 
-// Remove deletes a patch from the ledger matching either its 8-char ID or dependency name.
+// Remove deletes a patch from the ledger matching either its 16-char ID or dependency name.
 func (s *PatchStore) Remove(idOrDep string) error {
 	needle := strings.TrimSpace(idOrDep)
 	if needle == "" {

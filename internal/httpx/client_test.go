@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -203,5 +204,74 @@ func TestClientStripsAuthHeadersOnCrossHostRedirect(t *testing.T) {
 	}
 	if capturedPrivateToken != "" {
 		t.Errorf("PRIVATE-TOKEN header leaked across hosts: %q", capturedPrivateToken)
+	}
+}
+
+func TestSSRFDialerAllIPValidation(t *testing.T) {
+	client := NewClient(time.Second)
+
+	client.lookupIP = func(ctx context.Context, network, host string) ([]net.IP, error) {
+		return []net.IP{
+			net.ParseIP("93.184.216.34"),
+			net.ParseIP("10.0.0.1"),
+		}, nil
+	}
+
+	dialed := false
+	client.dialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		dialed = true
+		c1, _ := net.Pipe()
+		return c1, nil
+	}
+
+	transport := client.httpClient.Transport.(*http.Transport)
+	_, err := transport.DialContext(context.Background(), "tcp", "example.com:80")
+	if err == nil {
+		t.Fatal("expected error blocking mixed DNS resolution containing private IP, got nil")
+	}
+	if !strings.Contains(err.Error(), "blocked connection to private or loopback address") {
+		t.Errorf("unexpected error message: %v", err)
+	}
+	if dialed {
+		t.Error("expected no dial attempt when any resolved IP is private")
+	}
+}
+
+func TestSSRFDialerSequentialFallback(t *testing.T) {
+	client := NewClient(time.Second)
+
+	client.lookupIP = func(ctx context.Context, network, host string) ([]net.IP, error) {
+		return []net.IP{
+			net.ParseIP("203.0.113.1"),
+			net.ParseIP("203.0.113.2"),
+		}, nil
+	}
+
+	var dialedAddrs []string
+	client.dialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		dialedAddrs = append(dialedAddrs, addr)
+		if strings.HasPrefix(addr, "203.0.113.1:") {
+			return nil, errors.New("connection refused")
+		}
+		c1, c2 := net.Pipe()
+		defer c2.Close()
+		return c1, nil
+	}
+
+	transport := client.httpClient.Transport.(*http.Transport)
+	conn, err := transport.DialContext(context.Background(), "tcp", "example.com:80")
+	if err != nil {
+		t.Fatalf("expected fallback connection to succeed, got error: %v", err)
+	}
+	defer conn.Close()
+
+	if len(dialedAddrs) != 2 {
+		t.Fatalf("expected 2 dialed addresses, got %d: %v", len(dialedAddrs), dialedAddrs)
+	}
+	if dialedAddrs[0] != "203.0.113.1:80" {
+		t.Errorf("dialedAddrs[0] = %q, want 203.0.113.1:80", dialedAddrs[0])
+	}
+	if dialedAddrs[1] != "203.0.113.2:80" {
+		t.Errorf("dialedAddrs[1] = %q, want 203.0.113.2:80", dialedAddrs[1])
 	}
 }

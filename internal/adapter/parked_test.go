@@ -42,8 +42,8 @@ func TestParkedStoreLifecycle(t *testing.T) {
 		t.Errorf("expected Park to execute in <100ms in test, took %v", elapsed)
 	}
 
-	if len(bug.ID) != 8 {
-		t.Errorf("expected 8-char hex ID, got %q (len=%d)", bug.ID, len(bug.ID))
+	if len(bug.ID) != 16 {
+		t.Errorf("expected 16-char hex ID, got %q (len=%d)", bug.ID, len(bug.ID))
 	}
 	if bug.Dependency != "sharp" {
 		t.Errorf("expected dependency sharp, got %q", bug.Dependency)
@@ -194,8 +194,8 @@ func TestPatchStoreLifecycle(t *testing.T) {
 		t.Fatalf("Record patch1 failed: %v", err)
 	}
 
-	if len(patch1.ID) != 8 {
-		t.Errorf("expected 8-char hex ID, got %q (len=%d)", patch1.ID, len(patch1.ID))
+	if len(patch1.ID) != 16 {
+		t.Errorf("expected 16-char hex ID, got %q (len=%d)", patch1.ID, len(patch1.ID))
 	}
 	if patch1.Status != "active" {
 		t.Errorf("expected status 'active', got %q", patch1.Status)

@@ -143,3 +143,28 @@ func TestBoundedBufferOverflow(t *testing.T) {
 		t.Errorf("expected capped string 'hello worl', got %q", buf.String())
 	}
 }
+
+func TestVerifyDirectArgsWithoutShell(t *testing.T) {
+	proof, err := Verify(context.Background(), VerifyOptions{
+		Args: []string{"echo", "literal;token", "$UNEXPANDED_VAR"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(string(proof.ScrubbedOutput), "literal;token") {
+		t.Errorf("expected literal semicolon to be output directly, got: %s", proof.ScrubbedOutput)
+	}
+	if !strings.Contains(string(proof.ScrubbedOutput), "$UNEXPANDED_VAR") {
+		t.Errorf("expected unexpanded shell variable, got: %s", proof.ScrubbedOutput)
+	}
+	if proof.Command != "echo literal;token $UNEXPANDED_VAR" {
+		t.Errorf("Command = %q, want expected joined args", proof.Command)
+	}
+}
+
+func TestVerifyEmptyArgsAndCommand(t *testing.T) {
+	_, err := Verify(context.Background(), VerifyOptions{})
+	if err == nil {
+		t.Fatal("expected error when both Args and Command are empty")
+	}
+}

@@ -43,6 +43,8 @@ type Client struct {
 	httpClient        *http.Client
 	maxBodyBytes      int64
 	allowPrivateHosts bool
+	lookupIP          func(ctx context.Context, network, host string) ([]net.IP, error)
+	dialContext       func(ctx context.Context, network, addr string) (net.Conn, error)
 }
 
 func isBlockedIP(ip net.IP) bool {
@@ -84,16 +86,25 @@ func NewClient(timeout time.Duration) *Client {
 			return nil, fmt.Errorf("parse address %s: %w", addr, err)
 		}
 
+		dialFn := dialer.DialContext
+		if c.dialContext != nil {
+			dialFn = c.dialContext
+		}
+
 		if !c.allowPrivateHosts {
 			parsedIP := net.ParseIP(host)
 			if parsedIP != nil {
 				if isBlockedIP(parsedIP) {
 					return nil, fmt.Errorf("blocked connection to private or loopback address %s", parsedIP)
 				}
-				return dialer.DialContext(ctx, network, addr)
+				return dialFn(ctx, network, addr)
 			}
 
-			ips, lookupErr := net.DefaultResolver.LookupIP(ctx, "ip", host)
+			lookup := net.DefaultResolver.LookupIP
+			if c.lookupIP != nil {
+				lookup = c.lookupIP
+			}
+			ips, lookupErr := lookup(ctx, "ip", host)
 			if lookupErr != nil {
 				return nil, fmt.Errorf("resolve host %s: %w", host, lookupErr)
 			}
@@ -107,11 +118,19 @@ func NewClient(timeout time.Duration) *Client {
 				}
 			}
 
-			targetAddr := net.JoinHostPort(ips[0].String(), port)
-			return dialer.DialContext(ctx, network, targetAddr)
+			var lastErr error
+			for _, ip := range ips {
+				targetAddr := net.JoinHostPort(ip.String(), port)
+				conn, dialErr := dialFn(ctx, network, targetAddr)
+				if dialErr == nil {
+					return conn, nil
+				}
+				lastErr = dialErr
+			}
+			return nil, lastErr
 		}
 
-		return dialer.DialContext(ctx, network, addr)
+		return dialFn(ctx, network, addr)
 	}
 
 	c.httpClient = &http.Client{
@@ -135,7 +154,11 @@ func NewClient(timeout time.Duration) *Client {
 						return fmt.Errorf("blocked connection to private or loopback address %s", parsedIP)
 					}
 				} else {
-					ips, lookupErr := net.DefaultResolver.LookupIP(req.Context(), "ip", host)
+					lookup := net.DefaultResolver.LookupIP
+					if c.lookupIP != nil {
+						lookup = c.lookupIP
+					}
+					ips, lookupErr := lookup(req.Context(), "ip", host)
 					if lookupErr == nil {
 						for _, ip := range ips {
 							if isBlockedIP(ip) {

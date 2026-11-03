@@ -17,10 +17,13 @@ var (
 	bearerRegex = regexp.MustCompile(`(?i)(authorization\s*[:=]\s*bearer\s+|bearer\s+)[a-zA-Z0-9_\-\.~=+/]+`)
 
 	// Known API key prefixes.
-	awsKeyRegex  = regexp.MustCompile(`\b(AKIA|ASIA)[0-9A-Z]{16}\b`)
-	githubRegex  = regexp.MustCompile(`\b(gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,})\b`)
-	apiKeysRegex = regexp.MustCompile(`\b(sk-[a-zA-Z0-9_\-]{20,}|rk_live_[a-zA-Z0-9]{20,}|sk_live_[a-zA-Z0-9]{20,})\b`)
-	slackRegex   = regexp.MustCompile(`\bxox[baprs]-[0-9a-zA-Z\-]{10,}\b`)
+	awsKeyRegex   = regexp.MustCompile(`\b(AKIA|ASIA)[0-9A-Z]{16}\b`)
+	githubRegex   = regexp.MustCompile(`\b(gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,})\b`)
+	apiKeysRegex  = regexp.MustCompile(`\b(sk-[a-zA-Z0-9_\-]{20,}|rk_live_[a-zA-Z0-9]{20,}|sk_live_[a-zA-Z0-9]{20,})\b`)
+	slackRegex    = regexp.MustCompile(`\bxox[baprs]-[0-9a-zA-Z\-]{10,}\b`)
+	gcpKeyRegex   = regexp.MustCompile(`\bAIza[0-9A-Za-z_-]{35}\b`)
+	jwtRegex      = regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b`)
+	azureKeyRegex = regexp.MustCompile(`(?i)(AccountKey=)[A-Za-z0-9+/=]{40,}`)
 
 	// Generic assignment statements in configuration files and command invocations.
 	genericSecretRegex = regexp.MustCompile(`(?i)\b([a-zA-Z0-9_-]*(?:api[_-]?key|secret|password|passwd|token|client[_-]?secret|access[_-]?key))\b(\s*[:=]\s*["']?)([^"'\s,;\[][^\s,;]*)`)
@@ -41,7 +44,8 @@ var (
 	connStringRegex = regexp.MustCompile(`([a-zA-Z0-9+.-]+://[^:/\s]+:)([^@\s]+)(@)`)
 
 	// Linux and macOS user home directory paths.
-	homePathRegex = regexp.MustCompile(`(/home/[a-zA-Z0-9._-]+|/Users/[a-zA-Z0-9._-]+)`)
+	homePathRegex    = regexp.MustCompile(`(/home/[a-zA-Z0-9._-]+|/Users/[a-zA-Z0-9._-]+)`)
+	winHomePathRegex = regexp.MustCompile(`(?i)[a-zA-Z]:[/\\]Users[/\\][a-zA-Z0-9._-]+`)
 )
 
 // Scrub deterministically redacts secrets, tokens, connection strings, and local username paths.
@@ -59,6 +63,9 @@ func Scrub(raw string) ScrubbedText {
 	s = githubRegex.ReplaceAllString(s, "[REDACTED_GITHUB_TOKEN]")
 	s = apiKeysRegex.ReplaceAllString(s, "[REDACTED_API_KEY]")
 	s = slackRegex.ReplaceAllString(s, "[REDACTED_SLACK_TOKEN]")
+	s = gcpKeyRegex.ReplaceAllString(s, "[REDACTED_GCP_KEY]")
+	s = jwtRegex.ReplaceAllString(s, "[REDACTED_JWT]")
+	s = azureKeyRegex.ReplaceAllString(s, "${1}[REDACTED_AZURE_KEY]")
 
 	// 4. Generic key/secret assignments
 	s = genericSecretRegex.ReplaceAllStringFunc(s, func(match string) string {
@@ -93,6 +100,7 @@ func Scrub(raw string) ScrubbedText {
 	s = connStringRegex.ReplaceAllString(s, "${1}[REDACTED_PASSWORD]${3}")
 
 	// 6. User home directory prefixes
+	s = winHomePathRegex.ReplaceAllString(s, "~")
 	s = homePathRegex.ReplaceAllString(s, "~")
 
 	return ScrubbedText(s)

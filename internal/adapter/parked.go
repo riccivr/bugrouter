@@ -76,7 +76,7 @@ func (s *ParkedStore) Park(dep, title, snippet, workaround, file string, related
 		return nil, HandoffPayload{}, errors.New("title is required")
 	}
 
-	b := make([]byte, 4)
+	b := make([]byte, 8)
 	if _, err := rand.Read(b); err != nil {
 		return nil, HandoffPayload{}, fmt.Errorf("generate parked id: %w", err)
 	}
@@ -250,7 +250,7 @@ func (s *ParkedStore) List() ([]*ParkedBug, error) {
 	return bugs, nil
 }
 
-// Get retrieves a single parked bug by its 8-char hex identifier.
+// Get retrieves a single parked bug by its 16-char hex identifier.
 func (s *ParkedStore) Get(id string) (*ParkedBug, error) {
 	if !IsValidDraftID(id) {
 		return nil, fmt.Errorf("invalid parked id %q", id)
