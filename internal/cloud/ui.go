@@ -183,7 +183,7 @@ const indexHTML = `<!DOCTYPE html>
 </head>
 <body>
   <header>
-    <h1>bugrouter <span>Cloud Control Plane</span> <span class="badge">CalVer 2026.10.0</span></h1>
+    <h1>bugrouter <span>Cloud Control Plane</span> <span class="badge">CalVer 2026.11.0</span></h1>
     <div style="display: flex; gap: 8px; align-items: center;">
       <input type="password" id="auth-token" placeholder="Auth Token" style="padding: 6px 10px; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; color: var(--text); font-size: 0.85rem;" onchange="saveToken(this.value)">
       <button class="btn btn-approve" onclick="openComposerModal()">New Guided Report</button>

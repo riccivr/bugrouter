@@ -28,7 +28,7 @@ This document tracks the long-term architectural trajectory, active implementati
 
 ## 2. Chronological Milestones Ledger (Milestones 1–10)
 
-All milestones below are fully implemented, verified with race-detector tests, and merged into the core engine under CalVer `2026.10.0`.
+All milestones below are fully implemented, verified with race-detector tests, and merged into the core engine under CalVer `2026.11.0`.
 
 ### Milestone 1: Core Foundation, Waterfall Resolver, Deterministic Scrubber [COMPLETED]
 - [x] **Spec #01: Zero-Dependency Core Resolver & Contract**: Bootstrapped CalVer versioning (`2026.10.0`), bounded `httpx.Client`, and initial `resolver.Target` abstraction.
@@ -127,4 +127,4 @@ All milestones below are fully implemented, verified with race-detector tests, a
 
 ## 3. Future & Planned Milestones
 
-*(All core milestones through Milestone 10 completed — v2026.10.0 General Availability)*
+*(All core milestones through Milestone 10 completed — v2026.11.0 General Availability)*

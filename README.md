@@ -68,7 +68,7 @@ The `bugrouter` CLI provides dedicated commands for every phase of the bug routi
 Displays the CalVer version, commit, and platform target:
 ```bash
 bugrouter version
-# Output: bugrouter 2026.10.0 (linux/amd64)
+# Output: bugrouter 2026.11.0 (linux/amd64)
 ```
 
 ### `bugrouter paths [--json]`
@@ -442,7 +442,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Audit dependency patches
-        uses: riccivr/bugrouter@2026.10.0
+        uses: riccivr/bugrouter@2026.11.0
         with:
           mode: 'patch-check'
           fail-on-revertable: 'true'
@@ -470,7 +470,7 @@ jobs:
           go test -v ./... > test-run.log 2>&1 || true
 
       - name: Triage crash logs
-        uses: riccivr/bugrouter@2026.10.0
+        uses: riccivr/bugrouter@2026.11.0
         if: failure()
         with:
           mode: 'triage'
