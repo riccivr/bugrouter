@@ -19,6 +19,7 @@ var (
 	// Known API key prefixes.
 	awsKeyRegex   = regexp.MustCompile(`\b(AKIA|ASIA)[0-9A-Z]{16}\b`)
 	githubRegex   = regexp.MustCompile(`\b(gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,})\b`)
+	gitlabRegex   = regexp.MustCompile(`\bglpat-[0-9a-zA-Z_-]{20,}\b`)
 	apiKeysRegex  = regexp.MustCompile(`\b(sk-[a-zA-Z0-9_\-]{20,}|rk_live_[a-zA-Z0-9]{20,}|sk_live_[a-zA-Z0-9]{20,})\b`)
 	slackRegex    = regexp.MustCompile(`\bxox[baprs]-[0-9a-zA-Z\-]{10,}\b`)
 	gcpKeyRegex   = regexp.MustCompile(`\bAIza[0-9A-Za-z_-]{35}\b`)
@@ -62,6 +63,7 @@ func Scrub(raw string) ScrubbedText {
 	// 3. Known API key patterns
 	s = awsKeyRegex.ReplaceAllString(s, "[REDACTED_AWS_KEY]")
 	s = githubRegex.ReplaceAllString(s, "[REDACTED_GITHUB_TOKEN]")
+	s = gitlabRegex.ReplaceAllString(s, "[REDACTED_GITLAB_TOKEN]")
 	s = apiKeysRegex.ReplaceAllString(s, "[REDACTED_API_KEY]")
 	s = slackRegex.ReplaceAllString(s, "[REDACTED_SLACK_TOKEN]")
 	s = gcpKeyRegex.ReplaceAllString(s, "[REDACTED_GCP_KEY]")
