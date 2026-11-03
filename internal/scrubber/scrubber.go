@@ -23,7 +23,8 @@ var (
 	slackRegex    = regexp.MustCompile(`\bxox[baprs]-[0-9a-zA-Z\-]{10,}\b`)
 	gcpKeyRegex   = regexp.MustCompile(`\bAIza[0-9A-Za-z_-]{35}\b`)
 	jwtRegex      = regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b`)
-	azureKeyRegex = regexp.MustCompile(`(?i)(AccountKey=)[A-Za-z0-9+/=]{40,}`)
+	azureKeyRegex = regexp.MustCompile(`(?i)(AccountKey=|SharedAccessKey=|SharedAccessSignature=)[A-Za-z0-9%+/=]{30,}`)
+	azureSasRegex = regexp.MustCompile(`(?i)([\?&]sig=)[A-Za-z0-9%+/=]{30,}`)
 
 	// Generic assignment statements in configuration files and command invocations.
 	genericSecretRegex = regexp.MustCompile(`(?i)\b([a-zA-Z0-9_-]*(?:api[_-]?key|secret|password|passwd|token|client[_-]?secret|access[_-]?key))\b(\s*[:=]\s*["']?)([^"'\s,;\[][^\s,;]*)`)
@@ -66,6 +67,7 @@ func Scrub(raw string) ScrubbedText {
 	s = gcpKeyRegex.ReplaceAllString(s, "[REDACTED_GCP_KEY]")
 	s = jwtRegex.ReplaceAllString(s, "[REDACTED_JWT]")
 	s = azureKeyRegex.ReplaceAllString(s, "${1}[REDACTED_AZURE_KEY]")
+	s = azureSasRegex.ReplaceAllString(s, "${1}[REDACTED_AZURE_KEY]")
 
 	// 4. Generic key/secret assignments
 	s = genericSecretRegex.ReplaceAllStringFunc(s, func(match string) string {

@@ -1,6 +1,7 @@
 package adapter
 
 import (
+	"encoding/hex"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -302,5 +303,74 @@ func TestPatchStoreLifecycle(t *testing.T) {
 	}
 	if len(finalList) != 5 {
 		t.Errorf("expected 5 concurrent patches, got %d", len(finalList))
+	}
+}
+
+// TestIDEntropyAssertion verifies that Draft, Parked, and Patch IDs provide 8 bytes (16 hex chars) of CSPRNG entropy.
+func TestIDEntropyAssertion(t *testing.T) {
+	tmpDir := t.TempDir()
+	parkStore := NewParkedStore(tmpDir)
+	patchStore := NewPatchStore(filepath.Join(tmpDir, "patches.json"))
+
+	const iterations = 50
+	seenIDs := make(map[string]bool)
+
+	for i := 0; i < iterations; i++ {
+		bug, _, err := parkStore.Park("dep", "title", "snippet", "workaround", "file.go", "")
+		if err != nil {
+			t.Fatalf("Park failed: %v", err)
+		}
+		if len(bug.ID) != 16 {
+			t.Fatalf("Park ID length = %d, want 16 hex chars (8 bytes)", len(bug.ID))
+		}
+		rawPark, err := hex.DecodeString(bug.ID)
+		if err != nil {
+			t.Fatalf("Park ID %q is not valid hex: %v", bug.ID, err)
+		}
+		if len(rawPark) != 8 {
+			t.Fatalf("Park ID decoded byte length = %d, want 8 bytes", len(rawPark))
+		}
+		if seenIDs[bug.ID] {
+			t.Fatalf("duplicate Park ID generated: %s", bug.ID)
+		}
+		seenIDs[bug.ID] = true
+
+		patch, err := patchStore.Record("dep", "npm", "target", "manifest", "url", "reason")
+		if err != nil {
+			t.Fatalf("Record failed: %v", err)
+		}
+		if len(patch.ID) != 16 {
+			t.Fatalf("Patch ID length = %d, want 16 hex chars (8 bytes)", len(patch.ID))
+		}
+		rawPatch, err := hex.DecodeString(patch.ID)
+		if err != nil {
+			t.Fatalf("Patch ID %q is not valid hex: %v", patch.ID, err)
+		}
+		if len(rawPatch) != 8 {
+			t.Fatalf("Patch ID decoded byte length = %d, want 8 bytes", len(rawPatch))
+		}
+		if seenIDs[patch.ID] {
+			t.Fatalf("duplicate Patch ID generated: %s", patch.ID)
+		}
+		seenIDs[patch.ID] = true
+
+		draftID, err := generateDraftID()
+		if err != nil {
+			t.Fatalf("generateDraftID failed: %v", err)
+		}
+		if len(draftID) != 16 {
+			t.Fatalf("Draft ID length = %d, want 16 hex chars (8 bytes)", len(draftID))
+		}
+		rawDraft, err := hex.DecodeString(draftID)
+		if err != nil {
+			t.Fatalf("Draft ID %q is not valid hex: %v", draftID, err)
+		}
+		if len(rawDraft) != 8 {
+			t.Fatalf("Draft ID decoded byte length = %d, want 8 bytes", len(rawDraft))
+		}
+		if seenIDs[draftID] {
+			t.Fatalf("duplicate Draft ID generated: %s", draftID)
+		}
+		seenIDs[draftID] = true
 	}
 }

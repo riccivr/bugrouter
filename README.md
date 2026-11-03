@@ -75,6 +75,26 @@ bugrouter version
 # Output: bugrouter 2026.10.0 (linux/amd64)
 ```
 
+### `bugrouter paths [--json]`
+Resolves and displays canonical local storage directories, cache locations, and configuration file paths:
+```bash
+# Print local storage and cache paths
+bugrouter paths
+
+# Output paths as machine-readable JSON
+bugrouter paths --json
+```
+
+### `bugrouter self-test [--json]`
+Executes an offline diagnostic self-test validating intrinsic self-resolution and credential scrubber redaction:
+```bash
+# Run self-test diagnostics
+bugrouter self-test
+
+# Output self-test results as structured JSON
+bugrouter self-test --json
+```
+
 ### `bugrouter resolve <target>`
 Resolves any package name, binary name, repository, or domain to its canonical tracker via the 6-layer waterfall:
 ```bash
@@ -194,6 +214,22 @@ bugrouter park sharp "v0.33.0 fails with SIGSEGV on musl alpine" \
 
 # Park and output machine-readable JSON handoff payload
 bugrouter park stripe "Webhook signature verification panic on malformed payload" --json
+```
+
+### `bugrouter parked <list|show|rm>`
+Manages and inspects the local parked bug breadcrumb queue:
+```bash
+# List active parked bugs in queue
+bugrouter parked list
+
+# Include triaged parked bugs in JSON output
+bugrouter parked list --all --json
+
+# Show detailed breadcrumb information for a parked bug
+bugrouter parked show <id> [--json]
+
+# Remove a parked bug from the queue
+bugrouter parked rm <id>
 ```
 
 ### `bugrouter patch <list|add|scan|check|rm>`

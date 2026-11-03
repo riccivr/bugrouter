@@ -106,6 +106,21 @@ func TestScrub(t *testing.T) {
 			in:   "DefaultEndpointsProtocol=https;AccountName=myacc;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;EndpointSuffix=core.windows.net",
 			want: "DefaultEndpointsProtocol=https;AccountName=myacc;AccountKey=[REDACTED_AZURE_KEY];EndpointSuffix=core.windows.net",
 		},
+		{
+			name: "windows home path appdata local",
+			in:   `Failed writing cache to C:\Users\alice\AppData\Local\bugrouter\cache.db`,
+			want: `Failed writing cache to ~\AppData\Local\bugrouter\cache.db`,
+		},
+		{
+			name: "azure shared access key",
+			in:   "Endpoint=sb://servicebus.windows.net/;SharedAccessKeyName=Root;SharedAccessKey=1234567890abcdef1234567890abcdef12345678=",
+			want: "Endpoint=sb://servicebus.windows.net/;SharedAccessKeyName=Root;SharedAccessKey=[REDACTED_AZURE_KEY]",
+		},
+		{
+			name: "azure sas url query",
+			in:   "https://myacc.blob.core.windows.net/container/blob.txt?sp=r&sig=abcdefghijklmnopqrstuvwxyz01234567890123456=&se=2026-12-31",
+			want: "https://myacc.blob.core.windows.net/container/blob.txt?sp=r&sig=[REDACTED_AZURE_KEY]&se=2026-12-31",
+		},
 	}
 
 	for _, tc := range tests {
